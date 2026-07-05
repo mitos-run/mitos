@@ -1,0 +1,97 @@
+{{- /*
+Control-plane egress lockdown (issue #704), opt-in via
+networkPolicy.controlPlane.enabled.
+
+Policy 1 selects the controller, console, and gateway and flips them to
+default-deny egress (any CiliumNetworkPolicy with an egress section does),
+enumerating the baseline flows: DNS with L7 visibility (the dns rules block is
+what lets Cilium's DNS proxy learn FQDN->IP mappings, required for the toFQDNs
+rule in policy 2), the kube-apiserver/host/remote-node entities (controller
+reconcile plus apiserver DNATs that land on node addresses), intra-namespace
+traffic (controller <-> forkd, gateway -> controller/console), and any
+deployment-specific rules passed through extraEgress verbatim.
+
+Policy 2 renders ONLY when console.onboarding.smtp.host is set: a console-only
+allow to that SMTP host and port, derived from the same values that configure
+the sender so the network allow can never drift from the sender config. It is
+scoped to the console alone so the controller and gateway gain no mail-relay
+egress (a compromised controller must not be able to exfiltrate over SMTP).
+It never renders without policy 1: a lone egress policy would itself flip the
+console to default-deny and cut it off from DNS, the database, and the
+apiserver.
+
+Requires the Cilium CNI (CiliumNetworkPolicy CRD), consistent with the
+NetworkPolicy-enforcing-CNI requirement in docs/threat-model.md.
+*/}}
+{{- if .Values.networkPolicy.controlPlane.enabled }}
+{{- $ns := include "mitos.namespace" . }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: mitos-control-plane-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: In
+        values:
+          - controller
+          - console
+          - gateway
+  egress:
+    # DNS with L7 visibility: the dns rules block routes lookups through
+    # Cilium's DNS proxy so FQDN-based rules (the SMTP policy below) can map
+    # names to IPs. Additive only: it grants no destinations beyond kube-dns.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - { port: "53", protocol: UDP }
+            - { port: "53", protocol: TCP }
+          rules:
+            dns:
+              - matchPattern: "*"
+    # kube-apiserver for controller reconcile; host and remote-node cover
+    # apiserver DNATs and controller-to-forkd traffic landing on node
+    # addresses.
+    - toEntities:
+        - kube-apiserver
+        - host
+        - remote-node
+    # Intra-namespace: controller <-> forkd, gateway -> controller/console,
+    # console -> in-namespace database.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: {{ $ns }}
+    {{- with .Values.networkPolicy.controlPlane.extraEgress }}
+    # Deployment-specific rules passed through verbatim.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- if .Values.console.onboarding.smtp.host }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: mitos-console-smtp-egress
+  namespace: {{ $ns }}
+  labels:
+    {{- include "mitos.labels" . | nindent 4 }}
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: console
+  egress:
+    - toFQDNs:
+        - matchName: {{ .Values.console.onboarding.smtp.host }}
+      toPorts:
+        - ports:
+            - { port: {{ .Values.console.onboarding.smtp.port | default 587 | quote }}, protocol: TCP }
+{{- end }}
+{{- end }}

@@ -68,18 +68,55 @@ func (r *SandboxReconciler) reconcileFromSandbox(ctx context.Context, fork *v1.S
 		return ctrl.Result{}, nil
 	}
 
+	// A fork whose source terminated or vanished is terminal (issue #698):
+	// never reconcile it again, so repeated reconciles are no-ops.
+	if meta.IsStatusConditionTrue(fork.Status.Conditions, "SourceTerminated") {
+		return ctrl.Result{}, nil
+	}
+
 	if fork.Status.ReadyReplicas >= replicas {
 		return ctrl.Result{}, nil
 	}
 
 	// Find the source sandbox (another v1 Sandbox, by source.fromSandbox.Name).
-	var source v1.Sandbox
-	if err := r.Get(ctx, client.ObjectKey{
+	sourceKey := client.ObjectKey{
 		Namespace: fork.Namespace,
 		Name:      fork.Spec.Source.FromSandbox.Name,
-	}, &source); err != nil {
-		logger.Error(err, "source sandbox not found", "source", fork.Spec.Source.FromSandbox.Name)
+	}
+	var source v1.Sandbox
+	err := r.Get(ctx, sourceKey, &source)
+	if apierrors.IsNotFound(err) && r.APIReader != nil {
+		// Authoritative re-check: the informer cache can lag a source created
+		// moments before its fork, and a cache miss must not terminally fail a
+		// fork whose source really exists.
+		err = r.APIReader.Get(ctx, sourceKey, &source)
+	}
+	if apierrors.IsNotFound(err) {
+		// The source object is gone (or never existed). Waiting can never
+		// succeed: a live fork copies the source VM's running memory. Stop the
+		// fan-out terminally instead of error-requeueing forever (issue #698).
+		return r.failForkSourceTerminal(ctx, fork, "SourceGone", fmt.Sprintf(
+			"source sandbox %q does not exist, so this fork's fan-out can never complete: a live fork copies the source VM's running memory, which is gone with the source.",
+			fork.Spec.Source.FromSandbox.Name))
+	}
+	if err != nil {
+		logger.Error(err, "get source sandbox failed", "source", fork.Spec.Source.FromSandbox.Name)
 		return ctrl.Result{}, err
+	}
+
+	// A source in a terminal phase can never become Ready again: its VM is
+	// reaped (Terminated) or never came up (Failed). A fork mid-Prepare when
+	// the parent dies converges here on its next pass. Stop the fan-out
+	// terminally rather than parking in the not-Ready wait below forever
+	// (issue #698).
+	if source.Status.Phase == v1.SandboxTerminated || source.Status.Phase == v1.SandboxFailed {
+		reason := "SourceTerminated"
+		if source.Status.Phase == v1.SandboxFailed {
+			reason = "SourceFailed"
+		}
+		return r.failForkSourceTerminal(ctx, fork, reason, fmt.Sprintf(
+			"source sandbox %q is in the terminal phase %s, so this fork's fan-out can never complete: a live fork copies the source VM's running memory, which no longer exists.",
+			source.Name, source.Status.Phase))
 	}
 
 	// Live-fork secret gate: duplicating guest memory duplicates any delivered
@@ -233,6 +270,136 @@ func (r *SandboxReconciler) reconcileFromSandbox(ctx context.Context, fork *v1.S
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// failForkSourceTerminal fails a fork TERMINALLY because its source sandbox is
+// in a terminal phase or gone (issue #698). Terminal applies to the FAN-OUT,
+// never to the born children: a child once activated is an INDEPENDENT
+// sandbox (its memory was copied at fork time and its VM runs regardless of
+// the source), so only the never-activated pending child pods are deleted
+// (they are owner-ref'd to the FORK, not the pool, so no pool machinery ever
+// replaces or releases them; left in place they hold their mitos.run/kvm and
+// memory requests forever). Then the terminal status is recorded, in one of
+// two honest shapes:
+//
+//   - No surviving children: the fork failed outright. Phase Failed, a True
+//     SourceTerminated condition plus a mirrored Ready=False (the gateway's
+//     failureReason reads the Ready condition message on a Failed sandbox, so
+//     the cause reaches the SDK caller instead of an eternal pending), and
+//     FinishedAt so the GC TTL pass reaps the fork like every other Failed
+//     sandbox.
+//   - Surviving children: the fan-out stopped short, but live sandboxes
+//     remain. The phase is NOT forced Failed and FinishedAt is NOT stamped:
+//     the GC TTL pass deletes Failed+FinishedAt sandboxes, and deleting the
+//     fork object would take the surviving children down through their owner
+//     refs. The phase keeps its fan-out meaning (Restoring: not every
+//     requested replica exists) and the SourceTerminated condition (mirrored
+//     on Ready=False, which was already False mid fan-out) is the
+//     authoritative "fan-out stopped" signal. ReadyReplicas and
+//     Status.Children keep the survivors.
+//
+// In both shapes the SourceTerminated condition short-circuits every later
+// reconcile, so this is written once and never requeued.
+func (r *SandboxReconciler) failForkSourceTerminal(ctx context.Context, fork *v1.Sandbox, reason, cause string) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Release the pending children BEFORE recording the terminal condition: if
+	// a delete fails the error requeues this whole path, and the
+	// condition-gated short-circuit above must never skip a partially done
+	// cleanup. Activated children (those backing a Status.Children entry, the
+	// same source of truth the fan-out loop records a completed child in) are
+	// never touched.
+	if err := r.deletePendingForkChildPods(ctx, fork); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	survivors := int32(len(fork.Status.Children))
+	replicas := effectiveReplicas(fork)
+	now := metav1.Now()
+
+	var message string
+	if survivors > 0 {
+		message = cause + fmt.Sprintf(
+			" The fan-out stopped at %d of %d children; the existing children keep running and are unaffected (an activated child is an independent sandbox holding its own copy of the source memory). The never-activated pending child pods were deleted to release their node resources. Fork a Ready sandbox to create more children.",
+			survivors, replicas)
+		fork.Status.ReadyReplicas = survivors
+	} else {
+		message = cause + " No child had been activated; this fork's pending child pods were deleted to release their node resources. Create a fresh sandbox from the pool and fork that instead."
+		fork.Status.Phase = v1.SandboxFailed
+		fork.Status.ReadyReplicas = 0
+		fork.Status.Children = nil
+		if fork.Status.FinishedAt == nil {
+			fork.Status.FinishedAt = &now
+		}
+	}
+	setCondition(&fork.Status.Conditions, metav1.Condition{
+		Type:               "SourceTerminated",
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: now,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: fork.Generation,
+	})
+	setCondition(&fork.Status.Conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: now,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: fork.Generation,
+	})
+	if err := r.Status().Update(ctx, fork); err != nil {
+		return ctrl.Result{}, err
+	}
+	logger.Info("fork fan-out stopped terminally: source is terminal or gone",
+		"fork", fork.Name, "source", fork.Spec.Source.FromSandbox.Name, "reason", reason, "survivors", survivors)
+	return ctrl.Result{}, nil // terminal: no requeue
+}
+
+// deletePendingForkChildPods deletes the fork's NEVER-ACTIVATED child husk
+// pods (matched by the huskForkLabel and re-checked against the fork's
+// controller owner ref) so their scheduler resources are released. A pod
+// backing a Status.Children entry is an activated, independent sandbox and is
+// never deleted here. Idempotent: a pod already terminating or gone is
+// skipped. The raw-forkd fork path creates no pods, so this is a no-op there.
+func (r *SandboxReconciler) deletePendingForkChildPods(ctx context.Context, fork *v1.Sandbox) error {
+	activated := make(map[string]bool, 2*len(fork.Status.Children))
+	for i := range fork.Status.Children {
+		// A husk fork child records Name = the stable slot name and SandboxID =
+		// the pod name (they coincide today); guard both so a future divergence
+		// can never mark an active pod pending.
+		activated[fork.Status.Children[i].Name] = true
+		activated[fork.Status.Children[i].SandboxID] = true
+	}
+	// List through the UNCACHED reader when available, mirroring the source
+	// lookup's cache-staleness guard above: a just-created pending pod the
+	// informer cache has not observed yet would be silently skipped by a
+	// cached list, and the SourceTerminated short-circuit means this cleanup
+	// never runs again, leaking the pod's KVM and memory requests forever.
+	lister := client.Reader(r.Client)
+	if r.APIReader != nil {
+		lister = r.APIReader
+	}
+	var pods corev1.PodList
+	if err := lister.List(ctx, &pods,
+		client.InNamespace(fork.Namespace),
+		client.MatchingLabels{huskForkLabel: fork.Name},
+	); err != nil {
+		return fmt.Errorf("list fork child pods of %s/%s: %w", fork.Namespace, fork.Name, err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if activated[pod.Name] {
+			continue
+		}
+		if !metav1.IsControlledBy(pod, fork) || pod.DeletionTimestamp != nil {
+			continue
+		}
+		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete fork child pod %s/%s: %w", pod.Namespace, pod.Name, err)
+		}
+	}
+	return nil
 }
 
 // forkPhase maps the fan-out readiness to a Sandbox phase: Ready when all

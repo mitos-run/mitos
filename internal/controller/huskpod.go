@@ -1573,6 +1573,7 @@ func (r *SandboxReconciler) markHuskPodClaimed(ctx context.Context, pod *corev1.
 	}
 	pod.Labels[huskClaimLabel] = claim.Name
 	stampClaimOrgLabel(pod, claim)
+	stampClaimRegionLabel(pod, claim)
 	if err := r.Patch(ctx, pod, patch); err != nil {
 		return fmt.Errorf("mark husk pod %s claimed by %s: %w", pod.Name, claim.Name, err)
 	}
@@ -1608,6 +1609,25 @@ func stampClaimOrgLabel(pod *corev1.Pod, claim *v1.Sandbox) {
 	pod.Labels[tenant.OrgLabelKey] = org
 }
 
+// stampClaimRegionLabel copies the claim's placement region (issue #712 phase
+// 0) onto the husk pod it wins at claim time, best-effort. A warm husk pod has
+// no region of its own before it is claimed (it is pre-created from a pool,
+// not a tree root); the claiming Sandbox's mitos.run/region label, when
+// present, is the tree root's true region, so this is the one point that fact
+// becomes visible on the pod the usage collector actually scrapes. Unlike the
+// org label, this is NOT gated by tenancy mode: a per-org namespace carries no
+// region information of its own, so the claim is always the source. A claim
+// with no region label (a single-value deployment, or a sandbox predating
+// this field) stamps nothing, leaving the pod's region empty rather than
+// forcing a default.
+func stampClaimRegionLabel(pod *corev1.Pod, claim *v1.Sandbox) {
+	region := claim.Labels[tenant.RegionLabelKey]
+	if region == "" {
+		return
+	}
+	pod.Labels[tenant.RegionLabelKey] = region
+}
+
 // unmarkHuskPodClaimed removes the mitos.run/claim label so a husk pod returns
 // to the dormant pool after a FAILED activation. The claim path stamps the label
 // BEFORE activating (the mutual-exclusion commit); without releasing it on
@@ -1631,6 +1651,10 @@ func (r *SandboxReconciler) unmarkHuskPodClaimed(ctx context.Context, pod *corev
 	if _, ok := tenant.OrgFromNamespace(pod.Namespace); !ok {
 		delete(pod.Labels, tenant.OrgLabelKey)
 	}
+	// The region label (issue #712 phase 0) is ALWAYS claim-stamped, never
+	// namespace-derived (see stampClaimRegionLabel), so a failed claim's
+	// region must always be released here, unlike the org label above.
+	delete(pod.Labels, tenant.RegionLabelKey)
 	if err := r.Patch(ctx, pod, patch); err != nil {
 		return fmt.Errorf("release husk pod %s claim label: %w", pod.Name, err)
 	}

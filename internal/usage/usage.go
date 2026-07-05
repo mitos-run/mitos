@@ -54,6 +54,11 @@ func DefaultConfig() Config {
 type Sample struct {
 	OrgID     string
 	SandboxID string
+	// Region is the placement value (issue #712 phase 0) this sandbox's tree
+	// root was created in, best-effort: empty for a single-value deployment
+	// or a sandbox predating this field. It never gates billability, unlike
+	// OrgID: an unresolved region simply carries forward as empty.
+	Region    string
 	Node      string
 	Timestamp time.Time
 
@@ -79,6 +84,12 @@ func (s Sample) memLevel() int64 { return s.MemUniqueBytes + s.MemSharedAmortize
 type UsageRecord struct {
 	OrgID     string
 	SandboxID string
+	// Region is the placement value (issue #712 phase 0) this sandbox's tree
+	// root was created in, best-effort: empty for a single-value deployment,
+	// a sandbox predating this field, or a record whose samples never carried
+	// one. It is NOT part of the idempotency key and carries no billing math
+	// change; it is a dimension for reporting/attribution only.
+	Region string
 	// Window is the window start (wall-clock aligned). It is the time component of
 	// the idempotency key.
 	Window time.Time
@@ -172,7 +183,7 @@ func Integrate(samples []Sample, cfg Config) []UsageRecord {
 				if egress == 0 && gpu == 0 {
 					continue
 				}
-				r = &UsageRecord{OrgID: win[len(win)-1].OrgID, SandboxID: sandbox, Window: w}
+				r = &UsageRecord{OrgID: win[len(win)-1].OrgID, Region: win[len(win)-1].Region, SandboxID: sandbox, Window: w}
 				recs[k] = r
 			}
 			r.EgressBytes += egress
@@ -215,7 +226,7 @@ func integrateInterval(recs map[recKey]*UsageRecord, sandbox string, a Sample, s
 		k := recKey{sandbox: sandbox, window: w}
 		r := recs[k]
 		if r == nil {
-			r = &UsageRecord{OrgID: a.OrgID, SandboxID: sandbox, Window: w}
+			r = &UsageRecord{OrgID: a.OrgID, Region: a.Region, SandboxID: sandbox, Window: w}
 			recs[k] = r
 		}
 		r.VCPUSeconds += float64(a.VCPUs) * secs
@@ -267,12 +278,17 @@ type Reconciliation struct {
 // A sandbox whose org cannot be resolved (orgOf returns false) is dropped from
 // the billable samples but still counted in the reconciliation totals so the
 // node's physical footprint stays auditable.
+//
+// regionOf resolves a sandbox id to its best-effort region (issue #712 phase
+// 0); an unresolved id or a source that never tracks region returns "". A nil
+// regionOf is treated as always returning "".
 func SamplesFromReport(
 	node string,
 	at time.Time,
 	report metering.Report,
 	orgOf func(sandboxID string) (orgID string, ok bool),
 	vcpusOf func(sandboxID string) int32,
+	regionOf func(sandboxID string) (region string),
 ) ([]Sample, Reconciliation) {
 	// Each template's shared-once representative is split evenly across the forks
 	// in that template group. Build per-template fork counts and the shared-once
@@ -300,6 +316,10 @@ func SamplesFromReport(
 		if !ok {
 			continue
 		}
+		var region string
+		if regionOf != nil {
+			region = regionOf(sb.ID)
+		}
 		var amortized int64
 		if info, present := tmpl[sb.Template]; present && info.forks > 0 {
 			amortized = info.sharedOnce / int64(info.forks)
@@ -313,6 +333,7 @@ func SamplesFromReport(
 		}
 		samples = append(samples, Sample{
 			OrgID:                   org,
+			Region:                  region,
 			SandboxID:               sb.ID,
 			Node:                    node,
 			Timestamp:               at,

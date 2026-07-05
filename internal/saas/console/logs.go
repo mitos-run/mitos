@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/saas"
 )
 
 // RawLogStreamer is the org-UNAWARE transport seam: it streams a sandbox's logs
@@ -41,6 +42,25 @@ func (a *AuthorizingLogStreamer) StreamLogs(ctx context.Context, orgID, sandboxI
 		return err // ErrNotFound for a missing OR cross-org sandbox
 	}
 	return a.raw.StreamRaw(ctx, sandboxID, sink)
+}
+
+// UnsupportedRawLogStreamer is the RawLogStreamer wired in a real cluster
+// deployment today: there is currently no forkd/guest RPC that exposes a
+// sandbox's stdout/stderr (unlike exec/fork/create, which map onto existing
+// CRD or HTTP operations, live log streaming has no real transport yet, a
+// documented control-plane gap). StreamRaw always reports ErrUnsupported,
+// which the console maps to HTTP 501, so GET .../logs/stream shows an honest
+// "not available yet" state instead of a permanently-empty stream that looks
+// like a successful, quiet sandbox.
+type UnsupportedRawLogStreamer struct{}
+
+// NewUnsupportedRawLogStreamer returns the always-ErrUnsupported raw log
+// streamer.
+func NewUnsupportedRawLogStreamer() UnsupportedRawLogStreamer { return UnsupportedRawLogStreamer{} }
+
+// StreamRaw always returns ErrUnsupported.
+func (UnsupportedRawLogStreamer) StreamRaw(context.Context, string, LogSink) error {
+	return ErrUnsupported
 }
 
 // MemRawLogStreamer is the in-memory RawLogStreamer tested default: a fixed
@@ -96,19 +116,46 @@ func (s *httpLogSink) Write(line []byte) error {
 	return nil
 }
 
-// handleSandboxLogs streams one sandbox's logs for the caller's org. The
-// AuthorizingLogStreamer checks ownership before the first write, so a cross-org
-// or missing id is reported as 404 with no content; once streaming starts the
-// status is already 200 and we simply stop on error.
+// handleSandboxLogs streams one sandbox's logs for the caller's org. Gated the
+// SAME way as inspect (handleInspectSandbox in console.go): the sandbox must
+// belong to the org (404 via c.failSandbox on a missing/cross-org id) and the
+// caller must hold PermReadOnly on its project, with a denial ALSO mapped to
+// 404 (not 403) so a caller without project access cannot tell an
+// out-of-reach sandbox apart from one that does not exist. Only once that
+// check passes does the AuthorizingLogStreamer's own org check run and the
+// raw transport get reached; once streaming starts the status is already 200
+// and we simply stop on error.
 func (c *Console) handleSandboxLogs(w http.ResponseWriter, r *http.Request) {
-	_, orgID, e, ok := c.caller(r)
+	accountID, orgID, e, ok := c.caller(r)
 	if !ok {
 		apierr.Encode(w, e)
 		return
 	}
+	id := r.PathValue("id")
+	sb, err := c.deps.Sandboxes.Get(r.Context(), orgID, id)
+	if err != nil {
+		c.failSandbox(w, err)
+		return
+	}
+	// The project tag gates access; a lookup error must fail closed, not fall
+	// back to the unassigned/org-wide path.
+	pid, err := c.deps.ResourceProjects.Project(r.Context(), orgID, "sandbox", sb.ID)
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox project assignment could not be read"))
+		return
+	}
+	canSee, accessErr := c.canAccessSandbox(r.Context(), accountID, orgID, pid, saas.PermReadOnly)
+	if accessErr != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox access check could not be completed"))
+		return
+	}
+	if !canSee {
+		apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
+			WithCause("the sandbox does not exist or is not accessible"))
+		return
+	}
 	sink := &httpLogSink{w: w}
-	err := c.deps.Logs.StreamLogs(r.Context(), orgID, r.PathValue("id"), sink)
-	if err != nil && !sink.wrote {
+	if err := c.deps.Logs.StreamLogs(r.Context(), orgID, id, sink); err != nil && !sink.wrote {
 		c.failSandbox(w, err)
 		return
 	}

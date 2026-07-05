@@ -76,13 +76,17 @@ func redact(err error) error {
 }
 
 // isUniqueViolation reports whether err is a Postgres unique-constraint
-// violation (SQLSTATE 23505), which we surface as saas.ErrConflict.
+// violation (SQLSTATE 23505), which we surface as saas.ErrConflict. This
+// matches on the SQLSTATE alone: pgconn.PgError.ConstraintName can be empty
+// for a real 23505 (e.g. a violation pgx did not resolve to a named
+// constraint), and requiring it here would wrongly stop PutAccount,
+// PutApiKey, and the credit-ledger inserts from recognizing a genuine
+// duplicate. The invitation-specific pending-uniqueness routing needs the
+// constraint name too; that lives in the separate isPendingInviteConflict
+// (invites.go), used only by CreateInvitation/ReplaceInvitation.
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return pgErr.Code == pgUniqueViolation
-	}
-	return false
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
 }
 
 // timePtr maps a Go time to a nullable column: the zero time becomes NULL so the
@@ -156,23 +160,24 @@ func scanAccount(row pgx.Row) (saas.Account, error) {
 
 func (s *PgStore) PutOrg(ctx context.Context, o saas.Organization) error {
 	const q = `
-        INSERT INTO orgs (id, name, created_at, personal)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO orgs (id, name, created_at, personal, home_region)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (id) DO UPDATE SET
-            name       = EXCLUDED.name,
-            created_at = EXCLUDED.created_at,
-            personal   = EXCLUDED.personal`
-	if _, err := s.pool.Exec(ctx, q, o.ID, o.Name, timePtr(o.CreatedAt), o.Personal); err != nil {
+            name        = EXCLUDED.name,
+            created_at  = EXCLUDED.created_at,
+            personal    = EXCLUDED.personal,
+            home_region = COALESCE(NULLIF(orgs.home_region, ''), EXCLUDED.home_region)`
+	if _, err := s.pool.Exec(ctx, q, o.ID, o.Name, timePtr(o.CreatedAt), o.Personal, o.HomeRegion); err != nil {
 		return fmt.Errorf("put org: %w", err)
 	}
 	return nil
 }
 
 func (s *PgStore) GetOrg(ctx context.Context, id string) (saas.Organization, error) {
-	const q = `SELECT id, name, created_at, personal FROM orgs WHERE id = $1`
+	const q = `SELECT id, name, created_at, personal, home_region FROM orgs WHERE id = $1`
 	var o saas.Organization
 	var createdAt *time.Time
-	if err := s.pool.QueryRow(ctx, q, id).Scan(&o.ID, &o.Name, &createdAt, &o.Personal); err != nil {
+	if err := s.pool.QueryRow(ctx, q, id).Scan(&o.ID, &o.Name, &createdAt, &o.Personal, &o.HomeRegion); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return saas.Organization{}, saas.ErrNotFound
 		}
@@ -185,7 +190,7 @@ func (s *PgStore) GetOrg(ctx context.Context, id string) (saas.Organization, err
 // ListOrgs returns every organization (issue #602: the console's usage
 // drawdown driver iterates the orgs). Operator/machine surface only.
 func (s *PgStore) ListOrgs(ctx context.Context) ([]saas.Organization, error) {
-	const q = `SELECT id, name, created_at, personal FROM orgs`
+	const q = `SELECT id, name, created_at, personal, home_region FROM orgs`
 	rows, err := s.pool.Query(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("list orgs: %w", err)
@@ -195,7 +200,7 @@ func (s *PgStore) ListOrgs(ctx context.Context) ([]saas.Organization, error) {
 	for rows.Next() {
 		var o saas.Organization
 		var createdAt *time.Time
-		if err := rows.Scan(&o.ID, &o.Name, &createdAt, &o.Personal); err != nil {
+		if err := rows.Scan(&o.ID, &o.Name, &createdAt, &o.Personal, &o.HomeRegion); err != nil {
 			return nil, fmt.Errorf("scan org: %w", err)
 		}
 		o.CreatedAt = timeVal(createdAt)

@@ -27,12 +27,18 @@ const huskScrapeConcurrency = 8
 // sandbox id from the TRUSTED controller-stamped mitos.run/claim label (the
 // claiming Sandbox's name, the id the customer saw; issue #663), NEVER from
 // anything the pod returns; OrgID is the owning org from the TRUSTED
-// mitos.run/org pod label, NEVER from anything the pod returns; Endpoint is the
+// mitos.run/org pod label, NEVER from anything the pod returns; Region is the
+// TRUSTED mitos.run/region pod label, best-effort empty; Endpoint is the
 // pod's in-pod sandbox HTTP endpoint (podIP:port) serving GET /v1/metering.
 type HuskPod struct {
-	VMID     string
-	APIID    string
-	OrgID    string
+	VMID  string
+	APIID string
+	OrgID string
+	// Region is the placement value (issue #712 phase 0) from the TRUSTED
+	// mitos.run/region label, copied onto the pod at claim time from the
+	// claiming Sandbox. Best-effort: empty for a single-value deployment or a
+	// sandbox predating this field. Never gates billability, unlike OrgID.
+	Region   string
 	Endpoint string
 }
 
@@ -285,7 +291,7 @@ func (s *HuskSource) appendFinalSamples(out []Sample, billable []HuskPod, result
 		if id == "" {
 			id = t.VMID
 		}
-		first := Sample{OrgID: t.OrgID, SandboxID: id, Node: t.VMID, Timestamp: start, VCPUs: s.vcpus(id)}
+		first := Sample{OrgID: t.OrgID, Region: t.Region, SandboxID: id, Node: t.VMID, Timestamp: start, VCPUs: s.vcpus(id)}
 		last := first
 		last.Timestamp = t.At
 		out = append(out, first, last)
@@ -324,7 +330,16 @@ func (s *HuskSource) podSamples(ctx context.Context, pod HuskPod, at time.Time) 
 		}
 		return "", false
 	}
-	samples, _ := SamplesFromReport(pod.VMID, at, report, orgOf, s.vcpus)
+	// Region (issue #712 phase 0) follows the same one-pod-one-vm-id trust
+	// shape as orgOf above, from the TRUSTED claim-stamped pod label; best
+	// effort, so an unresolved/unset region is simply "".
+	regionOf := func(sandboxID string) string {
+		if sandboxID == pod.VMID {
+			return pod.Region
+		}
+		return ""
+	}
+	samples, _ := SamplesFromReport(pod.VMID, at, report, orgOf, s.vcpus, regionOf)
 	// Emit the sample keyed by the API-VISIBLE sandbox id from the TRUSTED
 	// claim label (issue #663), so usage_records reconcile to the sb-... id
 	// the customer saw, never the internal husk pod name. The trust check

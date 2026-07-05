@@ -7,6 +7,7 @@ import { Link } from '@tanstack/react-router'
 import { useInstruments } from '../data/instruments'
 import { useSandboxes } from '../data/sandboxes'
 import { useBilling, useAudit } from '../data/account'
+import { useAccount } from '../data/account-settings'
 import { useCapabilities } from '../data/query'
 import { StatTile } from '../ui/StatTile'
 import { Skeleton } from '../ui/Skeleton'
@@ -14,19 +15,12 @@ import { fmtBytes, fmtDollars } from '../api'
 import { PageHeader } from '../ui/PageHeader'
 import { Card } from '@mitos/brand'
 import type { AuditEvent } from '../api'
+import { renderAuditSentence } from '../lib/auditText'
+import { fmtRelative } from '../lib/dates'
 import { FirstRun, isFirstRun } from './firstrun/FirstRun'
+import { InviteNudge } from './firstrun/InviteNudge'
 
 const BENCH = 'bench/husk-activate-latency.sh'
-
-function fmtRelative(isoAt: string): string {
-  // Short human-readable timestamp; real value from the event record.
-  try {
-    const d = new Date(isoAt)
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-  } catch {
-    return isoAt
-  }
-}
 
 // ---- Proof hero band -------------------------------------------------------
 
@@ -129,6 +123,7 @@ function SpendPanel() {
 
 function RecentActivityPanel() {
   const { data, isLoading } = useAudit()
+  const { data: account } = useAccount()
 
   const events: AuditEvent[] = data ?? []
 
@@ -141,16 +136,23 @@ function RecentActivityPanel() {
         <p className="t-dim">No activity yet.</p>
       ) : (
         <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
-          {events.slice(0, 5).map((e, i) => (
-            <li key={i} style={{ padding: 'var(--space-2) 0', borderBottom: '1px solid var(--hairline)', fontSize: 'var(--step--1)' }}>
-              <span style={{ color: 'var(--ink)' }}>{e.actor_id}</span>
-              {' '}
-              <span className="t-dim">{e.action}</span>
-              {' '}
-              <span className="mono" style={{ color: 'var(--ink-2)' }}>{e.target}</span>
-              <span className="t-dim" style={{ float: 'right' }}>{fmtRelative(e.at)}</span>
-            </li>
-          ))}
+          {events.slice(0, 5).map((e, i) => {
+            const { actor, verb, object } = renderAuditSentence(e, account?.account_id ?? '')
+            return (
+              <li key={i} style={{ padding: 'var(--space-2) 0', borderBottom: '1px solid var(--hairline)', fontSize: 'var(--step--1)' }}>
+                <span style={{ color: 'var(--ink)' }}>{actor}</span>
+                {' '}
+                <span className="t-dim">{verb}</span>
+                {object && (
+                  <>
+                    {' '}
+                    <span className="mono" style={{ color: 'var(--ink-2)' }}>{object}</span>
+                  </>
+                )}
+                <span className="t-dim" style={{ float: 'right' }}>{fmtRelative(e.at)}</span>
+              </li>
+            )
+          })}
         </ul>
       )}
       <div style={{ marginTop: 'var(--space-4)' }}>
@@ -241,6 +243,7 @@ export function Instruments() {
     <section>
       <PageHeader title="Overview" lede="This organization's measured signal, and what's happening right now." />
       {showFirstRun && <FirstRun uc={uc} />}
+      {!showFirstRun && <InviteNudge />}
       <ProofHero />
       <AvailableCreditBand />
       <OperationalPanels />

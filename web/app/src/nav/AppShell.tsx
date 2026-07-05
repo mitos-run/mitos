@@ -76,6 +76,8 @@ export function AppShell() {
   return (
     <div className="app-shell-frame">
       <TopBar
+        caps={caps}
+        route={pathname}
         onSearch={() => setPaletteOpen(true)}
         onToggleDrawer={() => setDrawerOpen((v) => !v)}
         drawerOpen={drawerOpen}
@@ -90,8 +92,20 @@ export function AppShell() {
             <NavSection key={group} group={group} routes={routes.filter((r) => r.group === group)} />
           ))}
           <OwnershipBadge caps={caps} />
+          <VersionFooter caps={caps} />
         </nav>
-        <main style={{ flex: 1, padding: 'var(--space-6)' }}>
+        {/* minWidth: 0 overrides the flex item default of min-width:auto. Without
+            it, a wide descendant (e.g. a .tbl forced to min-width:600px on a
+            narrow viewport, or any long unbreakable token) sets main's own
+            automatic minimum size and blows out the whole page width even
+            though that descendant has its own overflow-x:auto wrapper: the
+            wrapper only clips ITS children, it does not stop this flex item
+            from being sized to fit them. This is the load-bearing fix that
+            makes every "wrap the table in overflow-x:auto" pattern in the
+            view files actually contain the scroll, instead of just adding a
+            second (redundant) inner scrollbar next to a body that still
+            scrolls horizontally. */}
+        <main style={{ flex: 1, minWidth: 0, padding: 'var(--space-6)' }}>
           <Outlet />
         </main>
       </div>
@@ -141,5 +155,60 @@ function OwnershipBadge({ caps }: { caps: Capabilities }) {
       <div style={{ color: 'var(--cyan)' }}>Self-hosted</div>
       <div className="t-dim">Your data never leaves your infrastructure.</div>
     </div>
+  )
+}
+
+// VersionFooter is a dim, mono, small line under the ownership badge: "mitos
+// <version>". It hides entirely on an older server that has not yet been
+// upgraded to advertise caps.version. Clicking copies the fuller
+// "mitos <version> (<edition>)" string (useful when filing an issue), and
+// shows a transient "Copied" state in an aria-live region so a screen reader
+// user hears the confirmation too, not just a sighted user seeing the text
+// swap. collectDiagnostics (lib/diagnostics.ts) also reads caps.version, so
+// the same value that is shown and copied here is what feedback reports
+// carry.
+function VersionFooter({ caps }: { caps: Capabilities }) {
+  const [copied, setCopied] = useState(false)
+  const resetTimeout = useRef<ReturnType<typeof window.setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (resetTimeout.current !== null) window.clearTimeout(resetTimeout.current)
+    }
+  }, [])
+
+  if (!caps.version) return null
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(`mitos ${caps.version} (${caps.edition})`)
+      setCopied(true)
+      if (resetTimeout.current !== null) window.clearTimeout(resetTimeout.current)
+      resetTimeout.current = window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // Clipboard access can fail (permissions, insecure context); staying
+      // silent keeps this a harmless no-op rather than surfacing an error for
+      // what is a minor convenience.
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className="t-dim mono"
+      onClick={() => void handleCopy()}
+      aria-label={`Copy version: mitos ${caps.version} (${caps.edition})`}
+      style={{
+        display: 'block',
+        marginTop: 'var(--space-3)',
+        background: 'transparent',
+        border: 'none',
+        cursor: 'pointer',
+        padding: 0,
+        fontSize: 'var(--step--1)',
+      }}
+    >
+      <span aria-live="polite">{copied ? 'Copied' : `mitos ${caps.version}`}</span>
+    </button>
   )
 }

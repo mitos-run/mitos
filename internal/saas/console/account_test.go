@@ -110,6 +110,39 @@ func TestAccountProfileReturnsCallerProfile(t *testing.T) {
 	}
 }
 
+// TestAccountProfileMembershipsCarryHomeRegion asserts each membership row in
+// the account profile carries its org's HomeRegion (issue #712 phase 0),
+// joined from the org lookup rather than the bare membership record.
+func TestAccountProfileMembershipsCarryHomeRegion(t *testing.T) {
+	store := saas.NewMemStore()
+	keys := saas.NewKeyService(store)
+	accounts := saas.NewAccountService(store, keys, saas.WithHomeRegion("fra"))
+	ctx := context.Background()
+	acct, org, err := accounts.SignUp(ctx, "region@account-test.example")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	con := New(Deps{Accounts: accounts, Audit: NewMemAuditLog(), Now: time.Now})
+
+	r := httptest.NewRequest("GET", "/console/account", nil)
+	r = r.WithContext(WithCaller(r.Context(), acct.ID, org.ID))
+	w := httptest.NewRecorder()
+	con.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp AccountView
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if len(resp.Memberships) != 1 {
+		t.Fatalf("memberships = %+v, want exactly 1", resp.Memberships)
+	}
+	if got := resp.Memberships[0].HomeRegion; got != "fra" {
+		t.Errorf("membership HomeRegion = %q, want fra", got)
+	}
+}
+
 func TestAccountProfileNeverReturnsOtherAccount(t *testing.T) {
 	f := newAccountFixture(t)
 	// Alice authenticated but we ensure her profile contains her account_id only.
@@ -269,5 +302,92 @@ func TestAccountSessionsRevokeAll(t *testing.T) {
 	bw := f.req(t, "GET", "/console/account/sessions", "", f.bobAcct, f.bobOrg)
 	if !strings.Contains(bw.Body.String(), f.bobSessID) {
 		t.Errorf("bob session was removed by alice's RevokeAll: %s", bw.Body.String())
+	}
+}
+
+// --- Audit target shape (issue: kill the actor==target self-duplication) ---
+
+// TestProfileUpdateAuditTargetIsEmpty asserts profile.update sets Target="" and
+// TargetType="profile": the actor IS the subject, so there is no separate
+// target id to duplicate (previously Target repeated the same accountID as
+// ActorID).
+func TestProfileUpdateAuditTargetIsEmpty(t *testing.T) {
+	f := newAccountFixture(t)
+	f.req(t, "PATCH", "/console/account", `{"display_name":"New Name"}`, f.aliceAcct, f.aliceOrg)
+	events, err := f.con.deps.Audit.List(context.Background(), f.aliceOrg, 0)
+	if err != nil {
+		t.Fatalf("list audit: %v", err)
+	}
+	var ev *AuditEvent
+	for i := range events {
+		if events[i].Action == "profile.update" {
+			ev = &events[i]
+			break
+		}
+	}
+	if ev == nil {
+		t.Fatalf("no profile.update event in %+v", events)
+	}
+	if ev.Target != "" {
+		t.Errorf("Target = %q, want empty (actor is the subject)", ev.Target)
+	}
+	if ev.TargetType != "profile" {
+		t.Errorf("TargetType = %q, want profile", ev.TargetType)
+	}
+}
+
+// TestSessionRevokeAuditCarriesSessionLabel asserts session.revoke sets
+// TargetType="session" and resolves TargetName to the session's own label
+// (best-effort, looked up before the session is removed).
+func TestSessionRevokeAuditCarriesSessionLabel(t *testing.T) {
+	f := newAccountFixture(t)
+	w := f.req(t, "DELETE", "/console/account/sessions/"+f.aliceSessID, "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	events, _ := f.con.deps.Audit.List(context.Background(), f.aliceOrg, 0)
+	var ev *AuditEvent
+	for i := range events {
+		if events[i].Action == "session.revoke" {
+			ev = &events[i]
+			break
+		}
+	}
+	if ev == nil {
+		t.Fatalf("no session.revoke event in %+v", events)
+	}
+	if ev.Target != f.aliceSessID {
+		t.Errorf("Target = %q, want %q", ev.Target, f.aliceSessID)
+	}
+	if ev.TargetType != "session" || ev.TargetName != "browser" {
+		t.Errorf("TargetType/TargetName = %q/%q, want session/browser", ev.TargetType, ev.TargetName)
+	}
+}
+
+// TestSessionRevokeAllAuditTargetIsEmpty asserts session.revoke_all sets
+// Target="" and TargetType="session": it is a bulk action on the caller's own
+// sessions, so there is no single target id to duplicate against ActorID.
+func TestSessionRevokeAllAuditTargetIsEmpty(t *testing.T) {
+	f := newAccountFixture(t)
+	w := f.req(t, "DELETE", "/console/account/sessions", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	events, _ := f.con.deps.Audit.List(context.Background(), f.aliceOrg, 0)
+	var ev *AuditEvent
+	for i := range events {
+		if events[i].Action == "session.revoke_all" {
+			ev = &events[i]
+			break
+		}
+	}
+	if ev == nil {
+		t.Fatalf("no session.revoke_all event in %+v", events)
+	}
+	if ev.Target != "" {
+		t.Errorf("Target = %q, want empty", ev.Target)
+	}
+	if ev.TargetType != "session" {
+		t.Errorf("TargetType = %q, want session", ev.TargetType)
 	}
 }

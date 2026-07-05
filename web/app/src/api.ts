@@ -10,6 +10,18 @@ export class UnauthorizedError extends Error {
   }
 }
 
+// Entitlements is the resolved set of plan-gated hosted conveniences for the
+// caller's org (mitos.run/mitos/internal/saas/billing.Entitlements). On the
+// self-hosted community edition every field is on with auditRetentionDays 0
+// (unlimited): the engine is never gated by plan.
+export type Entitlements = {
+  ssoEnforced: boolean
+  scim: boolean
+  auditStreaming: boolean
+  auditRetentionDays: number
+  seatPriceCents: number
+}
+
 export type Capabilities = {
   edition: 'community' | 'hosted'
   billing: boolean
@@ -23,6 +35,48 @@ export type Capabilities = {
   // authConnectors is the sorted list of configured social-login providers.
   // Present when the server is new enough to return it; absent on old deploys.
   authConnectors?: string[]
+  // plan and entitlements are present when the server is new enough to
+  // return them; absent on old deploys. plan is "free" or "team" on a hosted
+  // deployment (informational only on community, which is never plan-gated).
+  plan?: 'free' | 'team'
+  entitlements?: Entitlements
+  // admin is true when the CALLER holds the instance-operator capability; it
+  // gates the "Operate" nav group and /admin/* routes. Optional (absent on
+  // older servers), like authConnectors/plan/entitlements above.
+  admin?: boolean
+  // feedback tells the FeedbackButton dialog where composed feedback goes:
+  // a mailto: (channel "email", hosted default) or a GitHub new-issue link
+  // (channel "github", community default). Optional (absent on older
+  // servers); FeedbackButton hides itself until this is present.
+  feedback?: FeedbackCapability
+  // version is the console binary's build version ("dev" for an unreleased
+  // build). Optional (absent on older servers); rendered in the sidebar
+  // footer and included in feedback diagnostics.
+  version?: string
+  // placement is the deployment's placement registry (issue #712 phase 0):
+  // the operator-defined key (hosted: "region"; self-host: whatever the
+  // operator names it) and the values it advertises. Optional (absent on
+  // older servers); NewSandboxModal shows a region picker ONLY when
+  // values.length > 1, so a single-value deployment (the phase 0 default
+  // everywhere) renders no picker at all.
+  placement?: PlacementCapability
+}
+
+export type PlacementValue = {
+  name: string
+  display: string
+  default: boolean
+  available: boolean
+}
+
+export type PlacementCapability = {
+  key: string
+  values: PlacementValue[]
+}
+
+export type FeedbackCapability = {
+  channel: 'email' | 'github'
+  target: string
 }
 
 export type AuthConnectorsResponse = {
@@ -61,7 +115,34 @@ export type SandboxView = {
   mem_bytes: number
   created_at: string
   project_id?: string
+  // region is the placement value (issue #712 phase 0) this sandbox's tree
+  // root was created in. Empty/absent means the deployment's registry
+  // default. A fork always carries its parent's region.
+  region?: string
 }
+
+// CreateSandboxRequest is the body of POST /console/sandboxes. vcpus/mem_gib
+// must be one of the static options the server validates (1/2/4 vCPU;
+// 1/2/4/8 GiB); project_id is optional (empty means unassigned). region is
+// optional (issue #712 phase 0): omit it to use the org's home region, or
+// set it to one of Capabilities.placement.values[].name.
+export type CreateSandboxRequest = {
+  template: string
+  vcpus: number
+  mem_gib: number
+  project_id?: string
+  region?: string
+}
+
+// ForkResult is the shape of a fork response. On a full success (HTTP 200)
+// `error` is absent and `ids.length` equals the requested count. On a
+// PARTIAL failure (HTTP 207: some forks landed before a later one failed;
+// see internal/saas/console/sandbox_ops.go's handleForkSandbox) `ids` holds
+// only the survivors and `error` carries the failure detail, so the caller
+// can show "created K of N" instead of a bare, misleading success.
+export type ForkResult = { org_id: string; source: string; ids: string[]; error?: string }
+
+export type ExecResult = { stdout: string; stderr: string; exit_code: number }
 
 export type ForkNode = {
   id: string
@@ -75,13 +156,50 @@ export type ForkTree = { org_id: string; nodes: ForkNode[] }
 
 export type KeyView = { id: string; name: string; prefix: string; scopes: string[]; created_at: string; expires_at?: string; revoked_at?: string; revoked: boolean }
 export type CreateKeyResult = { org_id: string; raw_key: string; key: KeyView }
-export type AuditEvent = { org_id: string; actor_id: string; action: string; target: string; detail: string; at: string }
+export type AuditEvent = {
+  org_id: string
+  actor_id: string
+  actor_name?: string
+  actor_type?: 'user' | 'api_key' | 'system'
+  action: string
+  target: string
+  target_type?: string
+  target_name?: string
+  detail: string
+  at: string
+}
 export type TemplateView = { name: string; org_id: string; description: string; image: string; updated_at: string }
+// BoxView is one entry in the Box reservation catalog (illustrative pricing;
+// see mitos.run/mitos/internal/saas/billing.Reservation).
+export type BoxView = { key: string; vcpu: number; mem_gib: number; monthly_cents: number }
 export type UsageResponse = { org_id: string; records: unknown[]; totals: Record<string, number>; cost: Record<string, number> }
 export type BillingView = { org_id: string; status: string; balance_cents: number; spend_cents: number; soft_cap_cents: number; hard_cap_cents: number; ledger_entries: Array<{ ts?: string; cents?: number; reason?: string }>; topup_available: boolean }
 
 export type Role = 'owner' | 'admin' | 'billing' | 'member' | 'viewer'
-export type MemberView = { account_id: string; org_id: string; role: Role; created_at: string }
+export type MemberView = { account_id: string; org_id: string; role: Role; created_at: string; email?: string; display_name?: string }
+
+export type InvitationState = 'pending' | 'accepted' | 'expired' | 'revoked'
+export type InvitationView = {
+  id: string
+  org_id: string
+  email: string
+  role: Role
+  state: InvitationState
+  inviter_id: string
+  inviter_name: string
+  created_at: string
+  expires_at: string
+}
+// InviteLookupView is the PUBLIC, pre-auth summary returned by
+// GET /console/invites/lookup. email_hint is partially masked (e.g.
+// "jo***@example.com"); the full email is never returned before accept.
+export type InviteLookupView = {
+  org_name: string
+  inviter_name: string
+  email_hint: string
+  role: Role
+  state: InvitationState
+}
 export type ProjectView = { id: string; org_id: string; name: string; description: string; created_at: string }
 export type ProjectMembership = { account_id: string; project_id: string; role: Role }
 
@@ -139,6 +257,65 @@ export type SessionView = {
   current: boolean
 }
 
+// --- Instance-operator plane (/console/admin/...) ---
+
+export type AdminOverview = {
+  orgs: number
+  running_sandboxes: number
+  // How many orgs running_sandboxes actually scanned (the oldest
+  // min(orgs, 200)): compare to orgs the SAME way AdminOrgsResponse's
+  // orgs.length/total pair is compared, to show a "showing sandboxes from
+  // the first N of orgs orgs" disclosure once a deployment crosses the cap.
+  running_sandboxes_orgs: number
+  // null when no NodeSource is configured on this deployment (an honest
+  // "not available" rather than a fabricated 0).
+  nodes_ready: number | null
+  nodes_total: number | null
+  signup_mode: 'open' | 'waitlist'
+  // Present only when nonzero (the server's omitempty convention): how many
+  // orgs' per-org reads failed and were skipped from running_sandboxes
+  // rather than failing the whole overview.
+  failed_orgs?: number
+}
+
+export type AdminOrgView = {
+  id: string
+  name: string
+  tier: string
+  members: number
+  running: number
+  month_usage_cents: number
+}
+
+export type AdminNodeView = {
+  name: string
+  ready: boolean
+  kvm: boolean
+  dedicated: boolean
+  allocatable_cpu: string
+  allocatable_mem: string
+}
+
+export type AdminNodesResponse = {
+  available: boolean
+  nodes: AdminNodeView[]
+}
+
+export type AdminWaitlistEntryView = {
+  id: string
+  email: string
+  created_at: string
+}
+
+export type AdminOrgsResponse = {
+  orgs: AdminOrgView[]
+  total: number
+  // Present only when nonzero (the server's omitempty convention): how many
+  // orgs' per-org reads (membership, running count, usage) failed and were
+  // omitted from orgs rather than failing the whole list.
+  failed_orgs?: number
+}
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(path, { credentials: 'same-origin' })
   if (r.status === 401) throw new UnauthorizedError(path)
@@ -159,6 +336,15 @@ export async function post<T>(path: string, body: unknown): Promise<T | null> {
   if (!r.ok) throw new Error(`${path}: ${r.status}`)
   const text = await r.text()
   return text ? (JSON.parse(text) as T) : null
+}
+
+// apiErrorMessage extracts the console's apierr envelope's cause (the
+// actionable, non-secret detail: "vcpus must be one of 1, 2, 4") from a
+// failed response, falling back to a generic "<op>: <status>" message when the
+// body is not the expected shape.
+async function apiErrorMessage(r: Response, op: string): Promise<string> {
+  const body = await r.json().catch(() => null)
+  return body?.error?.cause ?? body?.error?.message ?? `${op}: ${r.status}`
 }
 
 export const api = {
@@ -207,6 +393,40 @@ export const api = {
     if (!r.ok) throw new Error(`logs: ${r.status}`)
     return r.text()
   },
+  // logStreamURL is the SSE endpoint useLogStream's EventSource connects to.
+  // It is same-origin and cookie-authenticated, so no token needs to travel in
+  // the URL.
+  logStreamURL: (id: string) => `/console/sandboxes/${encodeURIComponent(id)}/logs/stream`,
+  createSandbox: async (req: CreateSandboxRequest) => {
+    const r = await fetch('/console/sandboxes', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(req),
+    })
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'create sandbox'))
+    return (await r.json()) as SandboxView
+  },
+  forkSandbox: async (id: string, count: number) => {
+    const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}/fork`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ count }),
+    })
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'fork sandbox'))
+    return (await r.json()) as ForkResult
+  },
+  execSandbox: async (id: string, cmd: string, timeoutS?: number) => {
+    const r = await fetch(`/console/sandboxes/${encodeURIComponent(id)}/exec`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cmd, timeout_s: timeoutS ?? 0 }),
+    })
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'exec'))
+    return (await r.json()) as ExecResult
+  },
   forktree: () => get<ForkTree>('/console/forktree'),
   keys: () => get<{ keys: KeyView[] }>('/console/keys').then((r) => r.keys ?? []),
   createKey: async (name: string, scopes: string[], ttlSeconds: number) => {
@@ -221,6 +441,7 @@ export const api = {
   usage: () => get<UsageResponse>('/console/usage?from=&to='),
   audit: () => get<{ events: AuditEvent[] }>('/console/audit').then((r) => r.events ?? []),
   templates: () => get<{ templates: TemplateView[] }>('/console/templates').then((r) => r.templates ?? []),
+  boxes: () => get<{ boxes: BoxView[] }>('/console/boxes').then((r) => r.boxes ?? []),
   billing: () => get<BillingView>('/console/billing'),
   billingPortal: () => get<{ url: string }>('/console/billing/portal').then((r) => r.url),
   topupUrl: (amountCents: number) =>
@@ -240,6 +461,48 @@ export const api = {
     })
     if (!r.ok) throw new Error(`set role: ${r.status}`)
   },
+  removeMember: async (accountId: string) => {
+    const r = await fetch(`/console/members/${encodeURIComponent(accountId)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (!r.ok && r.status !== 204) throw new Error(`remove member: ${r.status}`)
+  },
+  invites: () => get<{ org_id: string; invitations: InvitationView[] }>('/console/invites').then((r) => r.invitations ?? []),
+  createInvite: async (email: string, role: Role) => {
+    const r = await fetch('/console/invites', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, role }),
+    })
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'create invite'))
+    return (await r.json()) as InvitationView
+  },
+  revokeInvite: async (id: string) => {
+    const r = await fetch(`/console/invites/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    })
+    if (!r.ok && r.status !== 204) throw new Error(`revoke invite: ${r.status}`)
+  },
+  resendInvite: async (id: string) => {
+    const r = await fetch(`/console/invites/${encodeURIComponent(id)}/resend`, {
+      method: 'POST',
+      credentials: 'same-origin',
+    })
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'resend invite'))
+    return (await r.json()) as InvitationView
+  },
+  // inviteLookup is the PUBLIC pre-auth call: no credentials are required
+  // (and none are sent), matching the server route mounted outside session
+  // auth.
+  inviteLookup: async (token: string) => {
+    const r = await fetch(`/console/invites/lookup?token=${encodeURIComponent(token)}`)
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'invite lookup'))
+    return (await r.json()) as InviteLookupView
+  },
+  acceptInvite: (token: string) => post<{ org_id: string; role: Role }>('/console/invites/accept', { token }),
   projects: () => get<{ org_id: string; projects: ProjectView[] }>('/console/projects').then((r) => r.projects ?? []),
   createProject: async (name: string, description: string) => {
     const r = await fetch('/console/projects', {
@@ -295,7 +558,10 @@ export const api = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ type, endpoint }),
     })
-    if (!r.ok) throw new Error(`add sink: ${r.status}`)
+    // Surfaces the apierr cause (e.g. "audit-sink streaming requires the Team
+    // plan" on a 402) instead of a bare status code, so a plan-gated org sees
+    // an honest, actionable message rather than a generic failure.
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'add sink'))
     return (await r.json()) as SinkView
   },
   deleteAuditSink: async (id: string) => {
@@ -352,6 +618,26 @@ export const api = {
     })
     if (!r.ok && r.status !== 204) throw new Error(`revoke project member: ${r.status}`)
   },
+  adminOverview: () => get<AdminOverview>('/console/admin/overview'),
+  adminOrgs: () => get<AdminOrgsResponse>('/console/admin/orgs'),
+  adminNodes: () => get<AdminNodesResponse>('/console/admin/nodes'),
+  adminWaitlist: () => get<{ entries: AdminWaitlistEntryView[] }>('/console/admin/waitlist').then((r) => r.entries ?? []),
+  approveWaitlistEntry: async (id: string) => {
+    const r = await fetch(`/console/admin/waitlist/${encodeURIComponent(id)}/approve`, {
+      method: 'POST',
+      credentials: 'same-origin',
+    })
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'approve waitlist entry'))
+    // already_approved is true when this email held allowlist access before
+    // this call: the entry was approved earlier, so no second notification
+    // was sent (idempotent; see internal/saas/console/admin.go).
+    return (await r.json()) as { email: string; approved: boolean; already_approved: boolean }
+  },
+  // adminAudit reads the instance-operator plane's own audit events (issue
+  // #714): admin.* actions, including denied authorizeAdmin attempts, that
+  // an org's own GET /console/audit never surfaces (they carry no OrgID any
+  // tenant-scoped view would match).
+  adminAudit: () => get<{ events: AuditEvent[] }>('/console/admin/audit').then((r) => r.events ?? []),
 }
 
 export async function firstActivity(): Promise<FirstActivity> {

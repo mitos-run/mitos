@@ -6,7 +6,8 @@
 // assertion lives in the 'ForkTree route' describe block below.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/react'
-import { waitFor, screen } from '@testing-library/react'
+import { waitFor, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   createRootRoute,
@@ -15,6 +16,7 @@ import {
 } from '@tanstack/react-router'
 import { ForkTree } from './ForkTree'
 import { renderAt } from '../../test/utils'
+import { ToastProvider } from '../../ui/Toast'
 import type { Capabilities } from '../../api'
 
 const caps: Capabilities = {
@@ -37,7 +39,9 @@ function renderForkTree() {
   const router = createRouter({ routeTree: rootRoute.addChildren([]) })
   return render(
     <QueryClientProvider client={client}>
-      <RouterProvider router={router} />
+      <ToastProvider>
+        <RouterProvider router={router} />
+      </ToastProvider>
     </QueryClientProvider>,
   )
 }
@@ -116,6 +120,22 @@ describe('ForkTree view', () => {
     expect(screen.queryByText(/not found/i)).not.toBeInTheDocument()
   })
 
+  // Touch: each node's small visible circle (radius as low as MIN_R=10, a
+  // 20px diameter) sits behind a larger invisible hit-target circle so a
+  // tap on a phone/tablet has a comfortable >=44px-diameter target even
+  // though the visible node stays small. The SVG itself stays aria-hidden
+  // (the table is the a11y source of truth), so this only affects pointer
+  // hit-testing, not the accessibility tree.
+  it('gives every node an invisible hit-target circle at least 22px in radius', async () => {
+    const { container } = renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    const hitCircles = Array.from(container.querySelectorAll('circle[fill="transparent"]'))
+    expect(hitCircles.length).toBe(2)
+    hitCircles.forEach((c) => {
+      expect(Number(c.getAttribute('r'))).toBeGreaterThanOrEqual(22)
+    })
+  })
+
   it('shows an error state when the fetch fails', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
       const url = String(input)
@@ -146,5 +166,143 @@ describe('ForkTree route', () => {
     // Node id links deep-link to the sandbox detail view.
     const link = screen.getByRole('link', { name: /fork-a/i })
     expect(link).toHaveAttribute('href', '/sandboxes/fork-a')
+  })
+})
+
+describe('ForkTree node detail panel', () => {
+  it('opens a side panel with id, phase, and byte fields when a row Details button is activated (keyboard reachable)', async () => {
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    const detailsButtons = screen.getAllByRole('button', { name: /view details/i })
+    expect(detailsButtons.length).toBe(2)
+    // A real <button> is keyboard-focusable and Enter/Space just works; a
+    // click stands in for that activation here.
+    fireEvent.click(screen.getByRole('button', { name: /view details for fork-a/i }))
+    const panel = screen.getByRole('region', { name: /details for sandbox fork-a/i })
+    expect(panel).toHaveTextContent('Running')
+    expect(within(panel).getByRole('link', { name: /open/i })).toHaveAttribute('href', '/sandboxes/fork-a')
+    expect(within(panel).getByRole('button', { name: /^fork/i })).toBeInTheDocument()
+    expect(within(panel).getByRole('button', { name: /terminate/i })).toBeInTheDocument()
+  })
+
+  it('closes the panel via the Close button', async () => {
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /view details for root/i }))
+    expect(screen.getByRole('region', { name: /details for sandbox root/i })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /close details/i }))
+    expect(screen.queryByRole('region', { name: /details for sandbox root/i })).not.toBeInTheDocument()
+  })
+
+  // Keyboard/screen-reader users get no signal a panel opened unless focus
+  // actually moves into it; opening via the table's "Details" button must
+  // land focus on the panel's heading.
+  it('moves focus into the panel (onto its heading) when opened via the Details button', async () => {
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /view details for fork-a/i }))
+    const panel = screen.getByRole('region', { name: /details for sandbox fork-a/i })
+    const heading = within(panel).getByRole('heading', { name: 'fork-a' })
+    await waitFor(() => expect(document.activeElement).toBe(heading))
+  })
+
+  // Switching directly from one node's open panel to a different node's
+  // (without closing in between) must move focus/announcement again. Uses
+  // userEvent (not fireEvent) because real browsers move focus to a button
+  // on click; fireEvent.click does not simulate that, which would mask the
+  // regression this guards (the panel component is keyed by node.id so
+  // React remounts it and reruns the heading focus effect, rather than
+  // reusing the same instance and leaving focus on the just-clicked button).
+  it('moves focus to the new heading when a different row Details button is activated while the panel is already open', async () => {
+    const user = userEvent.setup()
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /view details for root/i }))
+    const rootPanel = screen.getByRole('region', { name: /details for sandbox root/i })
+    const rootHeading = within(rootPanel).getByRole('heading', { name: 'root' })
+    await waitFor(() => expect(document.activeElement).toBe(rootHeading))
+
+    await user.click(screen.getByRole('button', { name: /view details for fork-a/i }))
+    expect(screen.queryByRole('region', { name: /details for sandbox root/i })).not.toBeInTheDocument()
+    const forkPanel = screen.getByRole('region', { name: /details for sandbox fork-a/i })
+    const forkHeading = within(forkPanel).getByRole('heading', { name: 'fork-a' })
+    await waitFor(() => expect(document.activeElement).toBe(forkHeading))
+  })
+
+  // Closing the panel must return focus to the button that opened it, not
+  // silently drop it back to <body>.
+  it('returns focus to the triggering Details button when the panel is closed', async () => {
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    const trigger = screen.getByRole('button', { name: /view details for root/i })
+    fireEvent.click(trigger)
+    expect(screen.getByRole('region', { name: /details for sandbox root/i })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /close details/i }))
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  // Mobile: the panel carries fork-node-panel so base.css's <=480px media
+  // query pins it to the bottom of the viewport as a sheet, instead of
+  // opening inline above an already-tall page.
+  it('carries the fork-node-panel class for the mobile bottom-sheet treatment', async () => {
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /view details for root/i }))
+    const panel = screen.getByRole('region', { name: /details for sandbox root/i })
+    expect(panel.className).toContain('fork-node-panel')
+  })
+
+  it('Fork posts to the fork endpoint with the chosen count', async () => {
+    let forkBody: unknown = null
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/console/forktree')) {
+        return Promise.resolve(new Response(JSON.stringify(forkTreePayload), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      if (url.includes('/fork') && method === 'POST') {
+        forkBody = init?.body ? JSON.parse(String(init.body)) : null
+        return Promise.resolve(new Response(JSON.stringify({ org_id: 'o1', source: 'fork-a', ids: ['fork-a-fork-1', 'fork-a-fork-2'] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /view details for fork-a/i }))
+    const countInput = screen.getByLabelText(/^fork$/i)
+    fireEvent.change(countInput, { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: /^fork 2/i }))
+    await waitFor(() => expect(forkBody).toEqual({ count: 2 }))
+  })
+
+  // Issue #716: a partial fork failure (HTTP 207) still resolves the fetch
+  // as "ok" (207 is in the 200-299 range), so the survivor ids and error
+  // come back through the SAME success path, not a rejected promise. The
+  // panel must show "created K of N" plus the reason rather than a
+  // misleading plain "Forked" success.
+  it('shows "created K of N" with the error on a partial fork failure (HTTP 207)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/console/forktree')) {
+        return Promise.resolve(new Response(JSON.stringify(forkTreePayload), { status: 200, headers: { 'content-type': 'application/json' } }))
+      }
+      if (url.includes('/fork') && method === 'POST') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ org_id: 'o1', source: 'fork-a', ids: ['fork-a-fork-1'], error: 'cluster api timeout' }),
+            { status: 207, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /view details for fork-a/i }))
+    const countInput = screen.getByLabelText(/^fork$/i)
+    fireEvent.change(countInput, { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('button', { name: /^fork 2/i }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/created 1 of 2 for fork-a: cluster api timeout/i))
   })
 })

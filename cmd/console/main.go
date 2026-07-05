@@ -82,10 +82,19 @@ func main() {
 		log.Fatalf("persistence: %v", err)
 	}
 	defer closeStore()
-	keys := saas.NewKeyService(store)
-	accounts := saas.NewAccountService(store, keys)
-
+	// caps is built before the account service so its Placement registry
+	// default (issue #712 phase 0) can be threaded into WithHomeRegion: every
+	// org SignUp mints from here on is stamped with the deployment's
+	// placement default at creation time.
 	caps := capabilitiesFromEnv()
+	keys := saas.NewKeyService(store)
+	accounts := saas.NewAccountService(store, keys, saas.WithHomeRegion(caps.Placement.DefaultName()))
+	// invitations shares the SAME durable store as accounts/orgs/memberships,
+	// so an accepted invite's membership and the invitation row itself are
+	// both backed by Postgres when configured (in-memory in dev). The email
+	// sender is the same SMTP-or-dev-log seam onboarding uses; SendInvite
+	// fails closed if MITOS_ONBOARDING_INVITE_URL is not set.
+	invitations := saas.NewInvitationService(store, buildEmailSender(logger))
 	// One status store is shared by the BFF billing view, the billing webhook,
 	// and the drawdown service, so a provider event (payment failed / canceled)
 	// is reflected in the console. Durable Postgres when configured (a past_due
@@ -190,9 +199,39 @@ func main() {
 	// Shared by the BFF usage view and the drawdown driver below.
 	usageStore := buildUsageStore(logger)
 
+	// sandboxControl is built once and shared by Deps.Sandboxes and the log
+	// streamer below: the log streamer's authorization check must consult the
+	// SAME org-scoped control the rest of the BFF uses.
+	sandboxControl := buildSandboxControl(logger)
+
+	// pendingStore and allowlist are built HERE, before con, rather than
+	// inside mountOnboarding below, because BOTH are also needed for the
+	// instance-admin waitlist view (console.Deps.Waitlist) regardless of
+	// whether self-serve signup is enabled: a deployment in the default
+	// waitlist mode is exactly the case that view exists for. Durable
+	// Postgres when configured; in-memory (dev only) otherwise, in which
+	// case entries do not survive a restart.
+	var pendingStore onboarding.PendingStore
+	if pool != nil {
+		pendingStore = pgstore.NewPgPendingStore(pool)
+	} else {
+		pendingStore = onboarding.NewMemPendingStore()
+	}
+	// Auto-allow domains for the signup allowlist gate. Comma-separated, lowercased;
+	// default mitos.run so a mitos.run address never needs a manual approval.
+	autoAllow := parseAutoAllowDomains(os.Getenv("MITOS_CONSOLE_AUTOALLOW_DOMAINS"))
+	var allowlist onboarding.Allowlist
+	if pool != nil {
+		allowlist = pgstore.NewPgAllowlist(pool, autoAllow)
+	} else {
+		logger.Warn("allowlist is in-memory (dev only); approved entries do not survive restarts")
+		allowlist = onboarding.NewMemAllowlist(autoAllow)
+	}
+
 	con := console.New(console.Deps{
-		Accounts: accounts,
-		Usage:    usageStore,
+		Accounts:    accounts,
+		Invitations: invitations,
+		Usage:       usageStore,
 		// The proof-snapshot and fork-tree sources: org-scoped cluster queries when
 		// in a cluster, in-memory otherwise.
 		Instruments: buildInstruments(logger),
@@ -215,7 +254,10 @@ func main() {
 		Secrets: buildSecretStore(logger, caps),
 		// The live-sandbox control: the org-scoped cluster query when in a cluster,
 		// in-memory otherwise. Shares the org→namespace boundary with secrets.
-		Sandboxes: buildSandboxControl(logger),
+		Sandboxes: sandboxControl,
+		// Log streaming: honestly unsupported (501) in a real cluster today (no
+		// live transport exists yet); the in-memory default outside a cluster.
+		Logs: buildLogStreamer(logger, sandboxControl),
 		// The manage-subscription portal link (provider-neutral); nil keeps the
 		// console's no-portal default (community edition).
 		Portal: bill.portal,
@@ -228,6 +270,28 @@ func main() {
 		// Edition + feature flags from the server-controlled environment the chart
 		// sets; the SAME binary serves both editions.
 		Capabilities: caps,
+		// The org -> plan lookup: a static manual-grant allowlist
+		// (MITOS_CONSOLE_TEAM_ORGS) until a real subscription/payment
+		// integration exists. Every org not listed resolves to PlanFree.
+		Plans: planSourceFromEnv(),
+		// The instance-operator plane (GET/POST /console/admin/...):
+		// MITOS_CONSOLE_INSTANCE_ADMINS grants named emails the capability on
+		// a hosted deployment; the community-edition single-org-owner
+		// fallback (console.Console.isInstanceAdmin) needs no configuration.
+		// Orgs reads the SAME durable store the rest of the console uses,
+		// deliberately un-scoped to any one org (see console.OrgDirectory).
+		InstanceAdminEmails: instanceAdminEmailsFromEnv(),
+		Orgs:                store,
+		// The node-inventory seam for GET /console/admin/nodes: the real
+		// cluster lister when a kube client is available, nil (honest
+		// "not available") otherwise.
+		Nodes: buildNodeSource(logger),
+		// The waitlist view/approve seam: reads the SAME pendingStore the
+		// funnel writes to and approves through the SAME allowlist +
+		// EmailSender mountOnboarding wires below, so an admin approving a
+		// waitlist entry produces an identical outcome to the internal
+		// approve-signup endpoint.
+		Waitlist: waitlistAdapter{pending: pendingStore, allowlist: allowlist, email: buildEmailSender(logger), now: time.Now},
 		// Wire the real session store so /console/account/sessions reflects live
 		// sessions. The adapter translates saas.Session to console.SessionRecord.
 		// Both dev and production share the same store; in dev the store is empty
@@ -320,17 +384,9 @@ func main() {
 	// Secure mirrors mountAuth (hardcoded true: the console is always TLS in
 	// production; -dev runs without cookies anyway since no session middleware
 	// is active in that branch).
-	// Auto-allow domains for the signup allowlist gate. Comma-separated, lowercased;
-	// default mitos.run so a mitos.run address never needs a manual approval.
-	autoAllow := parseAutoAllowDomains(os.Getenv("MITOS_CONSOLE_AUTOALLOW_DOMAINS"))
-	var allowlist onboarding.Allowlist
-	if pool != nil {
-		allowlist = pgstore.NewPgAllowlist(pool, autoAllow)
-	} else {
-		logger.Warn("allowlist is in-memory (dev only); approved entries do not survive restarts")
-		allowlist = onboarding.NewMemAllowlist(autoAllow)
-	}
-	mountOnboarding(mux, logger, accounts, store, pool, creditLedger, capsGate{signup: caps.Signup}, sessionStore, newSessionToken, true, allowlist)
+	// pendingStore and allowlist are already built above (shared with
+	// console.Deps.Waitlist).
+	mountOnboarding(mux, logger, accounts, store, pendingStore, creditLedger, capsGate{signup: caps.Signup}, sessionStore, newSessionToken, true, allowlist)
 
 	// The billing webhook is PUBLIC by design: it is authenticated by the
 	// provider's signature, not a session, so it is mounted OUTSIDE the session
@@ -350,6 +406,15 @@ func main() {
 	// minimal: {"connectors":["github"],"signup":true} or
 	// {"connectors":[],"signup":false} when nothing is configured.
 	mux.HandleFunc("GET /auth/connectors", newAuthConnectorsHandler(caps))
+
+	// GET /console/invites/lookup is the PUBLIC pre-auth counterpart to the
+	// session-gated /console/invites/accept: the console SPA's accept page
+	// calls it before a session exists to render "X invited you to Y". It is
+	// an EXACT path match, which the enhanced ServeMux always prefers over
+	// the "/console/" prefix pattern above, so it reaches con.LookupInvite
+	// directly rather than the session-middleware-wrapped Console mux (both
+	// the -dev and production branches route here identically).
+	mux.HandleFunc("GET /console/invites/lookup", con.LookupInvite)
 
 	// The identity resolve endpoint is an INTERNAL machine-to-machine endpoint,
 	// bearer-gated by a shared secret. It is mounted OUTSIDE the session

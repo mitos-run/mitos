@@ -68,6 +68,19 @@ flips to `ModeOpen` only once the gates above are green. The mode is a single
 flag (`WithMode`) so the gate is one explicit, auditable decision, and both modes
 are unit-tested.
 
+`POST /onboarding/signup` (the full funnel) is mounted only when
+`MITOS_CONSOLE_SIGNUP` is on; a waitlist-mode deployment does NOT mount it
+(there is no verify token to redeem and no account is ever provisioned in
+this mode). Instead `cmd/console/onboarding.go`'s `mountWaitlistOnly` mounts a
+minimal, standalone `POST /onboarding/waitlist {"email": "..."}` (issue
+#718): always the same uniform 202 whether the join is fresh, a duplicate
+(`Service.signUp` dedupes by canonical identity so a repeat submission is a
+no-op, not a second row), or rate-limited (a modest fixed per-IP cap), so it
+never enumerates waitlist membership. It shares the SAME `PendingStore` the
+open-mode path and `console.Deps.Waitlist`'s `waitlistAdapter` read, so a
+waitlist entry recorded here is immediately visible to
+`GET /console/admin/waitlist`.
+
 ## Funnel instrumentation and metrics
 
 So the UX claim is verified, the funnel records timestamped events through an

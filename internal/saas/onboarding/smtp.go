@@ -29,6 +29,13 @@ type SMTPConfig struct {
 	// VerifyBaseURL is the base the verify link is built from; the token is added
 	// as a query parameter. For example https://app.mitos.run/auth/verify.
 	VerifyBaseURL string
+	// InviteBaseURL is the base the invite accept link is built from; the raw
+	// invite token is added as a query parameter, mirroring VerifyBaseURL. For
+	// example https://app.mitos.run/invite/accept. Optional: unset means
+	// SendInvite fails closed with a configuration error rather than
+	// composing a broken link, so a deployment that never enables invites
+	// need not set this.
+	InviteBaseURL string
 	// TLSServerName overrides the TLS server name used for STARTTLS verification.
 	// Empty defaults to Host. Used in tests to point at 127.0.0.1 while presenting
 	// a cert for another name.
@@ -95,6 +102,66 @@ func (s *SMTPEmailSender) SendVerification(ctx context.Context, email, token str
 	return nil
 }
 
+// SendInvite composes the "invited to an org" email and delivers it over
+// SMTP. The subject is the exact product copy: "<inviter> invited you to
+// <org> on Mitos". The raw invite token appears only in the accept link in
+// the body delivered to the recipient's inbox; it is never logged or placed
+// in a returned error. Fails closed (a configuration error, never a broken
+// link) when InviteBaseURL is not configured.
+func (s *SMTPEmailSender) SendInvite(ctx context.Context, email, orgName, inviterName, token string) error {
+	if s.cfg.InviteBaseURL == "" {
+		return fmt.Errorf("smtp email sender: invite base url is not configured")
+	}
+	link, err := verifyLink(s.cfg.InviteBaseURL, token)
+	if err != nil {
+		return fmt.Errorf("smtp email sender: build invite link: %w", err)
+	}
+	msg := buildInviteMessage(s.cfg.From, email, orgName, inviterName, link)
+	if err := s.dial(ctx, s.cfg, s.cfg.From, []string{email}, msg); err != nil {
+		return fmt.Errorf("smtp email sender: deliver invite: %w", err)
+	}
+	return nil
+}
+
+// sanitizeHeaderValue strips CR and LF (in either order, alone or in a
+// CRLF/LFCR pair) from v so it can never be used to inject an additional raw
+// SMTP header line, or terminate the header block early into the body, when
+// v is attacker-influenced input composed straight into a From:/To:/Subject:
+// line (an invited email address, an org display name, an account display
+// name). Every value interpolated into a header line in this file passes
+// through this first. It is safe to apply broadly: none of these values are
+// ever intentionally multi-line.
+func sanitizeHeaderValue(v string) string {
+	v = strings.ReplaceAll(v, "\r", "")
+	v = strings.ReplaceAll(v, "\n", "")
+	return v
+}
+
+// buildInviteMessage composes a minimal RFC 5322 plain-text invite email.
+// The subject line is the exact product copy the console spec calls for. No
+// em or en dashes; plain, on-brand voice. from, to, orgName, and inviterName
+// are all sanitized against header injection before composing: orgName and
+// inviterName in particular are user-controlled display names that flow
+// straight into the Subject line.
+func buildInviteMessage(from, to, orgName, inviterName, link string) []byte {
+	from = sanitizeHeaderValue(from)
+	to = sanitizeHeaderValue(to)
+	orgName = sanitizeHeaderValue(orgName)
+	inviterName = sanitizeHeaderValue(inviterName)
+	var b strings.Builder
+	b.WriteString("From: " + from + "\r\n")
+	b.WriteString("To: " + to + "\r\n")
+	b.WriteString("Subject: " + inviterName + " invited you to " + orgName + " on Mitos\r\n")
+	b.WriteString("MIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
+	b.WriteString("\r\n")
+	b.WriteString(inviterName + " invited you to join " + orgName + " on Mitos.\r\n\r\n")
+	b.WriteString("Accept the invitation:\r\n\r\n")
+	b.WriteString(link + "\r\n\r\n")
+	b.WriteString("This link is single-use and expires in 7 days. If you were not expecting this, ignore this email.\r\n")
+	return []byte(b.String())
+}
+
 // SendApproved composes the "you are in" approval email and delivers it over
 // SMTP. The recipient email is treated as PII: it is never logged and never
 // embedded in a returned error.
@@ -122,8 +189,11 @@ func consoleOrigin(rawURL string) string {
 
 // buildApprovedMessage composes a minimal RFC 5322 plain-text approval email.
 // The message carries no secret. Voice: plain, accessible, confident, peer of
-// the best labs. No em or en dashes.
+// the best labs. No em or en dashes. from and to are sanitized against
+// header injection before composing.
 func buildApprovedMessage(from, to, signupURL string) []byte {
+	from = sanitizeHeaderValue(from)
+	to = sanitizeHeaderValue(to)
 	var b strings.Builder
 	b.WriteString("From: " + from + "\r\n")
 	b.WriteString("To: " + to + "\r\n")
@@ -157,8 +227,11 @@ func verifyLink(base, token string) (string, error) {
 }
 
 // buildVerificationMessage composes a minimal RFC 5322 plain-text message. The
-// only sensitive content is the one-time verify link in the body.
+// only sensitive content is the one-time verify link in the body. from and to
+// are sanitized against header injection before composing.
 func buildVerificationMessage(from, to, link string) []byte {
+	from = sanitizeHeaderValue(from)
+	to = sanitizeHeaderValue(to)
 	var b strings.Builder
 	b.WriteString("From: " + from + "\r\n")
 	b.WriteString("To: " + to + "\r\n")

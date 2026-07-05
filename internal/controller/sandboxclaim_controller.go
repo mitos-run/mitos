@@ -394,21 +394,26 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 		return res, err
 	}
 
-	// Terminal phases: don't retry. A Terminated claim must never leave its
-	// backing husk pod running (issue #688): terminateLifetime deletes the pod
-	// after stamping the phase, and this reap is the self-heal for a crash or a
-	// failed delete between the stamp and the reap. Idempotent and usually a
-	// NotFound no-op; it records no usage event (the claim is Terminated, its
-	// one event was recorded at the terminate instant).
+	// Terminal phases: don't retry provisioning. A terminal claim must never
+	// leave its backing husk pod running (issue #688): terminateLifetime deletes
+	// the pod after stamping Terminated, and this reap is the self-heal for a
+	// crash or a failed delete between the stamp and the reap. The husk
+	// activation path can also fail the claim (SandboxFailed) AFTER the pod is
+	// already claimed and running, for example the token-secret-write failure in
+	// reconcileHuskClaim, with no usage tail ever recorded for that pod; reaping
+	// here closes that gap too: for a Failed claim the reap records the one tail
+	// event, for a Terminated claim the phase guard records nothing (its event
+	// was recorded at the terminate instant). Idempotent and usually a NotFound
+	// no-op: one label-selector List, empty in raw-forkd mode (no pod carries
+	// the label). A static lingering Running pod emits no new watch event on its
+	// own, so what actually converges a transient list/delete error here is the
+	// returned error driving the controller-runtime workqueue's backoff retry
+	// (plus a real pod event, if one occurs); the error is logged so a repeating
+	// loop is diagnosable.
 	if claim.Status.Phase == v1.SandboxFailed || claim.Status.Phase == v1.SandboxTerminated {
-		if claim.Status.Phase == v1.SandboxTerminated {
-			if err := r.reapClaimHuskPods(ctx, claim); err != nil {
-				// This is the self-heal for a crash or failed delete between
-				// the Terminated stamp and the reap (issue #688); operators
-				// need the failure visible to diagnose a repeating loop here.
-				log.FromContext(ctx).Error(err, "self-heal reap of a Terminated claim's husk pods failed; will retry", "claim", claim.Name)
-				return ctrl.Result{}, err
-			}
+		if err := r.reapClaimHuskPods(ctx, claim); err != nil {
+			logger.Error(err, "reap lingering claimed husk pods for terminal claim; will retry", "claim", claim.Name)
+			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
 	}
@@ -1275,9 +1280,12 @@ func (r *SandboxReconciler) reconcileDelete(ctx context.Context, claim *v1.Sandb
 // One claim, one event: a claim already Terminated recorded its event at the
 // TRUE terminate instant and recordHuskTerminations skips it here, so the
 // object-delete reap and any retried reap delete pods without recording
-// again. Idempotent: pods already gone are NotFound no-ops, and in raw-forkd
-// mode no pod carries the label. The instant comes from the reconciler clock
-// (r.now()) so tests can freeze it.
+// again. A Failed claim never went through terminateLifetime, so the phase
+// guard does NOT skip it: for a post-activation failure that left a claimed
+// pod running, the record here is what closes the billing window. Idempotent:
+// pods already gone are NotFound no-ops, and in raw-forkd mode no pod carries
+// the label. The instant comes from the reconciler clock (r.now()) so tests
+// can freeze it.
 func (r *SandboxReconciler) reapClaimHuskPods(ctx context.Context, claim *v1.Sandbox) error {
 	var claimedHusk corev1.PodList
 	if err := r.List(ctx, &claimedHusk, client.InNamespace(claim.Namespace), client.MatchingLabels{huskClaimLabel: claim.Name}); err != nil {
@@ -1400,12 +1408,23 @@ func (r *SandboxReconciler) terminateLifetime(ctx context.Context, claim *v1.San
 		}
 	}
 
-	// Close the usage tail window at this instant, BEFORE the phase is stamped
-	// (issue #682): recordHuskTerminations records only for a not-yet-Terminated
-	// claim, so this is the claim's ONE event, at the true terminate instant.
-	// Best-effort; a duplicate record from a requeued terminate (the stamp below
-	// failing) is deduplicated by the collector's finalized guard.
-	r.recordClaimHuskTerminations(ctx, claim)
+	// Husk path: the claim's backing VM lives in the claimed husk pod, which
+	// terminateOnNode above never touches (forkd does not track husk pods), so
+	// a lifetime terminate must delete the pod itself or the VM keeps running
+	// and keeps being scraped and billed until object deletion (issue #688).
+	// List the claimed husk pods and close the usage tail window on them FIRST,
+	// while claim.Status.Phase is still pre-Terminated so the one-event guard
+	// in recordHuskTerminations passes: this is the claim's ONE event, at the
+	// TRUE terminate instant (issue #682). A duplicate record from a requeued
+	// terminate (the stamp below failing) is deduplicated by the collector's
+	// finalized guard. A list failure requeues rather than under-billing the
+	// tail. No-op in raw-forkd mode: no pod carries the label.
+	var claimedHusk corev1.PodList
+	if err := r.List(ctx, &claimedHusk, client.InNamespace(claim.Namespace), client.MatchingLabels{huskClaimLabel: claim.Name}); err != nil {
+		logger.Error(err, "list claimed husk pods on lifetime expiry; will retry", "claim", claim.Name)
+		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+	}
+	r.recordHuskTerminations(claim, claimedHusk.Items, r.now())
 
 	now := metav1.Now()
 	claim.Status.Phase = v1.SandboxTerminated
@@ -1421,16 +1440,27 @@ func (r *SandboxReconciler) terminateLifetime(ctx context.Context, claim *v1.San
 		return ctrl.Result{}, err
 	}
 
-	// A husk-backed claim's VM lives in its claimed husk pod, which forkd never
-	// tracks, so terminateOnNode above did NOT stop it. Delete the pod so
-	// Terminated actually means the VM stopped: the memory and warm slot are
-	// released and the usage scrape lister drops the pod, so billing ends at
-	// the terminate instant recorded above (issue #688). This runs AFTER the
-	// terminal phase is durable so a retry can never observe Ready with a
-	// vanished pod and re-pend the claim into a fresh VM; the event record
-	// above is skipped on any later reap (the claim is Terminated). A delete
-	// error requeues, and the Terminated branch of reconcilePoolRef retries
-	// the reap until the pod is gone.
+	// Reap the claimed husk pod AFTER the Terminated phase is durable, not
+	// before: deleting it first fires the huskPodToClaim pod-delete watch while
+	// the claim still reads Ready on the apiserver, and a concurrent reconcile's
+	// checkHuskPodLost/rependOnHuskPodLost then mistakes this deliberate release
+	// for unexpected pod loss and re-pends the claim (Phase Pending, endpoint
+	// cleared) into a fresh VM, racing our own Status().Update; on a pool with
+	// no spare warm slot that re-pend never resolves. rependOnHuskPodLost only
+	// fires for a Ready claim, so persisting Terminated first closes the race.
+	// The tail usage record above is what actually closes BILLING (it is what
+	// stops the half-open scrape window from growing); this delete is what
+	// stops the VM, releases the memory and the warm slot, and drops the pod
+	// from live scrape billing (HuskPodScrapeLister filters only on pod state,
+	// never claim phase, so it keeps counting the pod as running until it is
+	// actually deleted). The reap's own record step is skipped here and on any
+	// later reap: the claim is Terminated. A delete failure returns the error,
+	// which requeues the reconcile; the requeued pass reads the now-durable
+	// Terminated phase and takes reconcilePoolRef's terminal-phase branch,
+	// whose reapClaimHuskPods call is the retry that guarantees this delete
+	// eventually happens (issue #688) rather than relying solely on
+	// reconcileDelete's identical cleanup at the claim's later GC-driven
+	// object deletion.
 	if err := r.reapClaimHuskPods(ctx, claim); err != nil {
 		logger.Error(err, "reap claimed husk pods on lifetime expiry; will retry", "claim", claim.Name)
 		return ctrl.Result{}, err

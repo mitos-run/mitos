@@ -8,7 +8,9 @@ import (
 	"sort"
 	"strings"
 
+	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/console"
+	"mitos.run/mitos/internal/saas/placement"
 )
 
 // knownAuthConnectors is the closed set of social-login provider identifiers
@@ -47,6 +49,50 @@ func capabilitiesFromEnv() console.Capabilities {
 		Proof:          true,
 		Ownership:      ownership,
 		AuthConnectors: parseAuthConnectors(os.Getenv("MITOS_CONSOLE_AUTH_CONNECTORS")),
+		Feedback:       feedbackCapabilityFromEnv(edition),
+		Version:        version,
+		Placement:      placementFromEnv(edition),
+	}
+}
+
+// placementFromEnv builds the deployment's placement registry (issue #712
+// phase 0): the operator-defined key and the values it advertises. Hosted
+// defaults to key "region" with the single Frankfurt value; self-hosted
+// community defaults to key "cluster" with a single "default" value. Either
+// can be overridden by MITOS_CONSOLE_PLACEMENT_KEY / MITOS_CONSOLE_PLACEMENT_VALUES
+// regardless of edition, so a self-host operator can rename the key to
+// whatever fits their fleet (cluster, zone, dc) without a code change, and a
+// hosted deployment can add a second region ahead of phase 1 actually
+// routing to it.
+func placementFromEnv(edition string) placement.Registry {
+	defaultKey := "cluster"
+	defaultValues := "default"
+	if edition == "hosted" {
+		defaultKey = "region"
+		defaultValues = "fra:Frankfurt (EU)"
+	}
+	key := envOr("MITOS_CONSOLE_PLACEMENT_KEY", defaultKey)
+	values := envOr("MITOS_CONSOLE_PLACEMENT_VALUES", defaultValues)
+	return placement.New(key, values)
+}
+
+// feedbackCapabilityFromEnv resolves the console's one-click feedback
+// channel. Hosted deployments default to email support (target overridable
+// via MITOS_CONSOLE_FEEDBACK_EMAIL); self-hosted community deployments
+// default to a GitHub new-issue link against mitos-run/mitos (target
+// overridable via MITOS_CONSOLE_FEEDBACK_GITHUB_REPO, e.g. for a fork). This
+// is server-controlled like the rest of Capabilities: the SPA only renders
+// what it is told, and there is no server write path for feedback in v1.
+func feedbackCapabilityFromEnv(edition string) console.FeedbackCapability {
+	if edition == "hosted" {
+		return console.FeedbackCapability{
+			Channel: "email",
+			Target:  envOr("MITOS_CONSOLE_FEEDBACK_EMAIL", "feedback@mitos.run"),
+		}
+	}
+	return console.FeedbackCapability{
+		Channel: "github",
+		Target:  envOr("MITOS_CONSOLE_FEEDBACK_GITHUB_REPO", "mitos-run/mitos"),
 	}
 }
 
@@ -103,6 +149,15 @@ func newAuthConnectorsHandler(caps console.Capabilities) http.HandlerFunc {
 	}
 }
 
+// planSourceFromEnv builds the console's org -> plan lookup from
+// MITOS_CONSOLE_TEAM_ORGS, a comma-separated list of org ids manually granted
+// PlanTeam. This is an early manual-grant mechanism, standing in for a real
+// subscription/payment integration; every org not listed resolves to
+// PlanFree. Unset or empty grants no org Team.
+func planSourceFromEnv() *billing.StaticPlanSource {
+	return billing.NewStaticPlanSource(splitNonEmpty(os.Getenv("MITOS_CONSOLE_TEAM_ORGS")))
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -113,6 +168,16 @@ func envOr(key, def string) string {
 func envBool(key string) bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	return v == "true" || v == "1" || v == "yes"
+}
+
+// instanceAdminEmailsFromEnv parses MITOS_CONSOLE_INSTANCE_ADMINS, a
+// comma-separated list of account emails granted the instance-operator
+// capability (GET/POST /console/admin/...). console.New normalizes case and
+// whitespace, so this just splits. Unset or empty grants none via this path;
+// the community-edition single-org-owner fallback (console.Console's
+// isInstanceAdmin) still applies regardless.
+func instanceAdminEmailsFromEnv() []string {
+	return splitNonEmpty(os.Getenv("MITOS_CONSOLE_INSTANCE_ADMINS"))
 }
 
 func splitNonEmpty(s string) []string {

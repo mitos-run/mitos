@@ -235,6 +235,36 @@ func TestWaitlistModeRecordsEntryAndDoesNotProvision(t *testing.T) {
 	}
 }
 
+// TestWaitlistModeDedupesByCanonicalEmail asserts a repeat SignUp for the
+// same identity (including a folded Gmail plus-tag variant) does not grow
+// the waitlist to a second row: the funnel's public intake (issue #718) must
+// be idempotent so a visitor who submits twice, or a client retry, does not
+// leave duplicate rows an operator later has to dedupe by hand.
+func TestWaitlistModeDedupesByCanonicalEmail(t *testing.T) {
+	ctx := context.Background()
+	h := newHarness(t, ModeWaitlist)
+
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
+		t.Fatalf("sign up: %v", err)
+	}
+	if _, err := h.svc.SignUp(ctx, "dev@example.com", ""); err != nil {
+		t.Fatalf("sign up (repeat): %v", err)
+	}
+	// A folded variant of the same canonical identity (canonicalEmail strips
+	// a "+tag" suffix for every provider) must also collapse.
+	if _, err := h.svc.SignUp(ctx, "dev+tag@example.com", ""); err != nil {
+		t.Fatalf("sign up (plus-tag variant): %v", err)
+	}
+
+	wl, err := h.svc.JoinWaitlist(ctx)
+	if err != nil {
+		t.Fatalf("waitlist: %v", err)
+	}
+	if len(wl) != 1 {
+		t.Fatalf("waitlist = %+v, want exactly one deduped entry", wl)
+	}
+}
+
 func TestOpenModeRejectsDuplicateEmail(t *testing.T) {
 	ctx := context.Background()
 	h := newHarness(t, ModeOpen)

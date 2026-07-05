@@ -176,3 +176,24 @@ export function getFirstRun(uc?: string): FirstRunContent {
   if (uc === undefined) return DEFAULT_ENTRY
   return FIRST_RUN.find((e) => e.slug === uc) ?? DEFAULT_ENTRY
 }
+
+// Synthetic trigger: shown in the 90 second troubleshooting panel so a stuck
+// user has something to copy-paste that proves the wiring works, independent
+// of whichever runtime tab they picked above. The CLI one-liner is `mitos run
+// <command>` (create, exec, terminate, documented in docs/cli.md).
+//
+// No exec RPC on the surface is plain-curl-able: every one is a connect-go
+// streaming RPC (Exec is bidi, ExecStream is server-streaming) and rejects a
+// plain curl application/json body with a 415, since streaming RPCs need a
+// Connect-enveloped body, not flat JSON. The only true unary JSON route is
+// POST /v1/fork (fields: template, id, per internal/mcp/httpbackend.go),
+// which itself creates a Running sandbox and flips the first-activity signal
+// on its own, so it stands alone as the raw-HTTP alternative below.
+export const SYNTHETIC_TRIGGER = {
+  cli: 'mitos run "echo hello"',
+  curl: `\
+curl -s -X POST https://api.mitos.run/v1/fork \\
+  -H "Authorization: Bearer $MITOS_API_KEY" -H "Content-Type: application/json" \\
+  -d '{"template":"python","id":"trigger-'$(date +%s)'"}'`,
+  note: 'Exec streaming needs the CLI or an SDK; a successful fork is already enough to light up your first activity.',
+}

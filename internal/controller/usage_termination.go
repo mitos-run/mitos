@@ -1,12 +1,9 @@
 package controller
 
 import (
-	"context"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/tenant"
@@ -20,7 +17,7 @@ import (
 // usage.Termination per claimed husk pod; the collector's HuskSource turns it
 // into a final sample on its next cycle.
 //
-// Both hooks are BEST-EFFORT and nil-safe: usage recording never blocks, fails,
+// The hook is BEST-EFFORT and nil-safe: usage recording never blocks, fails,
 // or delays a terminate (boring failure behavior; losing an event only
 // under-bills a tail, never double-bills, and never wedges deletion). Every
 // recorded field is control-plane data: the pod name, the controller's OWN
@@ -62,29 +59,9 @@ func (r *SandboxReconciler) recordHuskTerminations(claim *v1.Sandbox, pods []cor
 			VMID:      pod.Name,
 			APIID:     pod.Labels[huskClaimLabel],
 			OrgID:     org,
+			Region:    pod.Labels[tenant.RegionLabelKey],
 			StartedAt: started,
 			At:        at,
 		})
 	}
-}
-
-// recordClaimHuskTerminations lists the claim's claimed husk pods (by the
-// mitos.run/claim label the controller stamped) and records a termination for
-// each org-labeled one, stamped with the reconciler's clock (r.now(), so tests
-// can freeze the release instant). It is the hook for terminate paths that
-// have not already listed the pods (lifetime/idle expiry). A list failure is
-// logged at V(1) and skipped: best-effort, the terminate must proceed and the
-// cost is one under-billed tail. The logged error is apiserver text: it
-// carries no secret values.
-func (r *SandboxReconciler) recordClaimHuskTerminations(ctx context.Context, claim *v1.Sandbox) {
-	if r.UsageTerminations == nil {
-		return
-	}
-	var pods corev1.PodList
-	if err := r.List(ctx, &pods, client.InNamespace(claim.Namespace), client.MatchingLabels{huskClaimLabel: claim.Name}); err != nil {
-		log.FromContext(ctx).V(1).Info("list husk pods for usage termination; tail window not recorded",
-			"claim", claim.Name, "err", err.Error())
-		return
-	}
-	r.recordHuskTerminations(claim, pods.Items, r.now())
 }
