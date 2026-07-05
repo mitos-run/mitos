@@ -711,9 +711,13 @@ gateway:
   # namespace instead of the per-org mitos-org-<id> namespace. Use for QA
   # deployments where per-org namespaces are not provisioned and a shared
   # SandboxPool already exists in this namespace (e.g. "mitos"). Default
-  # empty (per-org namespacing, the production path). Org-label authz is
-  # preserved regardless: a key for org B cannot read or mutate org A's
-  # sandbox even in a shared namespace.
+  # empty (per-org namespacing, the production path). Sandbox LIFECYCLE authz is
+  # preserved regardless: a key for org B cannot read, exec in, or terminate org
+  # A's sandbox even in a shared namespace. NOTE: a shared namespace does NOT
+  # give an org boundary to objects a create REFERENCES by bare name, so in this
+  # mode the gateway REFUSES secretRef and workspace references (they could name a
+  # platform Secret or another tenant's object; GHSA-pgv2-9w24-j7wh). Use per-org
+  # tenancy to enable secretRef and workspaces safely.
   singleTenantNamespace: ""
   ingress:
     enabled: false

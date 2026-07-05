@@ -99,9 +99,21 @@ func WithHTTPClient(h *http.Client) Option {
 // and per-org namespacing applies. Use this ONLY for single-tenant QA
 // deployments where per-org namespaces are not provisioned: the shared pool
 // namespace (e.g. "mitos") already contains the SandboxPool and forkd can
-// reach it. Org-label authz is preserved: sandboxes still carry the org label
-// and cross-org access checks still reject keys for the wrong org, so a key
-// for org B cannot read or mutate org A's sandbox even in a shared namespace.
+// reach it.
+//
+// Sandbox LIFECYCLE authz is preserved: sandboxes carry the org label and a key
+// for org B cannot read, exec in, or terminate org A's sandbox even in a shared
+// namespace (getOwned re-checks the org label on every id-taking op).
+//
+// The shared namespace does NOT provide an org boundary for objects a create
+// REFERENCES by bare name: a Secret named via secretRef or a Workspace named via
+// workspace has no per-org meaning when every org shares the namespace, so a
+// tenant could name a platform Secret or another tenant's object and have it
+// mounted (GHSA-pgv2-9w24-j7wh). The create path therefore REFUSES secretRef and
+// workspace references while single-tenant mode is set (see create in
+// forward.go), and the controller resolvers additionally refuse a referenced
+// object whose org label differs from the claim's. Use per-org tenancy (a
+// namespace per org) to enable secretRef and workspaces safely.
 func WithSingleTenantNamespace(ns string) Option {
 	return func(k *K8sControlPlane) {
 		if ns != "" {
