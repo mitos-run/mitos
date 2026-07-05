@@ -110,10 +110,19 @@ type Deps struct {
 	ResourceProjects ResourceProjectStore
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
-	// self-hosted community edition.
+	// self-hosted community edition. Its Plan/Entitlements are the
+	// UNAUTHENTICATED-request/boot-time default; New always recomputes
+	// Entitlements from Plan and Edition so a caller cannot pass a stale or
+	// mismatched pair.
 	Capabilities Capabilities
-	Log          *slog.Logger
-	Now          func() time.Time
+	// Plans resolves an org's current billing plan for the per-request
+	// Plan/Entitlements resolution in handleCapabilities and the
+	// entitlementsFor gating helper. Defaults to a StaticPlanSource that
+	// resolves every org to PlanFree, so the BFF is safe to instantiate
+	// without a real plan/subscription backend.
+	Plans billing.PlanSource
+	Log   *slog.Logger
+	Now   func() time.Time
 }
 
 // Console is the org-scoped BFF. It reads the caller and org from the request
@@ -201,6 +210,16 @@ func New(deps Deps) *Console {
 	}
 	if deps.Capabilities.Edition == "" {
 		deps.Capabilities = defaultCapabilities()
+	}
+	if deps.Capabilities.Plan == "" {
+		deps.Capabilities.Plan = billing.PlanFree
+	}
+	// Entitlements is always SERVER-COMPUTED from Plan and Edition, never
+	// caller-supplied, so a Deps literal can never pass a stale or mismatched
+	// Plan/Entitlements pair.
+	deps.Capabilities.Entitlements = billing.EntitlementsFor(deps.Capabilities.Plan, deps.Capabilities.Edition)
+	if deps.Plans == nil {
+		deps.Plans = billing.NewStaticPlanSource(nil)
 	}
 	// Wrap the audit recorder with a DispatchingRecorder so every audit event
 	// is best-effort forwarded to the org's enabled sinks. The webhook sink is
@@ -958,6 +977,13 @@ func (c *Console) handleCreateSink(w http.ResponseWriter, r *http.Request) {
 		apierr.Encode(w, e)
 		return
 	}
+	// Audit-sink streaming is a hosted-only convenience gated on the org's
+	// plan (billing.Entitlements.AuditStreaming); the self-hosted community
+	// edition always resolves AuditStreaming true, so this is a no-op there.
+	if !c.entitlementsFor(r.Context(), orgID).AuditStreaming {
+		apierr.Encode(w, auditStreamingGatedError())
+		return
+	}
 	var req createSinkRequest
 	if err := decodeBody(r, &req); err != nil {
 		apierr.Encode(w, apierr.Get(apierr.CodeInvalidJSON).
@@ -1029,6 +1055,38 @@ func (c *Console) handleDeleteSink(w http.ResponseWriter, r *http.Request) {
 		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "deleted": id})
+}
+
+// entitlementsFor resolves orgID's plan entitlements for gating hosted-only
+// conveniences (audit-sink streaming and, in future, SSO enforcement/SCIM). A
+// plan-lookup failure fails CLOSED to the Free entitlements rather than
+// silently granting a hosted convenience the org has not paid for; the
+// self-hosted community edition always resolves to every entitlement enabled
+// regardless of the looked-up plan (billing.EntitlementsFor's own override).
+func (c *Console) entitlementsFor(ctx context.Context, orgID string) billing.Entitlements {
+	plan := billing.PlanFree
+	if c.deps.Plans != nil {
+		if p, err := c.deps.Plans.GetPlan(ctx, orgID); err == nil {
+			plan = p
+		}
+	}
+	return billing.EntitlementsFor(plan, c.deps.Capabilities.Edition)
+}
+
+// auditStreamingGatedError is the 402 returned when an org without the
+// AuditStreaming entitlement tries to create an audit sink. It is built
+// directly (like failSandbox's not_implemented case) rather than via
+// apierr.Catalogue: that catalogue is normative for the forkd/sandbox-server
+// runtime API, a different surface than this console BFF's own error shape.
+func auditStreamingGatedError() apierr.Error {
+	return apierr.Error{
+		Code:    "plan_required",
+		Message: "audit-sink streaming requires the Team plan",
+		Cause:   "this organization's plan does not include forwarding audit events to external sinks",
+		Remediation: "Upgrade to the Team plan to forward audit events to configured sinks (webhook, s3, splunk, datadog). " +
+			"The audit log itself, and its NDJSON export, remain fully available on every plan.",
+		Status: http.StatusPaymentRequired,
+	}
 }
 
 // allowedSinkTypes is the set of sink type values accepted by handleCreateSink.
