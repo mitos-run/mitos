@@ -205,7 +205,7 @@ type Engine struct {
 	// runTemplateBuild boots the VM, runs init in it, and snapshots it. It is a
 	// seam so the init-failure safety property can be tested WITHOUT launching
 	// Firecracker. The default delegates to the firecracker TemplateManager.
-	runTemplateBuild func(id string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec) error
+	runTemplateBuild func(id string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec, warmKernel bool) error
 
 	// captureGuestReady waits for the guest agent gRPC Control service to answer
 	// Ping and returns the ready client. It is the seam used by
@@ -974,7 +974,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 	if e.networkEnabled() {
 		e.egressBytes = readEgressCounterBytes
 	}
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, workload *firecracker.WorkloadSpec, warmKernel bool) error {
 		// Journal the build for its duration so a forkd that dies mid-build can
 		// reap the leaked build Firecracker + placeholder tap on restart (#469);
 		// drop the record once the build returns (the deferred Kill has run).
@@ -982,7 +982,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		onStarted := func(pid int, js firecracker.JailerState) {
 			e.journalBuild(id, pid, js, cfg.Network != nil)
 		}
-		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands, workload, onStarted)
+		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands, workload, warmKernel, onStarted)
 		return err
 	}
 	e.captureGuestReady = guestgrpc.WaitReady
@@ -2227,7 +2227,7 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 		image, len(plan), cached, len(plan)-cached)
 }
 
-func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources, forceRebuild bool) (retErr error) {
+func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources, forceRebuild bool, warmKernel bool) (retErr error) {
 	// Path-traversal guard (CodeQL go/path-injection): id becomes a host path
 	// component (templates/<id>/...) through recordTemplateDigest and verify. The
 	// gRPC boundary validates it, but the sandbox-server REST handler does not, so
@@ -2413,7 +2413,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 		cfg.VolumeDrives = drives
 	}
 
-	if err := e.runTemplateBuild(id, cfg, initCommands, workload); err != nil {
+	if err := e.runTemplateBuild(id, cfg, initCommands, workload, warmKernel); err != nil {
 		return err
 	}
 	d, err := recordTemplateDigest(e.casStore, e.dataDir, id, e.manifestMetadata(cfg))
