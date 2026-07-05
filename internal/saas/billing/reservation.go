@@ -29,18 +29,31 @@ type Reservation struct {
 // these are not published prices, they are the shapes and prices this slice
 // ships as its starting catalog. All three are priced ~30% under PAYG list,
 // per the boxDiscount math documented on CreditCentsForReservation.
+//
+// Unexported: Reservation has no reference fields (no slice/map/pointer), so
+// a value copy is already independent, but an EXPORTED var of struct type
+// can still be reassigned or field-mutated from any importing package
+// (billing.boxS.MonthlyCents = 0 would corrupt the shared catalog entry for
+// every subsequent reader in the process). BoxS/BoxM/BoxL below are
+// accessor functions instead, so a caller can only ever obtain a copy.
 var (
-	// BoxS is the smallest Box: 2 vCPU / 4 GiB for $19/month.
-	BoxS = Reservation{Key: "box_s", VCPU: 2, MemGiB: 4, MonthlyCents: 1900}
-	// BoxM is the mid Box: 4 vCPU / 8 GiB for $39/month.
-	BoxM = Reservation{Key: "box_m", VCPU: 4, MemGiB: 8, MonthlyCents: 3900}
-	// BoxL is the largest Box: 8 vCPU / 16 GiB for $75/month.
-	BoxL = Reservation{Key: "box_l", VCPU: 8, MemGiB: 16, MonthlyCents: 7500}
+	boxS = Reservation{Key: "box_s", VCPU: 2, MemGiB: 4, MonthlyCents: 1900}
+	boxM = Reservation{Key: "box_m", VCPU: 4, MemGiB: 8, MonthlyCents: 3900}
+	boxL = Reservation{Key: "box_l", VCPU: 8, MemGiB: 16, MonthlyCents: 7500}
 )
+
+// BoxS returns a copy of the smallest Box: 2 vCPU / 4 GiB for $19/month.
+func BoxS() Reservation { return boxS }
+
+// BoxM returns a copy of the mid Box: 4 vCPU / 8 GiB for $39/month.
+func BoxM() Reservation { return boxM }
+
+// BoxL returns a copy of the largest Box: 8 vCPU / 16 GiB for $75/month.
+func BoxL() Reservation { return boxL }
 
 // BoxCatalog returns the full Box catalog in S/M/L display order.
 func BoxCatalog() []Reservation {
-	return []Reservation{BoxS, BoxM, BoxL}
+	return []Reservation{boxS, boxM, boxL}
 }
 
 // boxDiscount is the fraction of the granted PAYG-equivalent credit value a
