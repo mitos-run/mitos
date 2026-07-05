@@ -145,11 +145,20 @@ func (s *Control) Create(ctx context.Context, orgID string, req console.CreateSa
 	if req.Template == "" {
 		return console.SandboxView{}, fmt.Errorf("create sandbox: a template is required")
 	}
+	labels := tenant.OrgLabels(orgID)
+	// Region is stamped ONLY when the request named one (issue #712 phase 0):
+	// an empty request.Region means the org's home region, itself resolved by
+	// the deployment default, so no label is written rather than an
+	// empty-string value. This sandbox is a tree root; every fork of it MUST
+	// inherit this label verbatim (see Fork below), never re-resolve it.
+	if req.Region != "" {
+		labels[tenant.RegionLabelKey] = req.Region
+	}
 	sandbox := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      randomSandboxName("sbx"),
 			Namespace: tenant.NamespaceForOrg(orgID),
-			Labels:    tenant.OrgLabels(orgID),
+			Labels:    labels,
 			Annotations: map[string]string{
 				requestedVCPUsAnnotation:  strconv.Itoa(int(req.VCPUs)),
 				requestedMemGiBAnnotation: strconv.Itoa(int(req.MemGiB)),
@@ -181,16 +190,31 @@ func (s *Control) Create(ctx context.Context, orgID string, req console.CreateSa
 // compounding one failure into two. The caller sees an error; the survivors
 // still appear on the next List/ForkTree read.
 func (s *Control) Fork(ctx context.Context, orgID, sandboxID string, count int) ([]string, error) {
-	if _, err := s.get(ctx, orgID, sandboxID); err != nil {
+	source, err := s.get(ctx, orgID, sandboxID)
+	if err != nil {
 		return nil, err
 	}
+	// A fork inherits the source's region label VERBATIM, never re-resolved:
+	// a live CoW fork cannot cross clusters (issue #712 phase 0), so region
+	// is a property of the whole fork tree, fixed at the tree root's
+	// creation, not a choice each fork makes independently. A source with no
+	// region label (predates this field, or the deployment never stamped
+	// one) simply propagates that absence.
+	region := source.Labels[tenant.RegionLabelKey]
 	ids := make([]string, 0, count)
 	for i := 0; i < count; i++ {
+		// A fresh label map per child: sharing one map instance across
+		// multiple ObjectMeta literals would alias every child's labels to
+		// the same backing map.
+		labels := tenant.OrgLabels(orgID)
+		if region != "" {
+			labels[tenant.RegionLabelKey] = region
+		}
 		child := &v1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      randomSandboxName(sandboxID + "-fork"),
 				Namespace: tenant.NamespaceForOrg(orgID),
-				Labels:    tenant.OrgLabels(orgID),
+				Labels:    labels,
 			},
 			Spec: v1.SandboxSpec{
 				Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: sandboxID}},
@@ -282,5 +306,6 @@ func viewOf(sb *v1.Sandbox, orgID string) console.SandboxView {
 		VCPUs:     vcpus,
 		MemBytes:  memBytes,
 		CreatedAt: sb.CreationTimestamp.Time,
+		Region:    sb.Labels[tenant.RegionLabelKey],
 	}
 }

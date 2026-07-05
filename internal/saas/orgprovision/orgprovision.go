@@ -18,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "mitos.run/mitos/api/v1"
+	"mitos.run/mitos/internal/tenant"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -31,14 +32,6 @@ type Provisioner struct {
 func New(c client.Client) *Provisioner {
 	return &Provisioner{client: c}
 }
-
-// regionLabelKey is the self-describing label stamped on the Org CR with the
-// org's home region (issue #712 phase 0 placement registry). It mirrors
-// tenant.OrgLabelKey's convention (a plain mitos.run/ label, not a spec
-// field) so no CRD schema change is needed to carry it. An empty region
-// (the deployment's registry default) stamps no label at all rather than an
-// empty-string value.
-const regionLabelKey = "mitos.run/region"
 
 // Provision ensures the cluster-scoped Org with metadata.name == orgID exists,
 // carrying displayName in its spec and, if region is non-empty, the org's
@@ -76,12 +69,12 @@ func (p *Provisioner) Provision(ctx context.Context, orgID, displayName, region 
 		return fmt.Errorf("orgprovision: load existing org %q: %w", orgID, gerr)
 	}
 	drifted := existing.Spec.DisplayName != displayName
-	if region != "" && existing.Labels[regionLabelKey] != region {
+	if region != "" && existing.Labels[tenant.RegionLabelKey] != region {
 		drifted = true
 		if existing.Labels == nil {
 			existing.Labels = map[string]string{}
 		}
-		existing.Labels[regionLabelKey] = region
+		existing.Labels[tenant.RegionLabelKey] = region
 	}
 	if !drifted {
 		return nil
@@ -100,5 +93,5 @@ func regionLabels(region string) map[string]string {
 	if region == "" {
 		return nil
 	}
-	return map[string]string{regionLabelKey: region}
+	return map[string]string{tenant.RegionLabelKey: region}
 }

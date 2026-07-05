@@ -15,7 +15,22 @@ import (
 
 	"mitos.run/mitos/internal/apierr"
 	"mitos.run/mitos/internal/saas"
+	"mitos.run/mitos/internal/saas/placement"
 )
+
+// validPlacementNames renders r's available value names as a comma-separated
+// list for an LLM-legible 400 remediation (issue #28's rule): "fra, iad"
+// rather than a raw JSON dump. Used only by handleCreateSandbox's region
+// validation error.
+func validPlacementNames(r placement.Registry) string {
+	names := make([]string, 0, len(r.Values))
+	for _, v := range r.Values {
+		if v.Available {
+			names = append(names, v.Name)
+		}
+	}
+	return strings.Join(names, ", ")
+}
 
 // allowedVCPUs / allowedMemGiB are the console's v1 quota bounds for the
 // create-sandbox vcpu/mem selects: conservative, static options (issue #322).
@@ -82,6 +97,11 @@ type createSandboxRequest struct {
 	VCPUs     int32  `json:"vcpus"`
 	MemGiB    int32  `json:"mem_gib"`
 	ProjectID string `json:"project_id"`
+	// Region is the placement value (issue #712 phase 0) requested for this
+	// sandbox's tree root. Empty means the org's home region. Validated
+	// against the deployment's placement.Registry in handleCreateSandbox
+	// before being forwarded to SandboxControl.Create.
+	Region string `json:"region"`
 }
 
 // handleCreateSandbox provisions a new sandbox in the caller's org. Authorization
@@ -121,6 +141,12 @@ func (c *Console) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 			WithCause("mem_gib must be one of 1, 2, 4, 8"))
 		return
 	}
+	if req.Region != "" && !c.deps.Capabilities.Placement.Valid(req.Region) {
+		apierr.Encode(w, apierr.Get(apierr.CodeInvalidInput).
+			WithCause(fmt.Sprintf("region %q is not a valid %s for this deployment", req.Region, c.deps.Capabilities.Placement.Key)).
+			WithRemediation(fmt.Sprintf("Omit region to use the org's home region, or set it to one of: %s.", validPlacementNames(c.deps.Capabilities.Placement))))
+		return
+	}
 	if req.ProjectID != "" {
 		found, err := c.validateProjectInOrg(r, orgID, req.ProjectID)
 		if err != nil {
@@ -149,6 +175,7 @@ func (c *Console) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 		Template: req.Template,
 		VCPUs:    req.VCPUs,
 		MemGiB:   req.MemGiB,
+		Region:   req.Region,
 	})
 	if err != nil {
 		c.failSandbox(w, err)

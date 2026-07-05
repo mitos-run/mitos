@@ -46,6 +46,15 @@ func sb(org, name, phase string) *v1.Sandbox {
 	}
 }
 
+// sbWithRegion builds a v1.Sandbox exactly like sb, but additionally
+// stamped with tenant.RegionLabelKey = region, so tests can exercise a fork
+// tree root that carries a placement value (issue #712 phase 0).
+func sbWithRegion(org, name, phase, region string) *v1.Sandbox {
+	s := sb(org, name, phase)
+	s.Labels[tenant.RegionLabelKey] = region
+	return s
+}
+
 func newControl(t *testing.T, objs ...client.Object) *Control {
 	t.Helper()
 	c := fakeclient.NewClientBuilder().WithScheme(scheme(t)).WithObjects(objs...).Build()
@@ -199,6 +208,48 @@ func TestCreateWritesOrgScopedSandboxWithPoolRef(t *testing.T) {
 	}
 }
 
+// TestCreateStampsRegionLabelWhenRequested asserts Create stamps
+// tenant.RegionLabelKey on the new Sandbox when req.Region is set (issue
+// #712 phase 0), and that the view surfaces it back.
+func TestCreateStampsRegionLabelWhenRequested(t *testing.T) {
+	c := newControl(t)
+	v, err := c.Create(context.Background(), "alice", console.CreateSandboxRequest{Template: "python", Region: "fra"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if v.Region != "fra" {
+		t.Errorf("view.Region = %q, want fra", v.Region)
+	}
+	var got v1.Sandbox
+	if err := c.c.Get(context.Background(), client.ObjectKey{Namespace: tenant.NamespaceForOrg("alice"), Name: v.ID}, &got); err != nil {
+		t.Fatalf("get created sandbox: %v", err)
+	}
+	if got.Labels[tenant.RegionLabelKey] != "fra" {
+		t.Errorf("region label = %q, want fra", got.Labels[tenant.RegionLabelKey])
+	}
+}
+
+// TestCreateStampsNoRegionLabelWhenUnrequested asserts Create writes no
+// region label at all (not an empty-string value) when req.Region is empty,
+// and the view's Region reads back empty.
+func TestCreateStampsNoRegionLabelWhenUnrequested(t *testing.T) {
+	c := newControl(t)
+	v, err := c.Create(context.Background(), "alice", console.CreateSandboxRequest{Template: "python"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if v.Region != "" {
+		t.Errorf("view.Region = %q, want empty", v.Region)
+	}
+	var got v1.Sandbox
+	if err := c.c.Get(context.Background(), client.ObjectKey{Namespace: tenant.NamespaceForOrg("alice"), Name: v.ID}, &got); err != nil {
+		t.Fatalf("get created sandbox: %v", err)
+	}
+	if _, ok := got.Labels[tenant.RegionLabelKey]; ok {
+		t.Errorf("expected no region label, got %q", got.Labels[tenant.RegionLabelKey])
+	}
+}
+
 // TestCreateRejectsEmptyTemplate asserts Create refuses a request with no
 // template rather than writing a Sandbox with a nil source.
 func TestCreateRejectsEmptyTemplate(t *testing.T) {
@@ -221,6 +272,45 @@ func TestForkRefusesCrossOrgSource(t *testing.T) {
 	}
 	if len(list.Items) != 1 {
 		t.Fatalf("Fork created sandboxes despite the cross-org refusal: %d items", len(list.Items))
+	}
+}
+
+// TestForkInheritsSourceRegionLabel asserts every fork child carries the
+// SAME region label as its source tree root, verbatim, never re-resolved
+// (issue #712 phase 0: a live CoW fork cannot cross clusters, so region is a
+// property of the whole tree).
+func TestForkInheritsSourceRegionLabel(t *testing.T) {
+	c := newControl(t, sbWithRegion("alice", "sb-a1", "Ready", "fra"))
+	ids, err := c.Fork(context.Background(), "alice", "sb-a1", 2)
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	for _, id := range ids {
+		v, err := c.Get(context.Background(), "alice", id)
+		if err != nil {
+			t.Fatalf("Get(alice, %s): %v", id, err)
+		}
+		if v.Region != "fra" {
+			t.Errorf("fork child %s Region = %q, want fra (inherited from source)", id, v.Region)
+		}
+	}
+}
+
+// TestForkOfSourceWithNoRegionLabelStaysUnset asserts a fork of a source with
+// no region label (predates the field, or the deployment never stamped one)
+// propagates that absence rather than defaulting to something.
+func TestForkOfSourceWithNoRegionLabelStaysUnset(t *testing.T) {
+	c := newControl(t, sb("alice", "sb-a1", "Ready"))
+	ids, err := c.Fork(context.Background(), "alice", "sb-a1", 1)
+	if err != nil {
+		t.Fatalf("Fork: %v", err)
+	}
+	v, err := c.Get(context.Background(), "alice", ids[0])
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if v.Region != "" {
+		t.Errorf("fork child Region = %q, want empty", v.Region)
 	}
 }
 
