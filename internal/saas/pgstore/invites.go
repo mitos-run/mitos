@@ -15,19 +15,23 @@ import (
 // violates a unique constraint and surfaces as saas.ErrConflict, matching
 // MemStore.
 //
-// created_at and expires_at are NOT NULL columns (migrations/0014_invitations.sql):
-// unlike MemStore, which happily stores a caller's zero-value time.Time as-is,
-// inserting NULL for either would violate the constraint. A zero CreatedAt or
-// ExpiresAt on the way in is defaulted to time.Now().UTC() here so every
-// caller, real or test, gets a valid row instead of a 23502 error. Real
-// callers (internal/saas/invites.go) always set both fields explicitly, so
-// this only matters for defensively-constructed invitations.
+// created_at and expires_at are NOT NULL columns (migrations/0014_invitations.sql),
+// so inserting NULL for either would violate the constraint. A zero CreatedAt
+// is defaulted to time.Now().UTC(), and a zero ExpiresAt to CreatedAt (after
+// its own defaulting) plus saas.InvitationTTL: an invitation created without
+// explicit times gets the standard 7-day lifetime, neither expired at birth
+// (defaulting to now) nor immortal (MemStore's old zero-means-never-expires
+// reading). MemStore.CreateInvitation applies the identical defaults; the
+// contract subtest InvitationZeroTimesDefaulted pins both so they cannot
+// diverge again. Real callers (internal/saas/invites.go) always set both
+// fields explicitly, so this only matters for defensively-constructed
+// invitations.
 func (s *PgStore) CreateInvitation(ctx context.Context, inv saas.Invitation) error {
 	if inv.CreatedAt.IsZero() {
 		inv.CreatedAt = time.Now().UTC()
 	}
 	if inv.ExpiresAt.IsZero() {
-		inv.ExpiresAt = time.Now().UTC()
+		inv.ExpiresAt = inv.CreatedAt.Add(saas.InvitationTTL)
 	}
 	const q = `
         INSERT INTO invitations (id, org_id, email, role, token_hash, state, inviter_id, created_at, expires_at)

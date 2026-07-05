@@ -342,14 +342,17 @@ func (s *MemStore) RevokeApiKey(_ context.Context, id string, at time.Time) erro
 	return nil
 }
 
-// CreateInvitation stores inv, defaulting a zero CreatedAt to now to match
-// PgStore: that backend's created_at column is NOT NULL, so PgStore.
-// CreateInvitation must default a zero CreatedAt rather than insert NULL.
-// Defaulting here too keeps both Store implementations behaving identically
-// for a caller that omits CreatedAt, rather than only one of them minting a
-// timestamp. ExpiresAt is left as given (zero included): unlike created_at,
-// a zero ExpiresAt is meaningful (EffectiveState treats it as "does not
-// expire"), and every real caller sets it explicitly, so it is not defaulted.
+// CreateInvitation stores inv, defaulting a zero CreatedAt to now and a zero
+// ExpiresAt to CreatedAt (after its own defaulting) plus InvitationTTL,
+// matching PgStore exactly: its created_at/expires_at columns are NOT NULL,
+// so it must mint values for zeroes, and both backends mint the SAME values
+// (the contract subtest InvitationZeroTimesDefaulted pins this) so they
+// cannot diverge. An invitation created without explicit times gets the
+// standard 7-day lifetime, neither expired at birth nor immortal. Every real
+// caller (invites.go) sets both fields explicitly, so this only matters for
+// defensively-constructed invitations. The defaulting happens at CREATE
+// time: a stored zero ExpiresAt can no longer occur, so EffectiveState's
+// zero-means-no-expiry reading applies only to unstored, in-flight values.
 func (s *MemStore) CreateInvitation(_ context.Context, inv Invitation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -358,6 +361,9 @@ func (s *MemStore) CreateInvitation(_ context.Context, inv Invitation) error {
 	}
 	if inv.CreatedAt.IsZero() {
 		inv.CreatedAt = time.Now().UTC()
+	}
+	if inv.ExpiresAt.IsZero() {
+		inv.ExpiresAt = inv.CreatedAt.Add(InvitationTTL)
 	}
 	s.invitations[inv.ID] = inv
 	s.inviteHash[inv.TokenHash] = inv.ID

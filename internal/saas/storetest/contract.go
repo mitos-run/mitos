@@ -470,6 +470,35 @@ func RunContract(t *testing.T, factory func(t *testing.T) saas.Store) {
 		}
 	})
 
+	t.Run("InvitationZeroTimesDefaulted", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		// Create with zero CreatedAt AND zero ExpiresAt. Both stores must
+		// default identically: CreatedAt to now, ExpiresAt to CreatedAt plus
+		// saas.InvitationTTL (7 days). NOT to now (expired at birth) and NOT
+		// left zero (never expires); an invitation created without explicit
+		// times gets the standard lifetime.
+		before := time.Now().UTC()
+		inv := saas.Invitation{ID: "inv-z", OrgID: "org-1", Email: "zoe@example.com", TokenHash: "hash-inv-z", State: saas.InvitationPending}
+		must(t, s.CreateInvitation(ctx, inv))
+		after := time.Now().UTC()
+
+		got, err := s.GetInvitationByTokenHash(ctx, "hash-inv-z")
+		if err != nil {
+			t.Fatalf("GetInvitationByTokenHash: %v", err)
+		}
+		if got.CreatedAt.Before(before) || got.CreatedAt.After(after) {
+			t.Errorf("defaulted CreatedAt = %v, want within [%v, %v]", got.CreatedAt, before, after)
+		}
+		wantExpiry := got.CreatedAt.Add(saas.InvitationTTL)
+		if !got.ExpiresAt.Equal(wantExpiry) {
+			t.Errorf("defaulted ExpiresAt = %v, want CreatedAt+InvitationTTL = %v", got.ExpiresAt, wantExpiry)
+		}
+		if st := got.EffectiveState(after); st != saas.InvitationPending {
+			t.Errorf("EffectiveState right after create = %q, want pending (not expired at birth)", st)
+		}
+	})
+
 	t.Run("InvitationUpdateStateAndRemove", func(t *testing.T) {
 		s := factory(t)
 		ctx := context.Background()
