@@ -1048,6 +1048,29 @@
         },
         "resources": { "$ref": "#/definitions/resources" }
       }
+    },
+    "networkPolicy": {
+      "description": "Network policy profiles (CiliumNetworkPolicy; requires Cilium). Control-plane only; husk/sandbox egress isolation is separate and always on.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "controlPlane": {
+          "description": "Opt-in egress lockdown for controller/console/gateway; the console SMTP allow is derived from console.onboarding.smtp.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Render the default-deny control-plane egress profile.",
+              "type": "boolean"
+            },
+            "extraEgress": {
+              "description": "Extra CiliumNetworkPolicy egress rule objects appended verbatim to the shared control-plane policy.",
+              "type": "array",
+              "items": { "type": "object" }
+            }
+          }
+        }
+      }
     }
   }
 }

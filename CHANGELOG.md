@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.21.0](https://github.com/mitos-run/mitos/compare/v1.20.4...v1.21.0) (2026-07-05)
+
+
+### Features
+
+* **chart:** opt-in control-plane egress lockdown with SMTP allow derived from smtp values ([#705](https://github.com/mitos-run/mitos/issues/705)) ([0f92437](https://github.com/mitos-run/mitos/commit/0f924373e4d20a57b1a8883b2c6123746b114643))
+
+## [1.20.4](https://github.com/mitos-run/mitos/compare/v1.20.3...v1.20.4) (2026-07-04)
+
+
+### Bug Fixes
+
+* **frontdoor:** route marketing pages + /mitos vanity to marketing; noindex console shell; www 301 ([#706](https://github.com/mitos-run/mitos/issues/706)) ([5299a81](https://github.com/mitos-run/mitos/commit/5299a81415c2c13fb45862b5eb4ef97815f7ed23))
+
 ## [1.20.3](https://github.com/mitos-run/mitos/compare/v1.20.2...v1.20.3) (2026-07-04)
 
 

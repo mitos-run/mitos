@@ -3,6 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- The console is a signed-in app. The SPA shell answers 200 for any
+         extension-less path (org slugs, /signup, /keys), so without noindex
+         search engines index empty "Mitos console" duplicates of those URLs. -->
+    <meta name="robots" content="noindex" />
     <title>Mitos console</title>
     <script>
       // Resolve the theme before first paint so nothing flashes the wrong
