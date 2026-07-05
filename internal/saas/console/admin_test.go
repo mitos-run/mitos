@@ -2,8 +2,10 @@ package console
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -364,6 +366,169 @@ func TestAdminOrgsShape(t *testing.T) {
 	wantCents := int64(billing.DefaultRates().CostCents(usage.UsageRecord{VCPUSeconds: 3600}))
 	if teamRow.MonthUsageCents != wantCents {
 		t.Errorf("month_usage_cents = %d, want %d (prior-month record must be excluded)", teamRow.MonthUsageCents, wantCents)
+	}
+}
+
+// --- Resilience: a per-org read failure must not abort the whole response ---
+
+// failingOrgDirectory wraps a real OrgDirectory but makes ListOrgMembers fail
+// for one specific org id (failOrgID), succeeding for every other org exactly
+// as the wrapped directory would. This lets a test simulate a single bad org
+// read (e.g. a transient store hiccup) without every org's read failing.
+type failingOrgDirectory struct {
+	OrgDirectory
+	failOrgID string
+	err       error
+}
+
+func (f *failingOrgDirectory) ListOrgMembers(ctx context.Context, orgID string) ([]saas.Membership, error) {
+	if orgID == f.failOrgID {
+		return nil, f.err
+	}
+	return f.OrgDirectory.ListOrgMembers(ctx, orgID)
+}
+
+// failingSandboxControl wraps a real SandboxControl but makes List fail for
+// one specific org id, succeeding for every other org.
+type failingSandboxControl struct {
+	SandboxControl
+	failOrgID string
+	err       error
+}
+
+func (f *failingSandboxControl) List(ctx context.Context, orgID string) ([]SandboxView, error) {
+	if orgID == f.failOrgID {
+		return nil, f.err
+	}
+	return f.SandboxControl.List(ctx, orgID)
+}
+
+// TestAdminOverviewPerOrgSandboxErrorIsNotFatal asserts that when
+// runningSandboxCount fails for exactly one org, GET /console/admin/overview
+// still returns 200 with the other orgs' sandboxes rolled up, and reports
+// that one org in failed_orgs rather than 500ing the whole request.
+func TestAdminOverviewPerOrgSandboxErrorIsNotFatal(t *testing.T) {
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+	})
+	ctx := context.Background()
+	ops, opsOrg, err := f.accounts.SignUp(ctx, "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp ops: %v", err)
+	}
+	_, org2, err := f.accounts.SignUp(ctx, "customer@example.com")
+	if err != nil {
+		t.Fatalf("SignUp customer: %v", err)
+	}
+	f.sandboxes.Add(SandboxView{ID: "sbx-1", OrgID: opsOrg.ID, Phase: "Running"})
+	f.sandboxes.Add(SandboxView{ID: "sbx-2", OrgID: org2.ID, Phase: "Running"})
+	f.con.deps.Sandboxes = &failingSandboxControl{
+		SandboxControl: f.sandboxes,
+		failOrgID:      org2.ID,
+		err:            errors.New("simulated sandbox store outage"),
+	}
+
+	w := f.req(t, "GET", "/console/admin/overview", ops.ID, opsOrg.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var view AdminOverview
+	decode(t, w, &view)
+	if view.Orgs != 2 {
+		t.Errorf("orgs = %d, want 2 (the true, uncapped total)", view.Orgs)
+	}
+	if view.RunningSandboxes != 1 {
+		t.Errorf("running_sandboxes = %d, want 1 (only ops's org, org2 skipped)", view.RunningSandboxes)
+	}
+	if view.FailedOrgs != 1 {
+		t.Errorf("failed_orgs = %d, want 1", view.FailedOrgs)
+	}
+}
+
+// TestAdminOverviewNoFailuresOmitsFailedOrgs asserts the all-succeed case
+// (every existing overview test's shape) reports a zero FailedOrgs, matching
+// the omitempty wire convention: no orgs failed, so the field carries no
+// signal.
+func TestAdminOverviewNoFailuresOmitsFailedOrgs(t *testing.T) {
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+	})
+	ops, org, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "GET", "/console/admin/overview", ops.ID, org.ID)
+	var view AdminOverview
+	decode(t, w, &view)
+	if view.FailedOrgs != 0 {
+		t.Errorf("failed_orgs = %d, want 0", view.FailedOrgs)
+	}
+	if strings.Contains(w.Body.String(), "failed_orgs") {
+		t.Errorf("expected failed_orgs to be omitted (omitempty) from the response body, got %s", w.Body.String())
+	}
+}
+
+// TestAdminOrgsPerOrgErrorIsNotFatal asserts that when ListOrgMembers fails
+// for exactly one org, GET /console/admin/orgs still returns 200 with the
+// other orgs' rows intact, reports the true uncapped total, and reports the
+// one failure in failed_orgs.
+func TestAdminOrgsPerOrgErrorIsNotFatal(t *testing.T) {
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+	})
+	ctx := context.Background()
+	ops, opsOrg, err := f.accounts.SignUp(ctx, "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp ops: %v", err)
+	}
+	_, org2, err := f.accounts.SignUp(ctx, "customer@example.com")
+	if err != nil {
+		t.Fatalf("SignUp customer: %v", err)
+	}
+	f.con.deps.Orgs = &failingOrgDirectory{
+		OrgDirectory: f.store,
+		failOrgID:    org2.ID,
+		err:          errors.New("simulated membership store outage"),
+	}
+
+	w := f.req(t, "GET", "/console/admin/orgs", ops.ID, opsOrg.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Orgs       []AdminOrgView `json:"orgs"`
+		Total      int            `json:"total"`
+		FailedOrgs int            `json:"failed_orgs"`
+	}
+	decode(t, w, &body)
+	if body.Total != 2 {
+		t.Errorf("total = %d, want 2 (the true, uncapped total)", body.Total)
+	}
+	if len(body.Orgs) != 1 || body.Orgs[0].ID != opsOrg.ID {
+		t.Fatalf("orgs = %+v, want exactly ops's org row", body.Orgs)
+	}
+	if body.FailedOrgs != 1 {
+		t.Errorf("failed_orgs = %d, want 1", body.FailedOrgs)
+	}
+}
+
+// TestAdminOrgsNoFailuresOmitsFailedOrgs asserts the all-succeed case never
+// regresses: no failed_orgs key at all when every org's read succeeds.
+func TestAdminOrgsNoFailuresOmitsFailedOrgs(t *testing.T) {
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+	})
+	ops, org, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "GET", "/console/admin/orgs", ops.ID, org.ID)
+	if strings.Contains(w.Body.String(), "failed_orgs") {
+		t.Errorf("expected failed_orgs to be omitted from the response body when no org failed, got %s", w.Body.String())
 	}
 }
 

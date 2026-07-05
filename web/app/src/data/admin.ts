@@ -3,14 +3,14 @@
 // capability (see routes.tsx's `when: (c) => c.admin`). Approve invalidates
 // the waitlist query so an approved entry drops off the list immediately.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type AdminOverview, type AdminOrgView, type AdminNodesResponse, type AdminWaitlistEntryView } from '../api'
+import { api, type AdminOverview, type AdminOrgsResponse, type AdminNodesResponse, type AdminWaitlistEntryView } from '../api'
 
 export function useAdminOverview() {
   return useQuery<AdminOverview>({ queryKey: ['admin', 'overview'], queryFn: () => api.adminOverview() })
 }
 
 export function useAdminOrgs() {
-  return useQuery<{ orgs: AdminOrgView[]; total: number }>({ queryKey: ['admin', 'orgs'], queryFn: () => api.adminOrgs() })
+  return useQuery<AdminOrgsResponse>({ queryKey: ['admin', 'orgs'], queryFn: () => api.adminOrgs() })
 }
 
 export function useAdminNodes() {

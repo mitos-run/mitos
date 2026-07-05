@@ -270,10 +270,14 @@ func signupMode(signupEnabled bool) string {
 // deployment-wide counts an operator lands on first. NodesReady/NodesTotal
 // are nil when no NodeSource is configured (Deps.Nodes == nil), so the SPA
 // can render an honest "not available in this deployment" state rather than
-// a fabricated 0/0.
+// a fabricated 0/0. FailedOrgs is omitted (omitempty) when zero; when
+// nonzero it reports how many orgs' per-org reads failed and were skipped
+// from RunningSandboxes rather than failing the whole request (see
+// handleAdminOverview).
 type AdminOverview struct {
 	Orgs             int    `json:"orgs"`
 	RunningSandboxes int    `json:"running_sandboxes"`
+	FailedOrgs       int    `json:"failed_orgs,omitempty"`
 	NodesReady       *int   `json:"nodes_ready"`
 	NodesTotal       *int   `json:"nodes_total"`
 	SignupMode       string `json:"signup_mode"`
@@ -292,17 +296,28 @@ func (c *Console) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	running := 0
+	failedOrgs := 0
 	for _, org := range capped {
 		n, err := c.runningSandboxCount(r.Context(), org.ID)
 		if err != nil {
-			apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox count could not be read"))
-			return
+			// A per-org sandbox-count failure is NOT fatal to the overview,
+			// the same principle the Nodes handling below applies: the rest
+			// of the deployment-wide summary is still useful, so this org is
+			// skipped from RunningSandboxes (rather than aborting the whole
+			// response for every org over one bad read) and counted in
+			// FailedOrgs so the operator can see the rollup is partial.
+			if c.deps.Log != nil {
+				c.deps.Log.Warn("admin overview: running sandbox count failed", "org", org.ID, "err", err.Error())
+			}
+			failedOrgs++
+			continue
 		}
 		running += n
 	}
 	view := AdminOverview{
 		Orgs:             len(all),
 		RunningSandboxes: running,
+		FailedOrgs:       failedOrgs,
 		SignupMode:       signupMode(c.deps.Capabilities.Signup),
 	}
 	if c.deps.Nodes != nil {
@@ -370,21 +385,36 @@ func (c *Console) handleAdminOrgs(w http.ResponseWriter, r *http.Request) {
 	}
 	monthStart := startOfMonth(c.deps.Now())
 	out := make([]AdminOrgView, 0, len(capped))
+	failedOrgs := 0
 	for _, org := range capped {
+		// A per-org read failure (membership, sandbox count, or usage) is NOT
+		// fatal to the whole table: the same principle handleAdminOverview
+		// applies to the Nodes read. Skip just this org, log the real error
+		// for an operator to act on, and count it in failedOrgs, rather than
+		// failing every org's row because one org's read hiccuped.
 		members, err := c.deps.Orgs.ListOrgMembers(r.Context(), org.ID)
 		if err != nil {
-			apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the org membership could not be read"))
-			return
+			if c.deps.Log != nil {
+				c.deps.Log.Warn("admin orgs: org membership read failed", "org", org.ID, "err", err.Error())
+			}
+			failedOrgs++
+			continue
 		}
 		running, err := c.runningSandboxCount(r.Context(), org.ID)
 		if err != nil {
-			apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox count could not be read"))
-			return
+			if c.deps.Log != nil {
+				c.deps.Log.Warn("admin orgs: running sandbox count failed", "org", org.ID, "err", err.Error())
+			}
+			failedOrgs++
+			continue
 		}
 		usageCents, err := c.monthUsageCents(r.Context(), org.ID, monthStart)
 		if err != nil {
-			apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the usage rollup could not be read"))
-			return
+			if c.deps.Log != nil {
+				c.deps.Log.Warn("admin orgs: usage rollup read failed", "org", org.ID, "err", err.Error())
+			}
+			failedOrgs++
+			continue
 		}
 		out = append(out, AdminOrgView{
 			ID:              org.ID,
@@ -402,7 +432,11 @@ func (c *Console) handleAdminOrgs(w http.ResponseWriter, r *http.Request) {
 		Detail:     "viewed the instance operator org list",
 		At:         c.deps.Now(),
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"orgs": out, "total": len(all)})
+	resp := map[string]any{"orgs": out, "total": len(all)}
+	if failedOrgs > 0 {
+		resp["failed_orgs"] = failedOrgs
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // --- Waitlist (GET /console/admin/waitlist, POST .../{id}/approve) ---

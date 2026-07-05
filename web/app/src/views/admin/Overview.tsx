@@ -38,6 +38,12 @@ export function AdminOverview() {
               hint={data.signup_mode === 'open' ? 'self-serve signup is enabled' : 'signups land on the waitlist'}
             />
           </div>
+          {!!data.failed_orgs && (
+            <p className="t-dim" style={{ fontSize: 'var(--step--1)', margin: 'var(--space-3) 0 0' }}>
+              {data.failed_orgs} organization{data.failed_orgs === 1 ? '' : 's'} could not be read and{' '}
+              {data.failed_orgs === 1 ? 'is' : 'are'} omitted from these figures.
+            </p>
+          )}
           <nav aria-label="Operate sections" style={{ marginTop: 'var(--space-7)', display: 'flex', gap: 'var(--space-5)' }}>
             <Link to="/admin/orgs" className="t-dim" style={{ color: 'var(--cyan)', textDecoration: 'none' }}>
               View orgs

@@ -235,6 +235,10 @@ export type AdminOverview = {
   nodes_ready: number | null
   nodes_total: number | null
   signup_mode: 'open' | 'waitlist'
+  // Present only when nonzero (the server's omitempty convention): how many
+  // orgs' per-org reads failed and were skipped from running_sandboxes
+  // rather than failing the whole overview.
+  failed_orgs?: number
 }
 
 export type AdminOrgView = {
@@ -264,6 +268,15 @@ export type AdminWaitlistEntryView = {
   id: string
   email: string
   created_at: string
+}
+
+export type AdminOrgsResponse = {
+  orgs: AdminOrgView[]
+  total: number
+  // Present only when nonzero (the server's omitempty convention): how many
+  // orgs' per-org reads (membership, running count, usage) failed and were
+  // omitted from orgs rather than failing the whole list.
+  failed_orgs?: number
 }
 
 async function get<T>(path: string): Promise<T> {
@@ -441,7 +454,7 @@ export const api = {
       method: 'POST',
       credentials: 'same-origin',
     })
-    if (!r.ok) throw new Error(`resend invite: ${r.status}`)
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'resend invite'))
     return (await r.json()) as InvitationView
   },
   // inviteLookup is the PUBLIC pre-auth call: no credentials are required
@@ -449,7 +462,7 @@ export const api = {
   // auth.
   inviteLookup: async (token: string) => {
     const r = await fetch(`/console/invites/lookup?token=${encodeURIComponent(token)}`)
-    if (!r.ok) throw new Error(`invite lookup: ${r.status}`)
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'invite lookup'))
     return (await r.json()) as InviteLookupView
   },
   acceptInvite: (token: string) => post<{ org_id: string; role: Role }>('/console/invites/accept', { token }),
@@ -569,7 +582,7 @@ export const api = {
     if (!r.ok && r.status !== 204) throw new Error(`revoke project member: ${r.status}`)
   },
   adminOverview: () => get<AdminOverview>('/console/admin/overview'),
-  adminOrgs: () => get<{ orgs: AdminOrgView[]; total: number }>('/console/admin/orgs'),
+  adminOrgs: () => get<AdminOrgsResponse>('/console/admin/orgs'),
   adminNodes: () => get<AdminNodesResponse>('/console/admin/nodes'),
   adminWaitlist: () => get<{ entries: AdminWaitlistEntryView[] }>('/console/admin/waitlist').then((r) => r.entries ?? []),
   approveWaitlistEntry: async (id: string) => {

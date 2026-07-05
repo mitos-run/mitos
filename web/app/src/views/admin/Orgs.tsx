@@ -36,6 +36,12 @@ export function AdminOrgs() {
               Showing {orgs.length} of {data.total} organizations (oldest first; the rollup is capped on large deployments).
             </p>
           )}
+          {!!data?.failed_orgs && (
+            <p className="t-dim" style={{ fontSize: 'var(--step--1)', margin: '0 0 var(--space-3)' }}>
+              {data.failed_orgs} organization{data.failed_orgs === 1 ? '' : 's'} could not be read and{' '}
+              {data.failed_orgs === 1 ? 'is' : 'are'} omitted from these figures.
+            </p>
+          )}
           <table className="tbl" aria-label="Organizations">
             <thead>
               <tr>
