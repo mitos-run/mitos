@@ -1,5 +1,63 @@
 # Changelog
 
+## [1.22.0](https://github.com/mitos-run/mitos/compare/v1.21.0...v1.22.0) (2026-07-05)
+
+
+### Features
+
+* **admin:** instance-admin capability, authz gate, and overview endpoint ([2c4d8e4](https://github.com/mitos-run/mitos/commit/2c4d8e45c09c26be3c25ef035dd180c14ac15b98))
+* **admin:** node inventory view over the cluster's k8s nodes ([de69162](https://github.com/mitos-run/mitos/commit/de6916228a7b062e14b9f126f291065a02c4308f))
+* **admin:** org rollup table and waitlist list/approve ([281f9c4](https://github.com/mitos-run/mitos/commit/281f9c406be69c8e7d9a5b721b092e28c97a4c2b))
+* **admin:** SPA Operate section (overview, orgs, nodes, waitlist) ([a5c1d4d](https://github.com/mitos-run/mitos/commit/a5c1d4dc043fb35b3f8c3701826ed5f3326f4b12))
+* **billing:** Box reservation catalog and monthly ledger grants ([fd9434d](https://github.com/mitos-run/mitos/commit/fd9434d279eff5bb53e1f6a173249ea637658d2c))
+* **billing:** plan entitlements and per-org capabilities advertisement ([581aba1](https://github.com/mitos-run/mitos/commit/581aba15321f026330888b61b782d219c98d7e24))
+* **brand:** add website semantic type tokens to brand tokens.css ([45faa6a](https://github.com/mitos-run/mitos/commit/45faa6a63c266a876483afe22b5dfc6f8a4ca4b3))
+* **console:** add accessible theme toggle to the top bar ([146b94b](https://github.com/mitos-run/mitos/commit/146b94ba9a3f287131d67cf6573b913ec0a4f0a9))
+* **console:** add Bring your team nudge to the Overview ([f6e028a](https://github.com/mitos-run/mitos/commit/f6e028a68d7de2d1d316f224f77e46d90bcf9399))
+* **console:** add collectDiagnostics for one-click feedback ([ba0add6](https://github.com/mitos-run/mitos/commit/ba0add695c1c092466dfadd088ef09e11656e576))
+* **console:** audit events carry actor and target names, not bare ids ([dc56938](https://github.com/mitos-run/mitos/commit/dc56938e10db4ada6e6b292a77f9afe735ed7010))
+* **console:** audit sentences and shared date formatting across the SPA ([2968ae4](https://github.com/mitos-run/mitos/commit/2968ae4ebe2f608d19a27a48540e997c71610aef))
+* **console:** Box catalog endpoint, org-plan wiring, and Billing UI ([9eef807](https://github.com/mitos-run/mitos/commit/9eef807edf8982018e821afd615f73e98f3917f8))
+* **console:** console revamp: theming, human-readable audit, invites, operate verbs, pricing shapes, operator plane, onboarding, mobile, feedback ([b3ad8df](https://github.com/mitos-run/mitos/commit/b3ad8dffb8f7275173b5388067f31eeb2201c8ed))
+* **console:** default theme to dark, not OS preference ([da9e1f7](https://github.com/mitos-run/mitos/commit/da9e1f725ccfa86452eae634bf3075996b918cd5))
+* **console:** durable audit persistence gains actor/target fields and a list limit ([b161a73](https://github.com/mitos-run/mitos/commit/b161a7333a6ddbd501e39ac4c01d085480336738))
+* **console:** endowed progress, waiting timeout, and fork-tree celebration in FirstRun ([74b8fef](https://github.com/mitos-run/mitos/commit/74b8feff95fe131805ff91c7db80d5334b5d6aa1))
+* **console:** fork tree node selection and detail panel ([263050e](https://github.com/mitos-run/mitos/commit/263050e03545a0dc76e1584df4c5c0f5f8fa3997))
+* **console:** invite management endpoints, RBAC, audit, and rate limit ([c724334](https://github.com/mitos-run/mitos/commit/c7243346aa46d1f00296be7832bcb8c91a3ec620))
+* **console:** live log tail, run-command panel, and header operate actions ([cc86d15](https://github.com/mitos-run/mitos/commit/cc86d156bd72ef906d57aae4cc9622dd793fe458))
+* **console:** members list shows a joined name and email, not a bare id ([0b950bd](https://github.com/mitos-run/mitos/commit/0b950bd517036dcba1e7181e5d3db1001045c09a))
+* **console:** mobile pass - responsive tables, stat grids, sheet modals, touch targets ([5df7cad](https://github.com/mitos-run/mitos/commit/5df7cad9da5bb5975b80da4aff988d19e2ead17c))
+* **console:** new-sandbox modal, create/fork/exec client, sandboxes CTA ([ecf7e22](https://github.com/mitos-run/mitos/commit/ecf7e22090e1f615b1f2895cd1fee981c6991fd5))
+* **console:** one-click feedback button in TopBar ([26ec15a](https://github.com/mitos-run/mitos/commit/26ec15a40f1f04913053e1581418b116fa24ad8e))
+* **console:** sandbox create/fork/exec/live-log seam and handlers ([286de77](https://github.com/mitos-run/mitos/commit/286de77f032322274f775f092eaf49aef8b4480f))
+* **console:** server-advertise feedback channel and build version ([99d1c5c](https://github.com/mitos-run/mitos/commit/99d1c5c278d13b261a79cb90ca61ab888aca2c24))
+* **console:** version footer under the sidebar ownership badge ([a381982](https://github.com/mitos-run/mitos/commit/a381982356a3d5c51fce19559e963aafeae72344))
+* **console:** wire create/fork/exec to the real cluster sandbox control ([fcb22c0](https://github.com/mitos-run/mitos/commit/fcb22c01f7f7ccd75d7886726129886cf1c7e10b))
+* **invites:** public lookup + accept flow, signup auto-join, SPA accept page ([fdbed71](https://github.com/mitos-run/mitos/commit/fdbed712e1bdf5651011554317052cc086bcad2d))
+* **members:** invite modal, pending invites section, and member removal ([5b5979e](https://github.com/mitos-run/mitos/commit/5b5979e09b5481f50da53d693bda98b0d7bd0a82))
+* **onboarding:** SMTP invite email delivery, wired into the console binary ([c168cd7](https://github.com/mitos-run/mitos/commit/c168cd7a798ca92311d632bc0a00e3d60b6df9c4))
+* **saas:** org invitation entity, store, and lifecycle service ([9f2d81a](https://github.com/mitos-run/mitos/commit/9f2d81a72a0eb76e777155481e1a0a18b8ba9782))
+
+
+### Bug Fixes
+
+* **console:** abort the SSE probe fetch in useLogStream ([59fbfea](https://github.com/mitos-run/mitos/commit/59fbfeab426fe5d88cdbc60b57eaa298cab58089))
+* **console:** add missing audit sentences, reuse error helper, fix CSS class ([dc926a3](https://github.com/mitos-run/mitos/commit/dc926a38e9a0f6d591266f6dbac485072cd38685))
+* **console:** admin overview/orgs survive a single org's read failure ([af43d94](https://github.com/mitos-run/mitos/commit/af43d94a6f0faa11dc71523f2a04ee93f2d8806b))
+* **console:** audit sentence copy for profile.update and session.revoke ([af0e342](https://github.com/mitos-run/mitos/commit/af0e3421d8341ff34d3596d6505b28238054b8d7))
+* **console:** bound sandbox exec, add honest sizing and live-log copy ([97a2aa4](https://github.com/mitos-run/mitos/commit/97a2aa4218ae400281f67f56017b541f2c6169e5))
+* **console:** default zero invitation ExpiresAt to CreatedAt plus InvitationTTL in both stores ([40e8aa8](https://github.com/mitos-run/mitos/commit/40e8aa8bcbcb77114f9f3f6dafeb1ea392114e3c))
+* **console:** default zero invitation timestamps, unbreak audit remediation lint, bound size annotation parsing ([a847b7a](https://github.com/mitos-run/mitos/commit/a847b7a3fa4f3e74267e4c3add9a515a43a64ffc))
+* **console:** honest dead-invite states, focus management, and self-leave UX ([26d04a6](https://github.com/mitos-run/mitos/commit/26d04a60e5559a2787e6724858925994ca4bc5f6))
+* **console:** share appearance state across ThemeToggle and Settings ([cc864b7](https://github.com/mitos-run/mitos/commit/cc864b712244d388c34c249b214709af3b8d7602))
+* **console:** stop the page body from scrolling horizontally on phones ([c6d1a51](https://github.com/mitos-run/mitos/commit/c6d1a512ce04ab388205a7a2c3815900d5d50e44))
+* **console:** use shared modal pattern for remove-member confirm ([7a66127](https://github.com/mitos-run/mitos/commit/7a6612710d146f8746e791b05eb4af2719bf81e8))
+* **firstrun:** drop the dead ExecStream curl from the synthetic trigger ([7a4ee50](https://github.com/mitos-run/mitos/commit/7a4ee50c44ce5bd897bb287cc68b7c4777fdf9cc))
+* **firstrun:** ground synthetic-trigger curl in a real runtime route ([462fe67](https://github.com/mitos-run/mitos/commit/462fe6756d06167de86e81e9b9e895f981cc0052))
+* **saas:** atomic invite delivery, honest rate-limit accounting, no self-demote on accept ([d8ce100](https://github.com/mitos-run/mitos/commit/d8ce1006bacaf1ccd4b7c7de2eea89511c6245fd))
+* **saas:** close invite privilege-escalation, header-injection, and race findings ([b35b047](https://github.com/mitos-run/mitos/commit/b35b0478ed256b6b370d7be20a9c936b08e9beb7))
+* unbreak unique-violation detection, type admin/orgs response, refix panel focus ([e060b1a](https://github.com/mitos-run/mitos/commit/e060b1a5fbb9d43b911c16a8dbfa53ce1ee2769e))
+
 ## [1.21.0](https://github.com/mitos-run/mitos/compare/v1.20.4...v1.21.0) (2026-07-05)
 
 
