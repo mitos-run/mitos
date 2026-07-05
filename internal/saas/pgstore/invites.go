@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"mitos.run/mitos/internal/saas"
 )
@@ -18,6 +19,19 @@ import (
 // address); a violation of any other unique constraint on the table (a
 // duplicate id or token_hash) means a genuine saas.ErrConflict.
 const invitationsPendingUniqueIndex = "invitations_org_email_pending_idx"
+
+// isPendingInviteConflict reports whether err is specifically a violation of
+// invitationsPendingUniqueIndex: an invitation is already pending for this
+// (org_id, lower(email)). Unlike isUniqueViolation (pgstore.go), which
+// matches on SQLSTATE 23505 alone, this ALSO requires the constraint name so
+// it never misclassifies a duplicate id or token_hash (a genuine
+// saas.ErrConflict) as a pending-invite conflict. Used only by
+// CreateInvitation and ReplaceInvitation, which check this first and fall
+// back to isUniqueViolation for every other unique violation on the table.
+func isPendingInviteConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation && pgErr.ConstraintName == invitationsPendingUniqueIndex
+}
 
 // CreateInvitation inserts a new invitation row. A duplicate id or token hash
 // violates a unique constraint and surfaces as saas.ErrConflict, matching
@@ -50,10 +64,10 @@ func (s *PgStore) CreateInvitation(ctx context.Context, inv saas.Invitation) err
 	_, err := s.pool.Exec(ctx, q,
 		inv.ID, inv.OrgID, inv.Email, string(inv.Role), inv.TokenHash, string(inv.State), inv.InviterID,
 		timePtr(inv.CreatedAt), timePtr(inv.ExpiresAt))
-	if c := uniqueViolationConstraint(err); c != "" {
-		if c == invitationsPendingUniqueIndex {
-			return saas.ErrInvitePending
-		}
+	if isPendingInviteConflict(err) {
+		return saas.ErrInvitePending
+	}
+	if isUniqueViolation(err) {
 		return saas.ErrConflict
 	}
 	if err != nil {
@@ -98,10 +112,10 @@ func (s *PgStore) ReplaceInvitation(ctx context.Context, oldID string, fresh saa
 	_, err = tx.Exec(ctx, insertQ,
 		fresh.ID, fresh.OrgID, fresh.Email, string(fresh.Role), fresh.TokenHash, string(fresh.State), fresh.InviterID,
 		timePtr(fresh.CreatedAt), timePtr(fresh.ExpiresAt))
-	if c := uniqueViolationConstraint(err); c != "" {
-		if c == invitationsPendingUniqueIndex {
-			return saas.ErrInvitePending
-		}
+	if isPendingInviteConflict(err) {
+		return saas.ErrInvitePending
+	}
+	if isUniqueViolation(err) {
 		return saas.ErrConflict
 	}
 	if err != nil {

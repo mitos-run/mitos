@@ -176,6 +176,12 @@ export function ForkTree() {
 
       {selectedNode && (
         <NodeDetailPanel
+          // Keyed by node.id: switching from one selected node straight to
+          // another (without the panel closing in between) must re-run the
+          // heading focus effect so focus/announcement moves again. Without
+          // the key, React reuses the same component instance across the
+          // node change, and the mount-only focus effect never re-fires.
+          key={selectedNode.id}
           node={selectedNode}
           onClose={() => {
             setSelectedId(null)

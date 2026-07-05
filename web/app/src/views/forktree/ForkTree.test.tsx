@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, fireEvent } from '@testing-library/react'
 import { waitFor, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   createRootRoute,
@@ -203,6 +204,29 @@ describe('ForkTree node detail panel', () => {
     const panel = screen.getByRole('region', { name: /details for sandbox fork-a/i })
     const heading = within(panel).getByRole('heading', { name: 'fork-a' })
     await waitFor(() => expect(document.activeElement).toBe(heading))
+  })
+
+  // Switching directly from one node's open panel to a different node's
+  // (without closing in between) must move focus/announcement again. Uses
+  // userEvent (not fireEvent) because real browsers move focus to a button
+  // on click; fireEvent.click does not simulate that, which would mask the
+  // regression this guards (the panel component is keyed by node.id so
+  // React remounts it and reruns the heading focus effect, rather than
+  // reusing the same instance and leaving focus on the just-clicked button).
+  it('moves focus to the new heading when a different row Details button is activated while the panel is already open', async () => {
+    const user = userEvent.setup()
+    renderForkTree()
+    await waitFor(() => expect(screen.getByRole('table', { name: /fork tree/i })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /view details for root/i }))
+    const rootPanel = screen.getByRole('region', { name: /details for sandbox root/i })
+    const rootHeading = within(rootPanel).getByRole('heading', { name: 'root' })
+    await waitFor(() => expect(document.activeElement).toBe(rootHeading))
+
+    await user.click(screen.getByRole('button', { name: /view details for fork-a/i }))
+    expect(screen.queryByRole('region', { name: /details for sandbox root/i })).not.toBeInTheDocument()
+    const forkPanel = screen.getByRole('region', { name: /details for sandbox fork-a/i })
+    const forkHeading = within(forkPanel).getByRole('heading', { name: 'fork-a' })
+    await waitFor(() => expect(document.activeElement).toBe(forkHeading))
   })
 
   // Closing the panel must return focus to the button that opened it, not

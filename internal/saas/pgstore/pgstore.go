@@ -76,24 +76,17 @@ func redact(err error) error {
 }
 
 // isUniqueViolation reports whether err is a Postgres unique-constraint
-// violation (SQLSTATE 23505), which we surface as saas.ErrConflict.
+// violation (SQLSTATE 23505), which we surface as saas.ErrConflict. This
+// matches on the SQLSTATE alone: pgconn.PgError.ConstraintName can be empty
+// for a real 23505 (e.g. a violation pgx did not resolve to a named
+// constraint), and requiring it here would wrongly stop PutAccount,
+// PutApiKey, and the credit-ledger inserts from recognizing a genuine
+// duplicate. The invitation-specific pending-uniqueness routing needs the
+// constraint name too; that lives in the separate isPendingInviteConflict
+// (invites.go), used only by CreateInvitation/ReplaceInvitation.
 func isUniqueViolation(err error) bool {
-	return uniqueViolationConstraint(err) != ""
-}
-
-// uniqueViolationConstraint returns the name of the unique constraint or
-// index err violated, or "" if err is not a unique-constraint violation.
-// CreateInvitation uses this to distinguish the (org_id, lower(email)) WHERE
-// state = 'pending' partial index (migration 0016), which means "an
-// invitation is already pending for this address" (saas.ErrInvitePending),
-// from every other unique violation on that table (a duplicate id or
-// token_hash), which means a genuine saas.ErrConflict.
-func uniqueViolationConstraint(err error) string {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-		return pgErr.ConstraintName
-	}
-	return ""
+	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
 }
 
 // timePtr maps a Go time to a nullable column: the zero time becomes NULL so the

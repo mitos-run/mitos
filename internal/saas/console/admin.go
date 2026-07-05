@@ -367,6 +367,17 @@ type AdminOrgView struct {
 	MonthUsageCents int64  `json:"month_usage_cents"`
 }
 
+// AdminOrgsResponse is the response shape of GET /console/admin/orgs. Total
+// is always the true, uncapped org count (see handleAdminOrgs's doc).
+// FailedOrgs is omitted (omitempty), matching AdminOverview's convention,
+// when zero; when nonzero it reports how many orgs' per-org reads failed and
+// were skipped from Orgs rather than failing the whole request.
+type AdminOrgsResponse struct {
+	Orgs       []AdminOrgView `json:"orgs"`
+	Total      int            `json:"total"`
+	FailedOrgs int            `json:"failed_orgs,omitempty"`
+}
+
 // handleAdminOrgs serves GET /console/admin/orgs: every org's id/name/plan
 // tier/member count/running-sandbox count/month-to-date usage, capped at
 // adminOrgRollupCap oldest orgs (see its doc); Total is always the true,
@@ -432,10 +443,7 @@ func (c *Console) handleAdminOrgs(w http.ResponseWriter, r *http.Request) {
 		Detail:     "viewed the instance operator org list",
 		At:         c.deps.Now(),
 	})
-	resp := map[string]any{"orgs": out, "total": len(all)}
-	if failedOrgs > 0 {
-		resp["failed_orgs"] = failedOrgs
-	}
+	resp := AdminOrgsResponse{Orgs: out, Total: len(all), FailedOrgs: failedOrgs}
 	writeJSON(w, http.StatusOK, resp)
 }
 
