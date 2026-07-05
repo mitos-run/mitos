@@ -80,6 +80,33 @@ describe('SandboxDetail', () => {
     await waitFor(() => expect(forkBody).toEqual({ count: 1 }))
   })
 
+  // Issue #716: a partial fork failure (HTTP 207, in the fetch "ok" range)
+  // resolves through the same success path as a full success; the header
+  // Fork action must show "created K of N" with the reason rather than a
+  // misleading "Forked" toast.
+  it('header Fork button shows "created K of N" with the error on a partial fork failure (HTTP 207)', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/console/capabilities')) return Promise.resolve(new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }))
+      if (url.includes('/console/sandboxes/s1/fork') && method === 'POST') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ org_id: 'o', source: 's1', ids: [], error: 'cluster api timeout' }),
+            { status: 207, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      }
+      if (url.includes('/console/sandboxes/s1')) return Promise.resolve(new Response(JSON.stringify({ id: 's1', org_id: 'o', template: 'python-3.12', node: 'w1', phase: 'Running', vcpus: 2, mem_bytes: 2147483648, created_at: '2026-01-01T00:00:00Z', project_id: 'proj-a' }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      if (url.endsWith('/console/projects')) return Promise.resolve(new Response(JSON.stringify({ org_id: 'o', projects }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    await renderAt('/sandboxes/s1', caps)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /s1/ })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /^fork$/i }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/created 0 of 1 for s1: cluster api timeout/i))
+  })
+
   it('header Terminate button deletes the sandbox and navigates back to the list', async () => {
     let terminated = false
     vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {

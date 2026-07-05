@@ -108,7 +108,13 @@ export type CreateSandboxRequest = {
   project_id?: string
 }
 
-export type ForkResult = { org_id: string; source: string; ids: string[] }
+// ForkResult is the shape of a fork response. On a full success (HTTP 200)
+// `error` is absent and `ids.length` equals the requested count. On a
+// PARTIAL failure (HTTP 207: some forks landed before a later one failed;
+// see internal/saas/console/sandbox_ops.go's handleForkSandbox) `ids` holds
+// only the survivors and `error` carries the failure detail, so the caller
+// can show "created K of N" instead of a bare, misleading success.
+export type ForkResult = { org_id: string; source: string; ids: string[]; error?: string }
 
 export type ExecResult = { stdout: string; stderr: string; exit_code: number }
 

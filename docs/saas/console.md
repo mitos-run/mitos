@@ -157,7 +157,16 @@ enforces org-scoping NOW behind two seams:
   addressable through this same seam and visible as its own node in the fork
   tree; Exec dials the sandbox's own HTTP endpoint with its token Secret's
   bearer token, the same transport and Secret convention the CLI's
-  `ClusterBackend` uses. KNOWN GAP: `SandboxSpec` has no per-sandbox resource
+  `ClusterBackend` uses. Fork's partial-failure handling (issue #716): the
+  Kubernetes API has no multi-object transaction, so `clustersandbox.Control.
+  Fork` never rolls survivors back on an error partway through count; it
+  returns whatever ids landed alongside the error instead of discarding
+  them. `POST /console/sandboxes/{id}/fork` surfaces this as HTTP 207 with
+  `{"ids": [...], "error": "..."}` (still 200 `{"ids": [...]}` on full
+  success), audits `sandbox.fork` with the survivor count either way, and
+  the SPA (the ForkTree panel and SandboxDetail's header Fork action) shows
+  "created K of N" with the reason instead of a misleading plain success.
+  KNOWN GAP: `SandboxSpec` has no per-sandbox resource
   override (sizing lives on the pool template), so Create's requested
   vcpu/mem are recorded as display-only annotations, not enforced; making
   per-request sizing real needs either a CRD field or a catalog of

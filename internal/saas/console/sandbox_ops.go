@@ -222,7 +222,34 @@ func (c *Console) handleForkSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 	ids, err := c.deps.Sandboxes.Fork(r.Context(), orgID, id, req.Count)
 	if err != nil {
-		c.failSandbox(w, err)
+		if len(ids) == 0 {
+			// Total failure: nothing landed, so this is the same honest
+			// failure path every other verb uses; there is no survivor list
+			// to report.
+			c.failSandbox(w, err)
+			return
+		}
+		// Partial failure (issue #716): the underlying seam creates each
+		// fork independently (see clustersandbox.Control.Fork's doc) and,
+		// on a partial failure, returns however many landed before the
+		// failing one alongside the error, rather than rolling the
+		// survivors back (Kubernetes has no multi-object transaction, and
+		// deleting them back out on error risks compounding one failure
+		// into two). Those survivors are REAL, billable sandboxes now;
+		// discarding their ids here would silently strand them from the
+		// caller's view (they would only ever surface on the next
+		// List/ForkTree read, with no link back to this request). Report
+		// them via a 207-style body instead of collapsing to a bare error.
+		c.audit(r.Context(), AuditEvent{
+			OrgID: orgID, ActorID: accountID,
+			Action: "sandbox.fork", Target: id, TargetType: "sandbox", TargetName: sb.Template,
+			Detail: fmt.Sprintf("forked sandbox %s: %d of %d requested cop%s created before a failure: %s",
+				id, len(ids), req.Count, pluralIes(len(ids)), err.Error()),
+			At: c.deps.Now(),
+		})
+		writeJSON(w, http.StatusMultiStatus, map[string]any{
+			"org_id": orgID, "source": id, "ids": ids, "error": err.Error(),
+		})
 		return
 	}
 	c.audit(r.Context(), AuditEvent{

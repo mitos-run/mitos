@@ -50,10 +50,21 @@ function NodeDetailPanel({
   useModalFocus(panelRef, { active: true, initialFocusRef: headingRef, returnFocusRef, trap: false })
 
   function onFork() {
+    const requested = count
     fork.mutate(
-      { id: node.id, count },
+      { id: node.id, count: requested },
       {
-        onSuccess: (res) => notify(`Forked ${node.id} into ${res.ids.length}`, 'ok'),
+        // A partial failure (HTTP 207: some forks landed before a later one
+        // failed) still resolves onSuccess (fetch treats 207 as ok), so it
+        // is res.error, not onError, that carries the failure: show "created
+        // K of N" plus the reason instead of a misleading plain success.
+        onSuccess: (res) => {
+          if (res.error) {
+            notify(`Created ${res.ids.length} of ${requested} for ${node.id}: ${res.error}`, 'error')
+          } else {
+            notify(`Forked ${node.id} into ${res.ids.length}`, 'ok')
+          }
+        },
         onError: (err) => notify(err instanceof Error ? err.message : `Failed to fork ${node.id}`, 'error'),
       },
     )
