@@ -66,6 +66,14 @@ Keys are always masked except the one-time raw key returned on create; the
 stored hash is never serialized. The billing view's "invoices" are the credit
 ledger entries today; real Stripe invoice objects are a follow-up.
 
+`GET /console/capabilities` is the one unauthenticated endpoint (it carries no
+org data): it advertises deployment-level config the SPA needs at boot, edition
+(hosted/community), which surfaces are gated on (billing, signup, org
+switcher, secrets providers), and, as of issue #712 phase 0, `placement`: the
+operator-defined placement key and the values it advertises. See
+`docs/saas/regions.md` for the placement/region model; a single-value
+registry (the default everywhere today) means the SPA shows no region picker.
+
 ## Org-scoped data isolation: the load-bearing property
 
 A session or key for org A must NEVER observe org B's keys, usage, billing,
