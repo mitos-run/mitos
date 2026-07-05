@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -522,5 +523,146 @@ func TestSandboxLogsStreamHeartbeatsDuringBlockingFollowTransport(t *testing.T) 
 	}
 	if strings.Count(body, ": heartbeat") < 2 {
 		t.Fatalf("want at least 2 heartbeats while the follow transport blocked, got: %q", body)
+	}
+}
+
+// recordingPeriodicLogStreamer models a real follow transport that keeps
+// writing lines on its own goroutine for as long as ctx is alive (a live
+// husk-pod follow with steady output), unlike blockingLogStreamer above which
+// writes exactly once then goes silent. It records whether it observed ctx
+// cancellation (vs. returning for some other reason) so a test can prove the
+// SSE handler actually stops the upstream on the heartbeat-failure path, not
+// just abandons the goroutine.
+type recordingPeriodicLogStreamer struct {
+	interval  time.Duration
+	sawCancel chan bool
+}
+
+func (p *recordingPeriodicLogStreamer) StreamLogs(ctx context.Context, _, _ string, sink LogSink) error {
+	ticker := time.NewTicker(p.interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			p.sawCancel <- true
+			return ctx.Err()
+		case <-ticker.C:
+			if err := sink.Write([]byte("tick-line\n")); err != nil {
+				p.sawCancel <- false
+				return err
+			}
+		}
+	}
+}
+
+// timedWrite records one Write to raceDetectResponseWriter along with when it
+// happened, so a test can assert no write landed after the SSE handler had
+// already returned to net/http.
+type timedWrite struct {
+	at   time.Time
+	data string
+}
+
+// raceDetectResponseWriter is a minimal http.ResponseWriter + http.Flusher
+// fake that fails exactly the heartbeat payload sseLogSink.heartbeat sends
+// (": heartbeat\n\n"), simulating a broken connection discovered only on a
+// heartbeat write, while succeeding on every other write. It timestamps every
+// write it sees.
+type raceDetectResponseWriter struct {
+	mu     sync.Mutex
+	header http.Header
+	code   int
+	writes []timedWrite
+}
+
+func newRaceDetectResponseWriter() *raceDetectResponseWriter {
+	return &raceDetectResponseWriter{header: http.Header{}}
+}
+
+func (w *raceDetectResponseWriter) Header() http.Header { return w.header }
+
+func (w *raceDetectResponseWriter) WriteHeader(code int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.code = code
+}
+
+func (w *raceDetectResponseWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.writes = append(w.writes, timedWrite{at: time.Now(), data: string(p)})
+	if string(p) == ": heartbeat\n\n" {
+		return 0, errors.New("simulated broken connection on heartbeat write")
+	}
+	return len(p), nil
+}
+
+func (w *raceDetectResponseWriter) Flush() {}
+
+func (w *raceDetectResponseWriter) writesAfter(t time.Time) []timedWrite {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var late []timedWrite
+	for _, tw := range w.writes {
+		if tw.at.After(t) {
+			late = append(late, tw)
+		}
+	}
+	return late
+}
+
+// TestSandboxLogsStreamNoWriteAfterHandlerReturnsOnHeartbeatFailure is the
+// regression test for the write-after-ServeHTTP-return hazard: when the
+// ticker.C branch's heartbeat write fails while a real, blocking follow
+// transport is still active, the handler must stop the upstream (cancel a
+// derived context) and wait for it to actually return BEFORE the handler
+// itself returns, so net/http never observes a write to the ResponseWriter
+// after ServeHTTP has already returned. Before the fix, this branch returned
+// immediately without draining the background StreamLogs goroutine, so the
+// transport could keep calling sink.Write after the handler had returned.
+func TestSandboxLogsStreamNoWriteAfterHandlerReturnsOnHeartbeatFailure(t *testing.T) {
+	origInterval := sseHeartbeatInterval
+	sseHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { sseHeartbeatInterval = origInterval })
+
+	sandboxes := NewMemSandboxControl()
+	sandboxes.Add(SandboxView{ID: "sb-1", OrgID: "org-alice"})
+	streamer := &recordingPeriodicLogStreamer{interval: 2 * time.Millisecond, sawCancel: make(chan bool, 1)}
+	con := New(Deps{
+		Sandboxes: sandboxes,
+		Logs:      streamer,
+	})
+
+	r := httptest.NewRequest("GET", "/console/sandboxes/sb-1/logs/stream", nil)
+	r = r.WithContext(WithCaller(context.Background(), "acct-1", "org-alice"))
+	w := newRaceDetectResponseWriter()
+
+	done := make(chan struct{})
+	go func() {
+		con.ServeHTTP(w, r)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after the heartbeat write failed; upstream was not stopped")
+	}
+	returnedAt := time.Now()
+
+	select {
+	case sawCancel := <-streamer.sawCancel:
+		if !sawCancel {
+			t.Fatal("upstream StreamLogs did not observe ctx cancellation; it returned for another reason")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream StreamLogs never returned; the handler leaked the transport goroutine")
+	}
+
+	// Give a still-buggy handler a chance to sneak in a late write before checking.
+	time.Sleep(50 * time.Millisecond)
+
+	if late := w.writesAfter(returnedAt); len(late) > 0 {
+		t.Fatalf("write(s) to the ResponseWriter after the handler returned: %+v", late)
 	}
 }

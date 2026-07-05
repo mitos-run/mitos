@@ -6,6 +6,7 @@
 package console
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -489,12 +490,18 @@ func writeSSEData(w io.Writer, line []byte) error {
 // disconnect cases remain live, exactly matching the pre-existing behavior
 // for those transports.
 //
-// On client disconnect (r.Context().Done()), the handler waits for
-// StreamLogs to actually return before returning itself: net/http does not
-// allow writes to the ResponseWriter after the handler returns, and
-// StreamLogs is required to observe ctx cancellation and stop promptly (the
-// cluster adapter's context-cancellation-propagation contract), so this wait
-// is bounded in every real implementation.
+// On EVERY return path the handler first cancels a context derived from
+// r.Context() (stopping the upstream StreamLogs call, per the cluster
+// adapter's context-cancellation-propagation contract) and only then waits
+// for the background StreamLogs goroutine to actually return before
+// returning itself: net/http does not allow writes to the ResponseWriter
+// after the handler returns, so without this wait the goroutine could still
+// be mid-Write when the handler's return unblocks net/http to reuse or close
+// the connection (write-after-ServeHTTP-return, undefined behavior on a
+// keep-alive connection). This matters even on the ticker.C heartbeat-error
+// path (the connection is dead, so heartbeat() failed) and not only on
+// client disconnect: a dead connection does not itself stop a blocking real
+// follow transport, so the handler must cancel it explicitly there too.
 func (c *Console) handleSandboxLogsStream(w http.ResponseWriter, r *http.Request) {
 	_, orgID, e, ok := c.caller(r)
 	if !ok {
@@ -510,9 +517,12 @@ func (c *Console) handleSandboxLogsStream(w http.ResponseWriter, r *http.Request
 	sink := &sseLogSink{w: w, flusher: flusher}
 	id := r.PathValue("id")
 
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel() // belt-and-suspenders: every explicit return path below already cancels first
+
 	streamDone := make(chan error, 1)
 	go func() {
-		streamDone <- c.deps.Logs.StreamLogs(r.Context(), orgID, id, sink)
+		streamDone <- c.deps.Logs.StreamLogs(ctx, orgID, id, sink)
 	}()
 
 	ticker := time.NewTicker(sseHeartbeatInterval)
@@ -520,6 +530,7 @@ func (c *Console) handleSandboxLogsStream(w http.ResponseWriter, r *http.Request
 	for {
 		select {
 		case <-r.Context().Done():
+			cancel() // stop the upstream before waiting so it can actually return
 			if streamDone != nil {
 				<-streamDone // wait so no write below can race the handler returning
 			}
@@ -538,6 +549,13 @@ func (c *Console) handleSandboxLogsStream(w http.ResponseWriter, r *http.Request
 			flusher.Flush()
 		case <-ticker.C:
 			if err := sink.heartbeat(); err != nil {
+				// The connection is dead: stop the upstream and wait for it
+				// to actually return before we do, so it cannot call
+				// sink.Write after this handler has returned to net/http.
+				cancel()
+				if streamDone != nil {
+					<-streamDone
+				}
 				return
 			}
 		}
