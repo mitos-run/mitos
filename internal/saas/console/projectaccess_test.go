@@ -266,6 +266,85 @@ func TestProjectAccessPViewerInspectSPReturns200(t *testing.T) {
 	}
 }
 
+// --- Logs (GET /console/sandboxes/{id}/logs and .../logs/stream) ---
+//
+// These mirror the inspect matrix directly above: the log routes must apply
+// the SAME per-project canAccessSandbox(PermReadOnly) gate as inspect, with
+// the SAME 404-on-deny existence-hiding semantics, not just the org-scoping
+// check the routes had before.
+
+// TestProjectAccessMemberLogsSPReturns404 verifies that MEMBER (not in
+// project P) gets 404 on GET .../logs for SP (not 403; must not leak
+// existence), mirroring TestProjectAccessMemberInspectSPReturns404.
+func TestProjectAccessMemberLogsSPReturns404(t *testing.T) {
+	f := newProjectAccessFixture(t)
+	w := f.do(t, "GET", "/console/sandboxes/"+f.sandboxSP+"/logs", f.memberAcct, f.orgID)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("MEMBER logs SP = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestProjectAccessMemberLogsStreamSPReturns404 is the SSE counterpart of the
+// test above: MEMBER (not in project P) must get 404 on GET
+// .../logs/stream for SP too, and the response must be a plain 404 (not an
+// SSE stream that then goes quiet).
+func TestProjectAccessMemberLogsStreamSPReturns404(t *testing.T) {
+	f := newProjectAccessFixture(t)
+	w := f.do(t, "GET", "/console/sandboxes/"+f.sandboxSP+"/logs/stream", f.memberAcct, f.orgID)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("MEMBER logs/stream SP = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct == "text/event-stream" {
+		t.Errorf("MEMBER logs/stream SP must not open an SSE stream on denial; got Content-Type=%s", ct)
+	}
+}
+
+// TestProjectAccessPViewerLogsSPReturns200 verifies that PVIEWER (project
+// Admin of P, granting PermReadOnly within P) can read SP's logs.
+func TestProjectAccessPViewerLogsSPReturns200(t *testing.T) {
+	f := newProjectAccessFixture(t)
+	w := f.do(t, "GET", "/console/sandboxes/"+f.sandboxSP+"/logs", f.pviewerAcct, f.orgID)
+	if w.Code != http.StatusOK {
+		t.Errorf("PVIEWER logs SP = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestProjectAccessPViewerLogsStreamSPReturns200 is the SSE counterpart:
+// PVIEWER must still be able to open SP's live log stream. The heartbeat
+// interval is shrunk and the request context is canceled shortly after the
+// stream opens, exactly like the other SSE tests in sandbox_ops_test.go, so
+// the test does not hang on the handler's normally long-lived loop.
+func TestProjectAccessPViewerLogsStreamSPReturns200(t *testing.T) {
+	f := newProjectAccessFixture(t)
+	origInterval := sseHeartbeatInterval
+	sseHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { sseHeartbeatInterval = origInterval })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("GET", "/console/sandboxes/"+f.sandboxSP+"/logs/stream", nil)
+	r = r.WithContext(WithCaller(ctx, f.pviewerAcct, f.orgID))
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		f.con.ServeHTTP(w, r)
+		close(done)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after ctx cancel; SSE loop leaked")
+	}
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("PVIEWER logs/stream SP = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+}
+
 // --- Terminate (DELETE /console/sandboxes/{id}) ---
 
 // TestProjectAccessMemberTerminateSPReturns403 verifies that MEMBER (not in
@@ -387,6 +466,8 @@ func TestProjectAccessTagStoreErrorFailsClosed(t *testing.T) {
 	}{
 		{"list", "GET", "/console/sandboxes"},
 		{"inspect", "GET", "/console/sandboxes/" + f.sandboxSP},
+		{"logs", "GET", "/console/sandboxes/" + f.sandboxSP + "/logs"},
+		{"logs stream", "GET", "/console/sandboxes/" + f.sandboxSP + "/logs/stream"},
 		{"terminate", "DELETE", "/console/sandboxes/" + f.sandboxSP},
 	} {
 		w := f.do(t, tc.method, tc.target, f.memberAcct, f.orgID)
