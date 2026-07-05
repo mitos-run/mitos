@@ -44,6 +44,20 @@ export type Capabilities = {
   // gates the "Operate" nav group and /admin/* routes. Optional (absent on
   // older servers), like authConnectors/plan/entitlements above.
   admin?: boolean
+  // feedback tells the FeedbackButton dialog where composed feedback goes:
+  // a mailto: (channel "email", hosted default) or a GitHub new-issue link
+  // (channel "github", community default). Optional (absent on older
+  // servers); FeedbackButton hides itself until this is present.
+  feedback?: FeedbackCapability
+  // version is the console binary's build version ("dev" for an unreleased
+  // build). Optional (absent on older servers); rendered in the sidebar
+  // footer and included in feedback diagnostics.
+  version?: string
+}
+
+export type FeedbackCapability = {
+  channel: 'email' | 'github'
+  target: string
 }
 
 export type AuthConnectorsResponse = {
