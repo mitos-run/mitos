@@ -53,6 +53,25 @@ export type Capabilities = {
   // build). Optional (absent on older servers); rendered in the sidebar
   // footer and included in feedback diagnostics.
   version?: string
+  // placement is the deployment's placement registry (issue #712 phase 0):
+  // the operator-defined key (hosted: "region"; self-host: whatever the
+  // operator names it) and the values it advertises. Optional (absent on
+  // older servers); NewSandboxModal shows a region picker ONLY when
+  // values.length > 1, so a single-value deployment (the phase 0 default
+  // everywhere) renders no picker at all.
+  placement?: PlacementCapability
+}
+
+export type PlacementValue = {
+  name: string
+  display: string
+  default: boolean
+  available: boolean
+}
+
+export type PlacementCapability = {
+  key: string
+  values: PlacementValue[]
 }
 
 export type FeedbackCapability = {
