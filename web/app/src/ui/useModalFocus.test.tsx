@@ -59,6 +59,70 @@ function Dialog({
   )
 }
 
+// AsyncDialog/AsyncHarness: a harness for the `ready` option, modeling
+// NewSandboxModal's template <select>, which only mounts once templates have
+// finished loading. Kept separate from Harness/Dialog above so the existing
+// synchronous-target tests are untouched.
+function AsyncDialog({
+  containerRef,
+  initialRef,
+  triggerRef,
+  ready,
+  onClose,
+}: {
+  containerRef: React.RefObject<HTMLDivElement>
+  initialRef: React.RefObject<HTMLSelectElement>
+  triggerRef: React.RefObject<HTMLButtonElement>
+  ready: boolean
+  onClose: () => void
+}) {
+  useModalFocus(containerRef, { active: true, initialFocusRef: initialRef, returnFocusRef: triggerRef, ready })
+  return (
+    <div ref={containerRef} role="dialog">
+      {ready ? (
+        <select ref={initialRef} aria-label="Choice">
+          <option value="a">a</option>
+        </select>
+      ) : (
+        <p>Loading...</p>
+      )}
+      <button type="button" onClick={onClose}>
+        Close
+      </button>
+    </div>
+  )
+}
+
+function AsyncHarness() {
+  const [open, setOpen] = useState(false)
+  const [ready, setReady] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const initialRef = useRef<HTMLSelectElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+
+  return (
+    <div>
+      <button ref={triggerRef} type="button" onClick={() => setOpen(true)}>
+        Open
+      </button>
+      {open && (
+        <AsyncDialog
+          containerRef={containerRef}
+          initialRef={initialRef}
+          triggerRef={triggerRef}
+          ready={ready}
+          onClose={() => setOpen(false)}
+        />
+      )}
+      {open && !ready && (
+        <button type="button" onClick={() => setReady(true)}>
+          Finish loading
+        </button>
+      )}
+    </div>
+  )
+}
+
 describe('useModalFocus', () => {
   it('moves focus to the designated initial element on open', () => {
     render(<Harness />)
@@ -105,5 +169,19 @@ describe('useModalFocus', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Last' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(trigger).toHaveFocus()
+  })
+
+  it('focuses the dialog container as an interim when the initial-focus target is not ready yet', () => {
+    render(<AsyncHarness />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    expect(screen.getByText('Loading...')).toBeInTheDocument()
+    expect(screen.getByRole('dialog')).toHaveFocus()
+  })
+
+  it('moves focus to the initial-focus target once ready flips to true', () => {
+    render(<AsyncHarness />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Finish loading' }))
+    expect(screen.getByRole('combobox', { name: 'Choice' })).toHaveFocus()
   })
 })

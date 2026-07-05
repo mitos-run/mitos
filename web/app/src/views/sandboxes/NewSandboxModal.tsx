@@ -7,7 +7,11 @@
 // A11y: role="dialog" + aria-modal, labelled by the heading, Escape closes,
 // the first field receives focus on open, Tab/Shift+Tab is trapped within
 // the dialog, and focus returns to whatever opened it on close, all via the
-// shared useModalFocus hook (matching InviteModal's pattern).
+// shared useModalFocus hook (matching InviteModal's pattern). The template
+// select is the designated initial-focus target but only mounts once
+// templates have loaded, so useModalFocus is given ready: !templatesLoading;
+// while loading it focuses the dialog container itself instead (still inside
+// the trap), then moves focus to the select once loading finishes.
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@mitos/brand'
 import { useCreateSandbox } from '../../data/sandboxes'
@@ -35,7 +39,11 @@ export function NewSandboxModal({ onClose, onCreated }: NewSandboxModalProps) {
   const firstFieldRef = useRef<HTMLSelectElement>(null)
   const dialogRef = useRef<HTMLDivElement>(null)
 
-  useModalFocus(dialogRef, { active: true, initialFocusRef: firstFieldRef })
+  // The template <select> (firstFieldRef) only mounts once templates have
+  // loaded; ready: !templatesLoading tells useModalFocus to focus the
+  // dialog container itself in the meantime instead of leaving focus
+  // outside the trap, then move it to the select once loading finishes.
+  useModalFocus(dialogRef, { active: true, initialFocusRef: firstFieldRef, ready: !templatesLoading })
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {

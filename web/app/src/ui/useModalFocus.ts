@@ -48,10 +48,19 @@ export type UseModalFocusOptions = {
   // true; a non-modal panel (ForkTree's detail panel) that only wants the
   // return-focus behavior can pass false.
   trap?: boolean
+  // Whether the designated initialFocusRef target is actually present and
+  // ready to receive focus. Defaults to true (the common case: the target is
+  // rendered synchronously with the dialog). Pass false while the target is
+  // still loading in asynchronously (e.g. NewSandboxModal's template <select>,
+  // which only exists once templates have loaded) so the effect focuses the
+  // dialog container itself in the meantime instead of leaving focus outside
+  // the trap entirely, then moves it to the real target once this flips to
+  // true.
+  ready?: boolean
 }
 
 export function useModalFocus(containerRef: RefObject<HTMLElement | null>, options: UseModalFocusOptions): void {
-  const { active, initialFocusRef, returnFocusRef, trap = true } = options
+  const { active, initialFocusRef, returnFocusRef, trap = true, ready = true } = options
 
   useEffect(() => {
     if (!active) return
@@ -60,8 +69,30 @@ export function useModalFocus(containerRef: RefObject<HTMLElement | null>, optio
       returnFocusRef?.current ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
 
     const container = containerRef.current
-    const initial = initialFocusRef?.current ?? (container ? focusableElements(container)[0] : undefined)
-    initial?.focus()
+    const initial = initialFocusRef?.current
+
+    if (initialFocusRef && !ready) {
+      // The caller named a specific initial-focus target, but it is still
+      // loading in asynchronously and not ready yet. Focus the dialog
+      // container itself as an interim so focus stays inside the trap
+      // rather than on whatever was focused before the dialog opened; once
+      // `ready` flips to true this effect re-runs and moves focus to the
+      // real target (or, failing that, the fallback below).
+      if (container) {
+        if (!container.hasAttribute('tabindex')) container.tabIndex = -1
+        container.focus()
+      }
+    } else {
+      // Either ready (or no ready-gating was requested at all): use the
+      // designated target if it is mounted, else fall back to the first
+      // focusable descendant. This also covers the case where `ready` is
+      // true but the target never actually mounts (e.g. NewSandboxModal
+      // with zero templates never renders the template <select>): rather
+      // than getting stuck on the container forever, focus lands on
+      // whatever real control is available (e.g. the Close button).
+      const target = initial ?? (container ? focusableElements(container)[0] : undefined)
+      target?.focus()
+    }
 
     function onKeyDown(e: KeyboardEvent) {
       if (!trap || e.key !== 'Tab') return
@@ -95,6 +126,8 @@ export function useModalFocus(containerRef: RefObject<HTMLElement | null>, optio
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refs are stable
     // identities; re-running this effect on every render would re-capture
-    // returnTarget and re-focus initial on each keystroke.
-  }, [active, trap])
+    // returnTarget and re-focus initial on each keystroke. `ready` IS meant
+    // to re-run this effect (once, when an async initial-focus target
+    // finishes loading), which is why it is listed alongside active/trap.
+  }, [active, trap, ready])
 }

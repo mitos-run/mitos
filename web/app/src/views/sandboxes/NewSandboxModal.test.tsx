@@ -138,6 +138,38 @@ describe('NewSandboxModal', () => {
     expect(dialog.parentElement?.className).toContain('modal-backdrop')
   })
 
+  it('focuses the dialog container while templates load, then the template select once they resolve', async () => {
+    let resolveTemplates: ((res: Response) => void) | undefined
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input)
+      if (url.endsWith('/console/templates')) {
+        // Never resolves until the test explicitly does so below: models the
+        // async gap between the dialog mounting and templates (and the
+        // template <select> that firstFieldRef points at) actually loading in.
+        return new Promise((resolve) => {
+          resolveTemplates = resolve
+        })
+      }
+      if (url.endsWith('/console/projects')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ org_id: 'o1', projects: [] }), { status: 200, headers: { 'content-type': 'application/json' } }),
+        )
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    wrap(<NewSandboxModal onClose={() => {}} />)
+
+    await waitFor(() => expect(screen.getByText(/loading templates/i)).toBeInTheDocument())
+    expect(screen.getByRole('dialog')).toHaveFocus()
+
+    resolveTemplates!(
+      new Response(JSON.stringify({ templates }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    )
+
+    await waitFor(() => expect(screen.getByLabelText(/template/i)).toHaveValue('python-3.12'))
+    expect(screen.getByLabelText(/template/i)).toHaveFocus()
+  })
+
   it('shows a message and no form when there are no templates', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
       const url = String(input)
