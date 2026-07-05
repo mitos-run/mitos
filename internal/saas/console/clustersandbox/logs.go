@@ -251,6 +251,7 @@ func (b *lineBuffer) push(line []byte) {
 	b.bytes += len(line)
 	for b.bytes > maxLogBufferBytes && len(b.lines) > 1 {
 		b.bytes -= len(b.lines[0])
+		b.lines[0] = nil
 		b.lines = b.lines[1:]
 	}
 	b.mu.Unlock()
