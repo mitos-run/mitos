@@ -125,6 +125,16 @@ func envBool(key string) bool {
 	return v == "true" || v == "1" || v == "yes"
 }
 
+// instanceAdminEmailsFromEnv parses MITOS_CONSOLE_INSTANCE_ADMINS, a
+// comma-separated list of account emails granted the instance-operator
+// capability (GET/POST /console/admin/...). console.New normalizes case and
+// whitespace, so this just splits. Unset or empty grants none via this path;
+// the community-edition single-org-owner fallback (console.Console's
+// isInstanceAdmin) still applies regardless.
+func instanceAdminEmailsFromEnv() []string {
+	return splitNonEmpty(os.Getenv("MITOS_CONSOLE_INSTANCE_ADMINS"))
+}
+
 func splitNonEmpty(s string) []string {
 	var out []string
 	for _, p := range strings.Split(s, ",") {

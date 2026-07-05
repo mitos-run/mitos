@@ -1,0 +1,332 @@
+// The instance-operator plane: GET/POST /console/admin/... (issue-tracked as
+// Workstream 6, "instance operator plane /admin").
+//
+// This is a SEPARATE authorization plane from every other console endpoint.
+// Every other handler in this package is scoped to the caller's OWN org via
+// permissionsFor/authorize (org RBAC: owner/admin/billing/member/viewer, or a
+// custom role). Instance-admin sits ABOVE that: it lets a deployment
+// OPERATOR see every org, the node inventory, and the signup waitlist. It is
+// deliberately resolved independently of permissionsFor/authorize so it can
+// never be granted through a custom role or a built-in org role (a org
+// "admin" or "owner" is NOT automatically an instance admin; see
+// isInstanceAdmin). Every /console/admin/... handler goes through
+// authorizeAdmin, never authorize, and is audited via the admin.* action
+// namespace.
+//
+// Two paths grant the capability (isInstanceAdmin):
+//
+//   - the caller's account email is in the deployment's configured
+//     instance-admin allowlist (Deps.InstanceAdminEmails, case-insensitive
+//     exact match; set via MITOS_CONSOLE_INSTANCE_ADMINS, the hosted-
+//     deployment path); or
+//   - the community-edition fallback: this deployment currently has EXACTLY
+//     ONE organization and the caller is that org's owner, so a self-hoster
+//     always has an operator seat with zero extra configuration. This
+//     fallback is gated on Capabilities.Edition == "community" so a hosted
+//     deployment's very first customer is never silently promoted to
+//     instance admin.
+package console
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+
+	"mitos.run/mitos/internal/apierr"
+	"mitos.run/mitos/internal/saas"
+	"mitos.run/mitos/internal/saas/billing"
+)
+
+// adminOrgRollupCap bounds how many orgs GET /console/admin/overview and GET
+// /console/admin/orgs aggregate PER-ORG data (running-sandbox counts,
+// month-to-date usage) over: each org costs one cluster/store read, so an
+// unbounded scan is expensive on a deployment with many orgs. The org COUNT
+// itself (overview's "orgs" field, and the orgs endpoint's "total") is
+// always the TRUE total, uncapped; only the per-org rollup subset is capped,
+// at the oldest adminOrgRollupCap orgs by creation time.
+const adminOrgRollupCap = 200
+
+// OrgDirectory is the org-wide read seam the instance-operator plane uses.
+// Unlike every other console seam, it is NOT scoped to the caller's own org:
+// it lists every organization on the deployment, because it backs the
+// operator surface (gated on isInstanceAdmin), never a tenant-facing view.
+// saas.Store satisfies this directly, mirroring the drawdown driver's own
+// narrow org-iteration seam (cmd/console/drawdown.go's drawdownOrgLister).
+type OrgDirectory interface {
+	// ListOrgs returns every organization on the deployment, in no
+	// particular order.
+	ListOrgs(ctx context.Context) ([]saas.Organization, error)
+	// ListOrgMembers returns every membership in orgID.
+	ListOrgMembers(ctx context.Context, orgID string) ([]saas.Membership, error)
+}
+
+// nullOrgDirectory is the safe-to-instantiate default: no orgs, so the admin
+// endpoints degrade to an honest empty state instead of panicking on a
+// Console built without a real store wired in.
+type nullOrgDirectory struct{}
+
+func (nullOrgDirectory) ListOrgs(context.Context) ([]saas.Organization, error) { return nil, nil }
+func (nullOrgDirectory) ListOrgMembers(context.Context, string) ([]saas.Membership, error) {
+	return nil, nil
+}
+
+// NodeView is the console's shape of one Kubernetes node: the read-only
+// operator inventory GET /console/admin/nodes exposes (handler lands in a
+// later commit of this workstream; the type is declared here since Deps.Nodes
+// already references it). AllocatableCPU and AllocatableMem are the
+// Kubernetes-formatted quantity strings (e.g. "16", "62Gi") rather than a
+// parsed number, so the view never silently loses the unit.
+type NodeView struct {
+	Name           string `json:"name"`
+	Ready          bool   `json:"ready"`
+	KVM            bool   `json:"kvm"`
+	Dedicated      bool   `json:"dedicated"`
+	AllocatableCPU string `json:"allocatable_cpu"`
+	AllocatableMem string `json:"allocatable_mem"`
+}
+
+// NodeSource is the k8s node-listing seam GET /console/admin/nodes reads.
+// The real implementation lists corev1.Node objects over the SAME
+// controller-runtime client the console's cluster sandbox adapter uses. A
+// nil NodeSource (Deps.Nodes's zero value, deliberately NOT defaulted by
+// New) means no Kubernetes client is configured on this deployment; the
+// handler reports {"available": false} rather than an empty (and
+// misleadingly "no nodes exist") list.
+type NodeSource interface {
+	Nodes(ctx context.Context) ([]NodeView, error)
+}
+
+// WaitlistEntry is the console's seam-level shape of one recorded waitlist
+// signup: an email and when it was recorded. It carries no id: the
+// underlying onboarding.PendingStore.Waitlist has none (its WaitlistEntry is
+// Email+CreatedAt only); the wire-level id the SPA uses to target
+// POST /console/admin/waitlist/{id}/approve is synthesized by the HTTP
+// handler, not by this seam.
+type WaitlistEntry struct {
+	Email     string
+	CreatedAt time.Time
+}
+
+// WaitlistSource is the seam over the onboarding funnel's waitlist. The real
+// implementation (wired in cmd/console) reads
+// onboarding.PendingStore.Waitlist and approves through
+// onboarding.ApproveWaitlistEntry: add the canonical email to the signup
+// allowlist and send the "you're in" email through the SAME EmailSender the
+// funnel uses. Approve does NOT create an account, an org, or any
+// invitation: it only lifts the allowlist gate an approved signup's own
+// later Verify call will need to pass (see docs/saas/onboarding.md).
+type WaitlistSource interface {
+	// List returns every recorded waitlist entry.
+	List(ctx context.Context) ([]WaitlistEntry, error)
+	// Approve grants allowlist access to email and sends the approved
+	// notification. Returns ErrWaitlistNotConfigured if no allowlist/email
+	// seam is wired on this deployment.
+	Approve(ctx context.Context, email string) error
+}
+
+// ErrWaitlistNotConfigured is returned by WaitlistSource.Approve when the
+// underlying onboarding allowlist/email seam is not wired on this
+// deployment (the nullWaitlistSource default, or a deployment that never
+// configured one).
+var ErrWaitlistNotConfigured = errors.New("console: no waitlist/allowlist seam is configured on this deployment")
+
+// nullWaitlistSource is the safe-to-instantiate default: an empty waitlist
+// that refuses every approval with ErrWaitlistNotConfigured, an honest
+// degraded state rather than a silent no-op success.
+type nullWaitlistSource struct{}
+
+func (nullWaitlistSource) List(context.Context) ([]WaitlistEntry, error) { return nil, nil }
+func (nullWaitlistSource) Approve(context.Context, string) error         { return ErrWaitlistNotConfigured }
+
+// isInstanceAdmin resolves whether accountID holds the instance-operator
+// capability on this deployment. See the package doc above for the two
+// grant paths. It never returns true for an empty accountID, and every
+// lookup failure (account not found, org-list error, no membership) is
+// treated as "not an admin" rather than propagated: this is a boolean gate,
+// never a request that can itself fail.
+func (c *Console) isInstanceAdmin(ctx context.Context, accountID string) bool {
+	if accountID == "" {
+		return false
+	}
+	if len(c.deps.InstanceAdminEmails) > 0 && c.deps.Accounts != nil {
+		if acct, err := c.deps.Accounts.GetAccount(ctx, accountID); err == nil {
+			email := strings.ToLower(strings.TrimSpace(acct.Email))
+			if email != "" {
+				for _, allowed := range c.deps.InstanceAdminEmails {
+					if email == allowed {
+						return true
+					}
+				}
+			}
+		}
+	}
+	if c.deps.Capabilities.Edition == "community" && c.deps.Orgs != nil && c.deps.Accounts != nil {
+		orgs, err := c.deps.Orgs.ListOrgs(ctx)
+		if err == nil && len(orgs) == 1 {
+			if role, err := c.deps.Accounts.MemberRole(ctx, accountID, orgs[0].ID); err == nil && role == saas.RoleOwner {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// authorizeAdmin is the single authorization gate for every
+// /console/admin/... handler: it requires an authenticated session (like
+// every console endpoint, via caller) AND the instance-admin capability. It
+// deliberately does NOT go through permissionsFor/authorize: instance-admin
+// is ABOVE org RBAC and must never be grantable via an org role or a custom
+// role (see the package doc).
+func (c *Console) authorizeAdmin(r *http.Request) (accountID string, e apierr.Error, ok bool) {
+	accountID, _, e, ok = c.caller(r)
+	if !ok {
+		return "", e, false
+	}
+	if !c.isInstanceAdmin(r.Context(), accountID) {
+		return "", apierr.Get(apierr.CodeForbidden).
+			WithCause("the caller does not hold the instance-operator capability on this deployment"), false
+	}
+	var noErr apierr.Error
+	return accountID, noErr, true
+}
+
+// adminOrgsCapped returns every org (all), sorted oldest-first by CreatedAt,
+// and a subset (capped) bounded at adminOrgRollupCap for expensive per-org
+// aggregation. capped aliases the head of all's backing array when no
+// capping is needed. The true total is always len(all).
+func (c *Console) adminOrgsCapped(ctx context.Context) (all []saas.Organization, capped []saas.Organization, err error) {
+	all, err = c.deps.Orgs.ListOrgs(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].CreatedAt.Before(all[j].CreatedAt) })
+	if len(all) <= adminOrgRollupCap {
+		return all, all, nil
+	}
+	return all, all[:adminOrgRollupCap], nil
+}
+
+// runningSandboxCount returns how many of orgID's sandboxes are currently in
+// the Running phase.
+func (c *Console) runningSandboxCount(ctx context.Context, orgID string) (int, error) {
+	boxes, err := c.deps.Sandboxes.List(ctx, orgID)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, b := range boxes {
+		if b.Phase == "Running" {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// planFor resolves orgID's current plan via Deps.Plans, failing closed to
+// PlanFree on an unconfigured seam or a lookup error (never assumes a paid
+// plan it cannot verify).
+func (c *Console) planFor(ctx context.Context, orgID string) billing.Plan {
+	if c.deps.Plans != nil {
+		if p, err := c.deps.Plans.GetPlan(ctx, orgID); err == nil {
+			return p
+		}
+	}
+	return billing.PlanFree
+}
+
+// monthUsageCents returns orgID's month-to-date usage cost, priced with the
+// SAME rate table the billing view and drawdown driver use
+// (Deps.Billing.Rates), so the admin org table's figure matches what the org
+// itself sees on its own billing page.
+func (c *Console) monthUsageCents(ctx context.Context, orgID string, monthStart time.Time) (int64, error) {
+	if c.deps.Usage == nil {
+		return 0, nil
+	}
+	records, err := c.deps.Usage.ListRecords(ctx, orgID, monthStart, time.Time{})
+	if err != nil {
+		return 0, err
+	}
+	var total billing.Money
+	for _, rec := range records {
+		total += c.deps.Billing.Rates.CostCents(rec)
+	}
+	return int64(total), nil
+}
+
+// signupMode reports the onboarding funnel's current mode as the SPA-facing
+// string, derived from the SAME server-controlled flag that gates whether
+// mountOnboarding mounts the public signup endpoints (cmd/console/onboarding.go).
+func signupMode(signupEnabled bool) string {
+	if signupEnabled {
+		return "open"
+	}
+	return "waitlist"
+}
+
+// AdminOverview is the response shape of GET /console/admin/overview: the
+// deployment-wide counts an operator lands on first. NodesReady/NodesTotal
+// are nil when no NodeSource is configured (Deps.Nodes == nil), so the SPA
+// can render an honest "not available in this deployment" state rather than
+// a fabricated 0/0.
+type AdminOverview struct {
+	Orgs             int    `json:"orgs"`
+	RunningSandboxes int    `json:"running_sandboxes"`
+	NodesReady       *int   `json:"nodes_ready"`
+	NodesTotal       *int   `json:"nodes_total"`
+	SignupMode       string `json:"signup_mode"`
+}
+
+// handleAdminOverview serves GET /console/admin/overview.
+func (c *Console) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
+	accountID, e, ok := c.authorizeAdmin(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	all, capped, err := c.adminOrgsCapped(r.Context())
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the org directory could not be read"))
+		return
+	}
+	running := 0
+	for _, org := range capped {
+		n, err := c.runningSandboxCount(r.Context(), org.ID)
+		if err != nil {
+			apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox count could not be read"))
+			return
+		}
+		running += n
+	}
+	view := AdminOverview{
+		Orgs:             len(all),
+		RunningSandboxes: running,
+		SignupMode:       signupMode(c.deps.Capabilities.Signup),
+	}
+	if c.deps.Nodes != nil {
+		if nodes, err := c.deps.Nodes.Nodes(r.Context()); err == nil {
+			ready, total := 0, len(nodes)
+			for _, n := range nodes {
+				if n.Ready {
+					ready++
+				}
+			}
+			view.NodesReady = &ready
+			view.NodesTotal = &total
+		}
+		// A Nodes error is NOT fatal to the overview: the rest of the
+		// deployment-wide summary is still useful, so NodesReady/NodesTotal
+		// simply stay nil (the same honest "not available" shape as an
+		// unconfigured NodeSource) rather than failing the whole request.
+	}
+	c.audit(r.Context(), AuditEvent{
+		ActorID:    accountID,
+		Action:     "admin.overview.view",
+		TargetType: "system",
+		Detail:     "viewed the instance operator overview",
+		At:         c.deps.Now(),
+	})
+	writeJSON(w, http.StatusOK, view)
+}

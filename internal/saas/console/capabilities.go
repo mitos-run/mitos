@@ -57,6 +57,12 @@ type Capabilities struct {
 	// self-hosted community edition always resolves to every entitlement
 	// enabled with unlimited audit retention.
 	Entitlements billing.Entitlements `json:"entitlements"`
+	// Admin is true when the CALLER holds the instance-operator capability
+	// (see admin.go's isInstanceAdmin): it gates the SPA's "Operate" nav
+	// group and /admin/* routes. Like Plan/Entitlements it is resolved
+	// per-request from the caller's context, never a deployment-wide
+	// default; an unauthenticated request always sees false.
+	Admin bool `json:"admin"`
 }
 
 // SecretsCapability advertises which secret-store providers are enabled. The
@@ -103,6 +109,9 @@ func (c *Console) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 			caps.Plan = plan
 			caps.Entitlements = billing.EntitlementsFor(plan, caps.Edition)
 		}
+	}
+	if accountID, ok := CallerFromContext(r.Context()); ok {
+		caps.Admin = c.isInstanceAdmin(r.Context(), accountID)
 	}
 	writeJSON(w, http.StatusOK, caps)
 }

@@ -247,6 +247,14 @@ func main() {
 		// (MITOS_CONSOLE_TEAM_ORGS) until a real subscription/payment
 		// integration exists. Every org not listed resolves to PlanFree.
 		Plans: planSourceFromEnv(),
+		// The instance-operator plane (GET/POST /console/admin/...):
+		// MITOS_CONSOLE_INSTANCE_ADMINS grants named emails the capability on
+		// a hosted deployment; the community-edition single-org-owner
+		// fallback (console.Console.isInstanceAdmin) needs no configuration.
+		// Orgs reads the SAME durable store the rest of the console uses,
+		// deliberately un-scoped to any one org (see console.OrgDirectory).
+		InstanceAdminEmails: instanceAdminEmailsFromEnv(),
+		Orgs:                store,
 		// Wire the real session store so /console/account/sessions reflects live
 		// sessions. The adapter translates saas.Session to console.SessionRecord.
 		// Both dev and production share the same store; in dev the store is empty

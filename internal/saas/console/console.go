@@ -121,8 +121,37 @@ type Deps struct {
 	// resolves every org to PlanFree, so the BFF is safe to instantiate
 	// without a real plan/subscription backend.
 	Plans billing.PlanSource
-	Log   *slog.Logger
-	Now   func() time.Time
+	// InstanceAdminEmails is the deployment-level allowlist of account emails
+	// granted the instance-operator capability (GET/POST /console/admin/...),
+	// matched case-insensitively (New normalizes case and whitespace). This
+	// grant sits ABOVE org RBAC: see admin.go's package doc. Empty means no
+	// email is granted the capability via this path; the community-edition
+	// single-org-owner fallback in isInstanceAdmin still applies regardless.
+	InstanceAdminEmails []string
+	// Orgs is the org-directory seam the instance-operator plane reads: list
+	// EVERY organization on this deployment and its membership, deliberately
+	// NOT scoped to the caller's own org (every other seam here is
+	// org-scoped; this one backs the operator surface behind
+	// isInstanceAdmin, not a tenant-facing view). saas.Store satisfies this
+	// directly, matching the drawdown driver's own narrow org-iteration seam
+	// (cmd/console/drawdown.go). Defaults to an empty in-memory directory so
+	// the BFF is safe to instantiate without a real store.
+	Orgs OrgDirectory
+	// Nodes is the k8s node-listing seam for GET /console/admin/nodes.
+	// Unlike every other seam here, a nil Nodes is a MEANINGFUL, PERMANENT
+	// state that New deliberately does NOT fill with a default: it means no
+	// Kubernetes client is configured on this deployment, and the endpoint
+	// honestly reports {"available": false} rather than fabricating an
+	// empty node list.
+	Nodes NodeSource
+	// Waitlist is the seam over the onboarding funnel's recorded waitlist
+	// entries and their approval (see internal/saas/onboarding.PendingStore
+	// and onboarding.ApproveWaitlistEntry). Defaults to an empty,
+	// approve-disabled in-memory seam so the BFF is safe to instantiate
+	// without real onboarding wiring.
+	Waitlist WaitlistSource
+	Log      *slog.Logger
+	Now      func() time.Time
 }
 
 // Console is the org-scoped BFF. It reads the caller and org from the request
@@ -221,6 +250,26 @@ func New(deps Deps) *Console {
 	if deps.Plans == nil {
 		deps.Plans = billing.NewStaticPlanSource(nil)
 	}
+	if deps.Orgs == nil {
+		deps.Orgs = nullOrgDirectory{}
+	}
+	if deps.Waitlist == nil {
+		deps.Waitlist = nullWaitlistSource{}
+	}
+	// Normalize the instance-admin allowlist ONCE here (lowercase, trimmed,
+	// empties dropped) so isInstanceAdmin's lookup is a plain map/slice
+	// membership check against an already-canonical caller email. Deps.Nodes
+	// is deliberately left untouched: nil is a meaningful permanent state
+	// (see its doc), not something to default.
+	if len(deps.InstanceAdminEmails) > 0 {
+		normalized := make([]string, 0, len(deps.InstanceAdminEmails))
+		for _, e := range deps.InstanceAdminEmails {
+			if e = strings.ToLower(strings.TrimSpace(e)); e != "" {
+				normalized = append(normalized, e)
+			}
+		}
+		deps.InstanceAdminEmails = normalized
+	}
 	// Wrap the audit recorder with a DispatchingRecorder so every audit event
 	// is best-effort forwarded to the org's enabled sinks. The webhook sink is
 	// the default dispatcher; tests inject a sinkFunc via NewDispatchingRecorder.
@@ -297,6 +346,10 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/roles", c.handleListRoles)
 	mux.HandleFunc("POST /console/roles", c.handleUpsertRole)
 	mux.HandleFunc("DELETE /console/roles/{name}", c.handleDeleteRole)
+	// Instance-operator plane (admin.go): every handler additionally requires
+	// isInstanceAdmin via authorizeAdmin, ABOVE the session auth every other
+	// route above already requires.
+	mux.HandleFunc("GET /console/admin/overview", c.handleAdminOverview)
 	c.mux = mux
 }
 
