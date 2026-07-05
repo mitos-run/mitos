@@ -22,6 +22,7 @@ type hostedCaptured struct {
 	Method string
 	Path   string
 	Auth   string
+	Idem   string // Idempotency-Key header, empty when absent
 	Body   map[string]any
 }
 
@@ -83,8 +84,13 @@ type hostedGateway struct {
 	Requests []*hostedCaptured
 
 	// Canned REST responses.
-	forkID    string
-	listItems []hostedSandboxEntry
+	forkID string
+	// listJSON is the EXACT GET /v1/sandboxes response body. The production
+	// hosted gateway returns an OBJECT {"sandboxes":[...]} whose entries carry
+	// id, phase, endpoint, and a camelCase createdAt; the standalone
+	// sandbox-server returns a BARE ARRAY of {id, template_id, endpoint,
+	// created_at, fork_time_ms}. Tests set whichever wire shape they assert.
+	listJSON string
 
 	// connect handler for runtime RPCs.
 	connectFake *hostedFakeSandbox
@@ -102,6 +108,7 @@ func (g *hostedGateway) capture(r *http.Request) *hostedCaptured {
 		Method: r.Method,
 		Path:   r.URL.Path,
 		Auth:   r.Header.Get("Authorization"),
+		Idem:   r.Header.Get("Idempotency-Key"),
 	}
 	if r.Body != nil {
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
@@ -143,11 +150,34 @@ func (g *hostedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"fork_time_ms": 12.5,
 		})
 
+	case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/sandboxes/") && strings.HasSuffix(r.URL.Path, "/fork"):
+		// Live fork (PR #710): create-shaped response {id, endpoint, token,
+		// phase, template_id, fork_time_ms}.
+		id := g.forkID
+		if raw, ok := c.Body["id"].(string); ok && raw != "" {
+			id = raw
+		}
+		writeJSON(http.StatusOK, map[string]any{
+			"id":           id,
+			"endpoint":     "sandbox-endpoint:9091",
+			"token":        "child-token-never-used-by-fork",
+			"phase":        "Ready",
+			"template_id":  "python",
+			"fork_time_ms": 42.5,
+		})
+
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/sandboxes":
-		writeJSON(http.StatusOK, g.listItems)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		body := g.listJSON
+		if body == "" {
+			body = `{"sandboxes":[]}`
+		}
+		_, _ = w.Write([]byte(body))
 
 	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/sandboxes/"):
-		writeJSON(http.StatusOK, nil)
+		// The hosted gateway answers a terminate with 204 No Content.
+		w.WriteHeader(http.StatusNoContent)
 
 	default:
 		// Fall through to the Connect RPC handler (served from the mux).
@@ -252,33 +282,19 @@ func TestHostedBackendExec(t *testing.T) {
 	}
 }
 
-// TestHostedBackendForkN asserts Fork(id, n) issues n POST /v1/fork requests,
-// each with {"template": sandboxID, "id": <unique>}, all carrying the Bearer
-// token, and returns n distinct ids.
+// TestHostedBackendForkN asserts Fork(id, n) issues n POST
+// /v1/sandboxes/{id}/fork live-fork requests (one per child, NEVER the flat
+// /v1/fork template route, which the hosted control plane resolves as a pool
+// name and 404s with `no such pool "sb-..."`), each carrying the Bearer token,
+// a unique child id with pause_source, and a unique Idempotency-Key, and
+// returns n distinct ids.
 func TestHostedBackendForkN(t *testing.T) {
 	const apiKey = "sk-test-fork"
 	const srcID = "sbx-src"
 	const n = 3
 
 	gw := newHostedGateway(apiKey)
-	// Override to echo the id from the request body.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		c := gw.capture(r)
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/fork":
-			id, _ := c.Body["id"].(string)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"id":          id,
-				"template_id": c.Body["template"],
-				"endpoint":    "ep:9091",
-				"fork_time_ms": 5.0,
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(srv.Close)
+	srv := hostedTestServer(t, gw)
 
 	b := NewHostedBackend(srv.URL, apiKey, srv.Client())
 	ids, err := b.Fork(context.Background(), srcID, n)
@@ -293,34 +309,94 @@ func TestHostedBackendForkN(t *testing.T) {
 		t.Fatalf("Fork made %d requests, want %d", len(gw.Requests), n)
 	}
 	seen := map[string]bool{}
+	seenKeys := map[string]bool{}
 	for i, req := range gw.Requests {
-		if req.Method != http.MethodPost || req.Path != "/v1/fork" {
-			t.Fatalf("Fork req[%d] = %s %s, want POST /v1/fork", i, req.Method, req.Path)
+		if req.Method != http.MethodPost || req.Path != "/v1/sandboxes/"+srcID+"/fork" {
+			t.Fatalf("Fork req[%d] = %s %s, want POST /v1/sandboxes/%s/fork", i, req.Method, req.Path, srcID)
 		}
 		if bearerOf(req.Auth) != apiKey {
 			t.Fatalf("Fork req[%d] auth = %q, want Bearer %s", i, req.Auth, apiKey)
-		}
-		if req.Body["template"] != srcID {
-			t.Fatalf("Fork req[%d] template = %v, want %s", i, req.Body["template"], srcID)
 		}
 		id, _ := req.Body["id"].(string)
 		if id == "" || seen[id] {
 			t.Fatalf("Fork req[%d] had empty or duplicate id %q", i, id)
 		}
 		seen[id] = true
+		if pause, ok := req.Body["pause_source"].(bool); !ok || !pause {
+			t.Fatalf("Fork req[%d] pause_source = %v, want true", i, req.Body["pause_source"])
+		}
+		if req.Idem == "" || seenKeys[req.Idem] {
+			t.Fatalf("Fork req[%d] had empty or duplicate Idempotency-Key %q", i, req.Idem)
+		}
+		seenKeys[req.Idem] = true
+	}
+}
+
+// TestHostedBackendForkFallsBackOnOlderGateway asserts that a server which
+// answers the live-fork route with a route-level 404 (an older deployment
+// without the sandbox.fork op) makes Fork fall back ONCE to the legacy flat
+// /v1/fork template route for every child.
+func TestHostedBackendForkFallsBackOnOlderGateway(t *testing.T) {
+	const apiKey = "sk-test-fork-fallback"
+	const srcID = "sbx-src"
+
+	gw := newHostedGateway(apiKey)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := gw.capture(r)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/sandboxes/") && strings.HasSuffix(r.URL.Path, "/fork"):
+			// The older gateway's exact route-level not_found envelope.
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"no such route or operation","cause":"the request did not map to a known gateway operation (resolved op \"sandbox.post\")","remediation":"Use a documented route."}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/fork":
+			id, _ := c.Body["id"].(string)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id":           id,
+				"template_id":  c.Body["template"],
+				"endpoint":     "ep:9091",
+				"fork_time_ms": 5.0,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	b := NewHostedBackend(srv.URL, apiKey, srv.Client())
+	ids, err := b.Fork(context.Background(), srcID, 2)
+	if err != nil {
+		t.Fatalf("Fork with fallback: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("Fork returned %d ids, want 2", len(ids))
+	}
+	// Exactly one live-route probe, then 2 flat-route forks.
+	if len(gw.Requests) != 3 {
+		t.Fatalf("Fork made %d requests, want 3 (1 probe + 2 flat)", len(gw.Requests))
+	}
+	if gw.Requests[0].Path != "/v1/sandboxes/"+srcID+"/fork" {
+		t.Fatalf("first request = %q, want the live-fork probe", gw.Requests[0].Path)
+	}
+	for i, req := range gw.Requests[1:] {
+		if req.Path != "/v1/fork" || req.Body["template"] != srcID {
+			t.Fatalf("fallback req[%d] = %s body %v, want POST /v1/fork with template %s", i, req.Path, req.Body, srcID)
+		}
 	}
 }
 
 // TestHostedBackendList asserts List calls GET /v1/sandboxes with the Bearer
-// token and maps the response to SandboxInfo rows. The namespace argument is
-// ignored in hosted mode.
+// token and decodes the PRODUCTION hosted gateway shape: an OBJECT
+// {"sandboxes":[...]} (not a bare array) whose entries carry id, phase,
+// endpoint, and a camelCase createdAt. Phase and age must come from the wire.
 func TestHostedBackendList(t *testing.T) {
 	const apiKey = "sk-test-list"
 	gw := newHostedGateway(apiKey)
-	gw.listItems = []hostedSandboxEntry{
-		{ID: "sbx-1", TemplateID: "python", Endpoint: "ep1:9091", CreatedAt: time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)},
-		{ID: "sbx-2", TemplateID: "node", Endpoint: "ep2:9091", CreatedAt: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)},
-	}
+	created1 := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+	created2 := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
+	gw.listJSON = `{"sandboxes":[` +
+		`{"id":"sbx-1","phase":"Ready","endpoint":"ep1:9091","createdAt":"` + created1 + `"},` +
+		`{"id":"sbx-2","phase":"Pending","endpoint":"ep2:9091","createdAt":"` + created2 + `"}]}`
 	srv := hostedTestServer(t, gw)
 
 	b := NewHostedBackend(srv.URL, apiKey, srv.Client())
@@ -347,17 +423,53 @@ func TestHostedBackendList(t *testing.T) {
 		t.Fatalf("List auth = %q, want Bearer %s", listReq.Auth, apiKey)
 	}
 
-	// Assert row mapping.
+	// Assert row mapping: phase and age come off the wire, not hardcoded.
+	wantPhase := map[string]string{"sbx-1": "Ready", "sbx-2": "Pending"}
 	for _, info := range infos {
-		if info.Phase != "Ready" {
-			t.Errorf("List row %s phase = %q, want Ready", info.Name, info.Phase)
-		}
-		if info.Name != "sbx-1" && info.Name != "sbx-2" {
+		want, ok := wantPhase[info.Name]
+		if !ok {
 			t.Errorf("List row name = %q, want sbx-1 or sbx-2", info.Name)
+			continue
+		}
+		if info.Phase != want {
+			t.Errorf("List row %s phase = %q, want %q", info.Name, info.Phase, want)
 		}
 		if info.Age <= 0 {
-			t.Errorf("List row %s age = %v, want > 0", info.Name, info.Age)
+			t.Errorf("List row %s age = %v, want > 0 (createdAt must be parsed)", info.Name, info.Age)
 		}
+	}
+}
+
+// TestHostedBackendListBareArray asserts List also decodes the STANDALONE
+// sandbox-server shape: a bare JSON array of {id, template_id, endpoint,
+// created_at, fork_time_ms} entries. Entries without a phase default to Ready.
+func TestHostedBackendListBareArray(t *testing.T) {
+	const apiKey = "sk-test-list-array"
+	gw := newHostedGateway(apiKey)
+	created := time.Now().Add(-90 * time.Second).UTC().Format(time.RFC3339)
+	gw.listJSON = `[{"id":"sbx-a","template_id":"python","endpoint":"ep:9091","created_at":"` + created + `","fork_time_ms":12.5}]`
+	srv := hostedTestServer(t, gw)
+
+	b := NewHostedBackend(srv.URL, apiKey, srv.Client())
+	infos, err := b.List(context.Background(), "")
+	if err != nil {
+		t.Fatalf("List (bare array): %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("List returned %d rows, want 1", len(infos))
+	}
+	info := infos[0]
+	if info.Name != "sbx-a" {
+		t.Errorf("row name = %q, want sbx-a", info.Name)
+	}
+	if info.Pool != "python" {
+		t.Errorf("row pool = %q, want python (template_id)", info.Pool)
+	}
+	if info.Phase != "Ready" {
+		t.Errorf("row phase = %q, want Ready default when the wire has no phase", info.Phase)
+	}
+	if info.Age <= 0 {
+		t.Errorf("row age = %v, want > 0 (created_at must be parsed)", info.Age)
 	}
 }
 
@@ -552,9 +664,8 @@ func TestHostedBackendCLIRoutesOnAPIKey(t *testing.T) {
 	// This exercises the agentcli.Run dispatch with a HostedBackend.
 	const apiKey = "sk-cli-route-test"
 	gw := newHostedGateway(apiKey)
-	gw.listItems = []hostedSandboxEntry{
-		{ID: "sbx-1", TemplateID: "python", Endpoint: "ep:9091", CreatedAt: time.Now().UTC().Format(time.RFC3339)},
-	}
+	gw.listJSON = `{"sandboxes":[{"id":"sbx-1","phase":"Ready","endpoint":"ep:9091","createdAt":"` +
+		time.Now().UTC().Format(time.RFC3339) + `"}]}`
 	srv := hostedTestServer(t, gw)
 
 	b := NewHostedBackend(srv.URL, apiKey, srv.Client())

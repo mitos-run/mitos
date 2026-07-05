@@ -141,6 +141,7 @@ type capturedRequest struct {
 	Method string
 	Path   string
 	Auth   string
+	Idem   string // Idempotency-Key header, empty when absent
 	Body   map[string]any
 }
 
@@ -155,6 +156,7 @@ func recordingServer(t *testing.T, got *[]capturedRequest, handler func(cr captu
 			Method: r.Method,
 			Path:   r.URL.Path,
 			Auth:   r.Header.Get("Authorization"),
+			Idem:   r.Header.Get("Idempotency-Key"),
 		}
 		if len(raw) > 0 {
 			_ = json.Unmarshal(raw, &cr.Body)
@@ -344,10 +346,28 @@ func TestHTTPBackendWriteFile(t *testing.T) {
 	}
 }
 
+// TestHTTPBackendFork asserts Fork rides the per-sandbox LIVE fork route: n
+// POST /v1/sandboxes/{id}/fork calls (one per child), each carrying the bearer
+// token, a unique client-generated child id, pause_source, and a unique
+// Idempotency-Key, and that the create-shaped live-fork response (PR #710:
+// id, endpoint, token, phase, template_id, fork_time_ms) is decoded for the
+// returned ids. The legacy flat /v1/fork template route must NOT be called
+// when the live route works.
 func TestHTTPBackendFork(t *testing.T) {
 	var got []capturedRequest
 	srv := recordingServer(t, &got, func(cr capturedRequest) (int, any) {
-		return http.StatusOK, map[string]any{"id": cr.Body["id"], "template_id": cr.Body["template"]}
+		if cr.Path == "/v1/fork" {
+			return http.StatusNotFound, json.RawMessage(`{"error":{"code":"not_found","message":"no such pool \"sbx-1\"","remediation":"Create the pool first."}}`)
+		}
+		// Exact production live-fork response contract (PR #710).
+		return http.StatusOK, map[string]any{
+			"id":           cr.Body["id"],
+			"endpoint":     "sandbox-ep:9091",
+			"token":        "child-token-never-used-by-fork",
+			"phase":        "Ready",
+			"template_id":  "python",
+			"fork_time_ms": 42.5,
+		}
 	})
 	defer srv.Close()
 
@@ -362,19 +382,27 @@ func TestHTTPBackendFork(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("Fork made %d requests, want 3", len(got))
 	}
-	seen := map[string]bool{}
+	seenIDs := map[string]bool{}
+	seenKeys := map[string]bool{}
 	for i, req := range got {
-		if req.Method != http.MethodPost || req.Path != "/v1/fork" {
-			t.Fatalf("Fork req %d = %s %s", i, req.Method, req.Path)
+		if req.Method != http.MethodPost || req.Path != "/v1/sandboxes/sbx-1/fork" {
+			t.Fatalf("Fork req %d = %s %s, want POST /v1/sandboxes/sbx-1/fork", i, req.Method, req.Path)
 		}
 		if req.Auth != "Bearer tok-123" {
 			t.Fatalf("Fork req %d auth = %q", i, req.Auth)
 		}
 		id, _ := req.Body["id"].(string)
-		if id == "" || seen[id] {
+		if id == "" || seenIDs[id] {
 			t.Fatalf("Fork req %d had empty or duplicate id %q", i, id)
 		}
-		seen[id] = true
+		seenIDs[id] = true
+		if pause, ok := req.Body["pause_source"].(bool); !ok || !pause {
+			t.Fatalf("Fork req %d pause_source = %v, want true", i, req.Body["pause_source"])
+		}
+		if req.Idem == "" || seenKeys[req.Idem] {
+			t.Fatalf("Fork req %d had empty or duplicate Idempotency-Key %q", i, req.Idem)
+		}
+		seenKeys[req.Idem] = true
 	}
 }
 
@@ -392,6 +420,136 @@ func TestHTTPBackendForkDefaultsToOne(t *testing.T) {
 	}
 	if len(ids) != 1 || len(got) != 1 {
 		t.Fatalf("Fork with 0 replicas made %d reqs / %d ids, want 1/1", len(got), len(ids))
+	}
+	if got[0].Path != "/v1/sandboxes/sbx-1/fork" {
+		t.Fatalf("Fork path = %q, want /v1/sandboxes/sbx-1/fork", got[0].Path)
+	}
+}
+
+// gatewayUnknownRouteBody is the EXACT envelope an older hosted gateway (before
+// the sandbox.fork op existed) returns for POST /v1/sandboxes/{id}/fork: the
+// path falls through opFromPath to "sandbox.post" and the control plane answers
+// 404 not_found "no such route or operation".
+const gatewayUnknownRouteBody = `{"error":{"code":"not_found","message":"no such route or operation","cause":"the request did not map to a known gateway operation (resolved op \"sandbox.post\")","remediation":"Use a documented route."}}`
+
+// TestHTTPBackendForkFallsBackOnUnknownRoute asserts that when the server 404s
+// the live-fork route with the gateway's route-level not_found envelope, Fork
+// probes the live route exactly ONCE and then serves every child through the
+// legacy flat template route (POST /v1/fork {template: sandboxID, id}).
+func TestHTTPBackendForkFallsBackOnUnknownRoute(t *testing.T) {
+	var got []capturedRequest
+	srv := recordingServer(t, &got, func(cr capturedRequest) (int, any) {
+		if strings.HasSuffix(cr.Path, "/fork") && strings.HasPrefix(cr.Path, "/v1/sandboxes/") {
+			return http.StatusNotFound, json.RawMessage(gatewayUnknownRouteBody)
+		}
+		return http.StatusOK, map[string]any{"id": cr.Body["id"], "template_id": cr.Body["template"]}
+	})
+	defer srv.Close()
+
+	b := NewHTTPBackend(srv.URL, "tok-123", srv.Client())
+	ids, err := b.Fork(context.Background(), "sbx-1", 2)
+	if err != nil {
+		t.Fatalf("Fork with fallback: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("Fork returned %d ids, want 2", len(ids))
+	}
+	// One live-route probe, then 2 flat-route forks.
+	if len(got) != 3 {
+		t.Fatalf("Fork made %d requests, want 3 (1 probe + 2 flat)", len(got))
+	}
+	if got[0].Path != "/v1/sandboxes/sbx-1/fork" {
+		t.Fatalf("first request path = %q, want the live-fork probe", got[0].Path)
+	}
+	for i, req := range got[1:] {
+		if req.Method != http.MethodPost || req.Path != "/v1/fork" {
+			t.Fatalf("fallback req %d = %s %s, want POST /v1/fork", i, req.Method, req.Path)
+		}
+		if req.Body["template"] != "sbx-1" {
+			t.Fatalf("fallback req %d template = %v, want sbx-1", i, req.Body["template"])
+		}
+	}
+}
+
+// TestHTTPBackendForkFallsBackOnPlainMux404 asserts an older standalone
+// sandbox-server without the live-fork route (whose net/http mux answers a
+// plain-text "404 page not found") also triggers the flat-route fallback.
+func TestHTTPBackendForkFallsBackOnPlainMux404(t *testing.T) {
+	var got []capturedRequest
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/fork", func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		cr := capturedRequest{Method: r.Method, Path: r.URL.Path}
+		_ = json.Unmarshal(raw, &cr.Body)
+		got = append(got, cr)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": cr.Body["id"], "template_id": cr.Body["template"]})
+	})
+	// No live-fork route registered: /v1/sandboxes/{id}/fork gets the mux
+	// default "404 page not found".
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	b := NewHTTPBackend(srv.URL, "tok-123", srv.Client())
+	ids, err := b.Fork(context.Background(), "sbx-1", 1)
+	if err != nil {
+		t.Fatalf("Fork with mux-404 fallback: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("Fork returned %d ids, want 1", len(ids))
+	}
+	if len(got) != 1 || got[0].Body["template"] != "sbx-1" {
+		t.Fatalf("fallback flat fork not issued correctly: %+v", got)
+	}
+}
+
+// TestHTTPBackendForkMissingSourceIsNotFallback asserts a 404 that names a
+// missing SANDBOX or POOL (the source does not exist, or the caller is probing
+// another org's id) surfaces as an error and NEVER falls back to the flat
+// template route: only a route-level 404 means "older server".
+func TestHTTPBackendForkMissingSourceIsNotFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "hosted missing or cross-org sandbox",
+			body: `{"error":{"code":"not_found","message":"no such sandbox","cause":"no sandbox \"sbx-ghost\" exists for this organization","remediation":"Confirm the sandbox id exists and is Ready before calling."}}`,
+		},
+		{
+			name: "standalone missing sandbox",
+			body: `{"error":{"code":"not_found","message":"no such sandbox","cause":"sandbox \"sbx-ghost\" not found","remediation":"Confirm the sandbox id exists and is Ready before calling."}}`,
+		},
+		{
+			name: "pool-shaped not_found",
+			body: `{"error":{"code":"not_found","message":"no such pool \"sbx-ghost\"","remediation":"Create the pool first."}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got []capturedRequest
+			srv := recordingServer(t, &got, func(cr capturedRequest) (int, any) {
+				return http.StatusNotFound, json.RawMessage(tc.body)
+			})
+			defer srv.Close()
+
+			b := NewHTTPBackend(srv.URL, "tok-123", srv.Client())
+			_, err := b.Fork(context.Background(), "sbx-ghost", 2)
+			if err == nil {
+				t.Fatal("expected error for a missing fork source")
+			}
+			if !strings.Contains(err.Error(), "404") {
+				t.Fatalf("error should carry the 404 status, got %q", err.Error())
+			}
+			for _, req := range got {
+				if req.Path == "/v1/fork" {
+					t.Fatalf("Fork fell back to the flat template route on a missing source: %+v", got)
+				}
+			}
+			if len(got) != 1 {
+				t.Fatalf("Fork made %d requests, want exactly the 1 failed live call", len(got))
+			}
+		})
 	}
 }
 
