@@ -75,18 +75,64 @@ type SandboxView struct {
 	// unassigned. It is populated by the resource-project store in the list and
 	// inspect handlers; it is never stored in the SandboxControl itself.
 	ProjectID string `json:"project_id"`
+	// Region is the placement value (issue #712 phase 0) this sandbox's tree
+	// root was created in, read back from the tenant.RegionLabelKey label.
+	// Empty means the deployment's registry default (either the sandbox
+	// predates this field, or the request never named a region). A fork
+	// always carries its parent's Region verbatim: a live CoW fork cannot
+	// cross clusters, so region is a property of the tree, not of each
+	// sandbox individually.
+	Region string `json:"region"`
 }
 
-// SandboxControl is the live-sandbox seam the console inspects and terminates
-// running sandboxes through. The REAL implementation queries the control plane
-// (the controller's claim/sandbox records) scoped to one org; this slice ships
-// an injectable interface and an in-memory fake so the BFF shapes the view and
-// enforces org scoping NOW, and the cluster query is a documented follow-up.
+// CreateSandboxRequest is the input to SandboxControl.Create: the template
+// (pool) to provision the sandbox from, plus the requested vCPU/memory sizing.
+// The console handler validates VCPUs/MemGiB against its static bounds (issue
+// #322) before calling Create; a real adapter may not be able to enforce the
+// requested sizing itself (see clustersandbox.Control.Create's own doc for why)
+// but the seam still carries the request so an adapter that CAN enforce it
+// (the in-memory fake, and any future control-plane surface) has the value.
+// ProjectID is intentionally NOT here: project assignment is a separate,
+// separately-permissioned write (ResourceProjectStore.SetProject), performed by
+// the handler after Create succeeds, not by the seam itself.
+type CreateSandboxRequest struct {
+	Template string
+	VCPUs    int32
+	MemGiB   int32
+	// Region is the placement value (issue #712 phase 0) requested for this
+	// sandbox's tree root. Empty means "the org's home region" (which itself
+	// falls back to the deployment's registry default): the console handler
+	// leaves it empty rather than resolving it, so an adapter that never
+	// implements multi-cluster placement (every Phase 0 adapter) can ignore
+	// it entirely. When non-empty the console handler has ALREADY validated
+	// it against the deployment's placement.Registry (Registry.Valid) before
+	// Create is called; an adapter does not need to re-validate it.
+	Region string
+}
+
+// ExecResult is the outcome of SandboxControl.Exec: exactly the shape the
+// console's POST .../exec endpoint returns to the SPA. It carries no secret:
+// Stdout/Stderr are the command's own output, never an env var or credential.
+type ExecResult struct {
+	Stdout   string
+	Stderr   string
+	ExitCode int
+}
+
+// SandboxControl is the live-sandbox seam the console inspects, creates, forks,
+// execs in, and terminates running sandboxes through. The REAL implementation
+// queries the control plane (the controller's claim/sandbox records) scoped to
+// one org; this slice ships an injectable interface and an in-memory fake so
+// the BFF shapes the view and enforces org scoping NOW, and the cluster query
+// is a documented follow-up.
 //
 // Every method takes an orgID and the implementation MUST scope its effect to
-// that org: List returns only the org's sandboxes; Get and Terminate refuse a
-// sandbox that does not belong to the org (returning ErrNotFound), so the BFF's
-// org-scoping is enforced even if a caller learns another org's sandbox id.
+// that org: List returns only the org's sandboxes; Get, Terminate, Fork, and
+// Exec refuse a sandbox that does not belong to the org (returning
+// ErrNotFound), so the BFF's org-scoping is enforced even if a caller learns
+// another org's sandbox id. A method whose real backend genuinely does not
+// exist on this deployment yet (no fabricated success) returns ErrUnsupported,
+// which the console maps to HTTP 501.
 type SandboxControl interface {
 	// List returns the org's running sandboxes.
 	List(ctx context.Context, orgID string) ([]SandboxView, error)
@@ -97,6 +143,22 @@ type SandboxControl interface {
 	// Terminate terminates one of the org's sandboxes. It returns ErrNotFound if
 	// the sandbox does not exist or belongs to a different org.
 	Terminate(ctx context.Context, orgID, sandboxID string) error
+	// Create provisions a new sandbox for org from req.Template and returns its
+	// view. The caller (the console handler) has already validated req against
+	// the static vcpu/mem bounds; Create itself does not re-derive them.
+	Create(ctx context.Context, orgID string, req CreateSandboxRequest) (SandboxView, error)
+	// Fork creates count new sandboxes, each forked from sandboxID, and returns
+	// their ids in creation order. Returns ErrNotFound if sandboxID does not
+	// exist or belongs to a different org; count has already been bounded
+	// (1..16) by the caller.
+	Fork(ctx context.Context, orgID, sandboxID string, count int) ([]string, error)
+	// Exec runs cmd inside the org's sandbox, bounded by timeoutSec, and
+	// returns its result. The console handler substitutes a 30 second default
+	// (defaultExecTimeoutSec in sandbox_ops.go) before this seam is ever
+	// reached, so an implementation never sees timeoutSec == 0 from the
+	// console path. Returns ErrNotFound if sandboxID does not exist or belongs
+	// to a different org.
+	Exec(ctx context.Context, orgID, sandboxID, cmd string, timeoutSec int) (ExecResult, error)
 }
 
 // LogStreamer is the documented seam for live sandbox log streaming. The console
@@ -141,14 +203,46 @@ type TemplateLister interface {
 // AuditEvent is one immutable, non-secret line in an org's audit log: who did
 // what, when. It NEVER carries a key value or any secret; Detail is a non-secret,
 // human-legible summary (for example "created key abc12" or "revoked key xyz").
+//
+// ActorName and TargetName are best-effort, human-legible labels resolved at
+// record time (see Console.audit): ActorName from the actor's account
+// (display name, falling back to email), TargetName from whatever the call
+// site already has in hand (a key's name, a project's name, and so on). Both
+// may be empty (an account lookup failure, or no name being available for the
+// target kind); the console UI falls back to the raw id when empty. ActorType
+// is one of "user", "api_key", "system"; TargetType is one of "session",
+// "key", "sandbox", "member", "project", "secret", "sink", "profile", "org",
+// "waitlist" (the instance-operator plane's waitlist-approve action) and
+// "system" (the instance-operator plane's other read views, which have no
+// single org/entity target).
 type AuditEvent struct {
-	OrgID   string    `json:"org_id"`
-	ActorID string    `json:"actor_id"`
-	Action  string    `json:"action"`
-	Target  string    `json:"target"`
-	Detail  string    `json:"detail"`
-	At      time.Time `json:"at"`
+	// OrgID scopes the event to one organization for every normal (non-admin)
+	// action. The reserved value console.InstanceAuditOrgID ("_instance") is
+	// used instead for every instance-operator-plane (admin.*) event, which
+	// has no single owning org; a real org id can never take this value (see
+	// InstanceAuditOrgID's doc), so the two namespaces never collide.
+	OrgID      string    `json:"org_id"`
+	ActorID    string    `json:"actor_id"`
+	ActorName  string    `json:"actor_name"`
+	ActorType  string    `json:"actor_type"`
+	Action     string    `json:"action"`
+	Target     string    `json:"target"`
+	TargetType string    `json:"target_type"`
+	TargetName string    `json:"target_name"`
+	Detail     string    `json:"detail"`
+	At         time.Time `json:"at"`
 }
+
+// DefaultAuditListLimit is the page size GET /console/audit reads: enough for
+// the audit table's default view without pulling an org's entire history on
+// every load. MaxAuditListLimit is the cap the NDJSON export
+// (GET /console/audit/export) reads instead: it deliberately matches
+// MemAuditLog's own per-org retention cap, so an export can read everything
+// the store is guaranteed to still hold, durable or in-memory.
+const (
+	DefaultAuditListLimit = 200
+	MaxAuditListLimit     = 10000
+)
 
 // AuditRecorder is the org-scoped audit-log seam. No audit log existed in the
 // accounts service, so the console defines this minimal interface and ships an
@@ -158,7 +252,8 @@ type AuditEvent struct {
 type AuditRecorder interface {
 	// Record appends an audit event. The event carries no secret.
 	Record(ctx context.Context, ev AuditEvent) error
-	// List returns the org's audit events in reverse-chronological order (most
-	// recent first). It only ever returns the named org's events.
-	List(ctx context.Context, orgID string) ([]AuditEvent, error)
+	// List returns up to limit of the org's audit events in reverse-chronological
+	// order (most recent first). limit <= 0 is treated as DefaultAuditListLimit.
+	// It only ever returns the named org's events.
+	List(ctx context.Context, orgID string, limit int) ([]AuditEvent, error)
 }

@@ -55,6 +55,13 @@ type Organization struct {
 	CreatedAt time.Time
 	// Personal marks the auto-created default org for a single account.
 	Personal bool
+	// HomeRegion is the org's data-residency anchor (issue #712 phase 0): the
+	// placement.Registry value name stamped at org creation time, immutable
+	// afterward. Empty means "the deployment's registry default", so old rows
+	// and community installs that predate this field keep working without a
+	// backfill. It is read-only after creation; a region move is a future,
+	// explicit copy operation, never an in-place update.
+	HomeRegion string
 }
 
 // Role is a membership role within an organization. The role set is intentionally
@@ -107,6 +114,25 @@ var rolePerms = map[Role]map[Permission]bool{
 // Can reports whether the role grants the permission.
 func (r Role) Can(p Permission) bool {
 	return rolePerms[r][p]
+}
+
+// canGrantRole reports whether actorRole may grant targetRole to someone
+// else, whether by inviting them (InvitationService.CreateInvite) or by
+// changing an existing member's role (AccountService.SetMemberRole). Only an
+// owner may grant the owner role; any other built-in role (admin, billing,
+// member, viewer) may be granted by anyone who already holds
+// PermManageMembers. This is the single ceiling both call sites enforce, so
+// an admin can never mint a new owner through either path. It does not
+// itself check whether actorRole holds PermManageMembers at all; callers
+// already gate that separately before reaching this check. It is defined
+// only in terms of the built-in Role values: a custom role (see
+// console.CustomRole) grants a permission set, never the literal "owner"
+// role string, so it never trips this ceiling.
+func canGrantRole(actorRole, targetRole Role) bool {
+	if targetRole == RoleOwner {
+		return actorRole == RoleOwner
+	}
+	return true
 }
 
 // Membership records that an account belongs to an organization with a role. A

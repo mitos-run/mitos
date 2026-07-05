@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/console"
 )
 
@@ -23,6 +25,73 @@ func TestCapabilitiesFromEnvDefaultsToCommunity(t *testing.T) {
 	if len(c.Secrets.Providers) != 1 || c.Secrets.Providers[0] != "kube" {
 		t.Fatalf("providers = %v, want [kube]", c.Secrets.Providers)
 	}
+	if c.Placement.Key != "cluster" || c.Placement.Multi() {
+		t.Fatalf("community placement default = %+v, want single-value key=cluster", c.Placement)
+	}
+	if !c.Placement.Valid("default") {
+		t.Fatalf("community placement values = %+v, want a valid \"default\" value", c.Placement.Values)
+	}
+}
+
+// TestPlacementFromEnvDefaults asserts the hosted default is a single region
+// value (fra), the community default is a single cluster value (default),
+// and both the key and the values can be overridden via env regardless of
+// edition (issue #712 phase 0: self-host operators can rename the key; a
+// hosted deployment can list more region values ahead of phase 1 actually
+// routing to them).
+func TestPlacementFromEnvDefaults(t *testing.T) {
+	clearPlacementEnv := func(t *testing.T) {
+		t.Helper()
+		for _, k := range []string{"MITOS_CONSOLE_PLACEMENT_KEY", "MITOS_CONSOLE_PLACEMENT_VALUES"} {
+			t.Setenv(k, "")
+		}
+	}
+
+	t.Run("hosted default is single region fra", func(t *testing.T) {
+		clearPlacementEnv(t)
+		r := placementFromEnv("hosted")
+		if r.Key != "region" {
+			t.Errorf("key = %q, want region", r.Key)
+		}
+		if r.Multi() {
+			t.Error("hosted phase 0 default should be single-value")
+		}
+		if r.DefaultName() != "fra" {
+			t.Errorf("default = %q, want fra", r.DefaultName())
+		}
+	})
+
+	t.Run("community default is single cluster default", func(t *testing.T) {
+		clearPlacementEnv(t)
+		r := placementFromEnv("community")
+		if r.Key != "cluster" {
+			t.Errorf("key = %q, want cluster", r.Key)
+		}
+		if r.DefaultName() != "default" {
+			t.Errorf("default = %q, want default", r.DefaultName())
+		}
+	})
+
+	t.Run("operator can rename the key regardless of edition", func(t *testing.T) {
+		clearPlacementEnv(t)
+		t.Setenv("MITOS_CONSOLE_PLACEMENT_KEY", "zone")
+		r := placementFromEnv("community")
+		if r.Key != "zone" {
+			t.Errorf("key = %q, want zone", r.Key)
+		}
+	})
+
+	t.Run("operator can list more values regardless of edition", func(t *testing.T) {
+		clearPlacementEnv(t)
+		t.Setenv("MITOS_CONSOLE_PLACEMENT_VALUES", "fra:Frankfurt (EU),iad:Ashburn (US)")
+		r := placementFromEnv("hosted")
+		if !r.Multi() {
+			t.Error("expected a two-value registry to be Multi()")
+		}
+		if !r.Valid("fra") || !r.Valid("iad") {
+			t.Errorf("values = %+v, want fra and iad both valid", r.Values)
+		}
+	})
 }
 
 // TestCapabilitiesFromEnvHosted asserts the hosted env flips the
@@ -38,6 +107,9 @@ func TestCapabilitiesFromEnvHosted(t *testing.T) {
 	}
 	if len(c.Secrets.Providers) != 2 || c.Secrets.Providers[1] != "openbao" {
 		t.Fatalf("providers = %v, want [kube openbao]", c.Secrets.Providers)
+	}
+	if c.Placement.Key != "region" || c.Placement.DefaultName() != "fra" {
+		t.Fatalf("hosted placement default = %+v, want key=region default=fra", c.Placement)
 	}
 }
 
@@ -167,4 +239,102 @@ func TestAuthConnectorsEndpoint(t *testing.T) {
 			t.Error("signup = true, want false when caps.Signup is unset")
 		}
 	})
+}
+
+// TestCapabilitiesFromEnvFeedbackAndVersion asserts the feedback channel
+// defaults follow edition (hosted -> email support inbox, community -> a
+// GitHub new-issue link) and that both env overrides and the build version
+// are threaded through capabilitiesFromEnv into the served document.
+func TestCapabilitiesFromEnvFeedbackAndVersion(t *testing.T) {
+	clearFeedbackEnv := func(t *testing.T) {
+		t.Helper()
+		for _, k := range []string{"MITOS_CONSOLE_EDITION", "MITOS_CONSOLE_FEEDBACK_EMAIL", "MITOS_CONSOLE_FEEDBACK_GITHUB_REPO"} {
+			t.Setenv(k, "")
+		}
+	}
+
+	t.Run("community default is github mitos-run/mitos", func(t *testing.T) {
+		clearFeedbackEnv(t)
+		c := capabilitiesFromEnv()
+		if c.Feedback.Channel != "github" || c.Feedback.Target != "mitos-run/mitos" {
+			t.Errorf("feedback = %+v, want {github mitos-run/mitos}", c.Feedback)
+		}
+	})
+
+	t.Run("community github repo override", func(t *testing.T) {
+		clearFeedbackEnv(t)
+		t.Setenv("MITOS_CONSOLE_FEEDBACK_GITHUB_REPO", "acme/fork")
+		c := capabilitiesFromEnv()
+		if c.Feedback.Channel != "github" || c.Feedback.Target != "acme/fork" {
+			t.Errorf("feedback = %+v, want {github acme/fork}", c.Feedback)
+		}
+	})
+
+	t.Run("hosted default is email feedback@mitos.run", func(t *testing.T) {
+		clearFeedbackEnv(t)
+		t.Setenv("MITOS_CONSOLE_EDITION", "hosted")
+		c := capabilitiesFromEnv()
+		if c.Feedback.Channel != "email" || c.Feedback.Target != "feedback@mitos.run" {
+			t.Errorf("feedback = %+v, want {email feedback@mitos.run}", c.Feedback)
+		}
+	})
+
+	t.Run("hosted email override", func(t *testing.T) {
+		clearFeedbackEnv(t)
+		t.Setenv("MITOS_CONSOLE_EDITION", "hosted")
+		t.Setenv("MITOS_CONSOLE_FEEDBACK_EMAIL", "support@example.com")
+		c := capabilitiesFromEnv()
+		if c.Feedback.Channel != "email" || c.Feedback.Target != "support@example.com" {
+			t.Errorf("feedback = %+v, want {email support@example.com}", c.Feedback)
+		}
+	})
+
+	t.Run("version comes from the package build var", func(t *testing.T) {
+		clearFeedbackEnv(t)
+		c := capabilitiesFromEnv()
+		if c.Version != version {
+			t.Errorf("version = %q, want %q (the package build var)", c.Version, version)
+		}
+	})
+}
+
+// TestPlanSourceFromEnvDefaultsToFree asserts that with MITOS_CONSOLE_TEAM_ORGS
+// unset, every org resolves to PlanFree: the manual-grant allowlist is empty
+// by default.
+func TestPlanSourceFromEnvDefaultsToFree(t *testing.T) {
+	t.Setenv("MITOS_CONSOLE_TEAM_ORGS", "")
+	src := planSourceFromEnv()
+	plan, err := src.GetPlan(context.Background(), "any-org")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if plan != billing.PlanFree {
+		t.Errorf("plan = %q, want free", plan)
+	}
+}
+
+// TestPlanSourceFromEnvGrantsListedOrgs asserts a comma-separated
+// MITOS_CONSOLE_TEAM_ORGS grants exactly those org ids PlanTeam and leaves
+// every other org on PlanFree.
+func TestPlanSourceFromEnvGrantsListedOrgs(t *testing.T) {
+	t.Setenv("MITOS_CONSOLE_TEAM_ORGS", "org-a, org-b")
+	src := planSourceFromEnv()
+
+	for _, orgID := range []string{"org-a", "org-b"} {
+		plan, err := src.GetPlan(context.Background(), orgID)
+		if err != nil {
+			t.Fatalf("GetPlan(%s): %v", orgID, err)
+		}
+		if plan != billing.PlanTeam {
+			t.Errorf("GetPlan(%s) = %q, want team", orgID, plan)
+		}
+	}
+
+	plan, err := src.GetPlan(context.Background(), "org-c")
+	if err != nil {
+		t.Fatalf("GetPlan(org-c): %v", err)
+	}
+	if plan != billing.PlanFree {
+		t.Errorf("GetPlan(org-c) = %q, want free (not listed)", plan)
+	}
 }

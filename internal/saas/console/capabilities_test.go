@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"mitos.run/mitos/internal/saas/placement"
 )
 
 // getCaps issues an UNAUTHENTICATED GET /console/capabilities. Capabilities are
@@ -60,6 +62,46 @@ func TestCapabilitiesDefaultsToCommunity(t *testing.T) {
 	}
 	if len(caps.Secrets.Providers) != 1 || caps.Secrets.Providers[0] != "kube" {
 		t.Errorf("secrets.providers = %v, want [kube]", caps.Secrets.Providers)
+	}
+	if caps.Placement.Key != "cluster" {
+		t.Errorf("placement.key = %q, want cluster", caps.Placement.Key)
+	}
+	if caps.Placement.Multi() {
+		t.Error("community default placement should be single-value (no picker)")
+	}
+	if !caps.Placement.Valid("default") {
+		t.Errorf("placement.values = %+v, want a valid \"default\" value", caps.Placement.Values)
+	}
+}
+
+// TestCapabilitiesPlacementEchoedVerbatim asserts a deployment-configured
+// placement registry (issue #712 phase 0), as cmd/console's
+// capabilitiesFromEnv builds from MITOS_CONSOLE_PLACEMENT_KEY/VALUES, is
+// returned unchanged: a hosted multi-value registry advertises a picker
+// (Multi() true), and every configured value validates.
+func TestCapabilitiesPlacementEchoedVerbatim(t *testing.T) {
+	want := Capabilities{
+		Edition:   "hosted",
+		Teams:     true,
+		IDP:       "oidc",
+		Proof:     true,
+		Ownership: "hosted",
+		Secrets:   SecretsCapability{Providers: []string{"kube"}},
+		Placement: placement.New("region", "fra:Frankfurt (EU),iad:Ashburn (US)"),
+	}
+	c := New(Deps{Capabilities: want})
+	_, caps := getCaps(t, c)
+	if caps.Placement.Key != "region" {
+		t.Errorf("placement.key = %q, want region", caps.Placement.Key)
+	}
+	if !caps.Placement.Multi() {
+		t.Error("two-value placement registry should advertise Multi() true")
+	}
+	if !caps.Placement.Valid("fra") || !caps.Placement.Valid("iad") {
+		t.Errorf("placement.values = %+v, want fra and iad both valid", caps.Placement.Values)
+	}
+	if caps.Placement.DefaultName() != "fra" {
+		t.Errorf("placement default = %q, want fra", caps.Placement.DefaultName())
 	}
 }
 
@@ -145,4 +187,48 @@ func TestCapabilitiesAuthConnectorsInResponse(t *testing.T) {
 			t.Errorf("authConnectors = %v, want []", caps.AuthConnectors)
 		}
 	})
+}
+
+// TestCapabilitiesDefaultsIncludeFeedbackAndVersion asserts the community
+// default carries a usable feedback channel (github, so a self-hoster with no
+// support inbox still has a one-click path to file an issue) and a version
+// string (defaulting "dev" until a build injects one), so the SPA's feedback
+// dialog and sidebar footer never render empty.
+func TestCapabilitiesDefaultsIncludeFeedbackAndVersion(t *testing.T) {
+	c := New(Deps{})
+	_, caps := getCaps(t, c)
+	if caps.Feedback.Channel != "github" {
+		t.Errorf("feedback.channel = %q, want github", caps.Feedback.Channel)
+	}
+	if caps.Feedback.Target != "mitos-run/mitos" {
+		t.Errorf("feedback.target = %q, want mitos-run/mitos", caps.Feedback.Target)
+	}
+	if caps.Version != "dev" {
+		t.Errorf("version = %q, want dev", caps.Version)
+	}
+}
+
+// TestCapabilitiesFeedbackAndVersionEchoedVerbatim asserts an explicit
+// Capabilities config (as cmd/console's capabilitiesFromEnv builds) is
+// returned unchanged: Feedback and Version are deployment-level config, not
+// resolved per-request like Plan/Entitlements/Admin.
+func TestCapabilitiesFeedbackAndVersionEchoedVerbatim(t *testing.T) {
+	want := Capabilities{
+		Edition:   "hosted",
+		Teams:     true,
+		IDP:       "oidc",
+		Proof:     true,
+		Ownership: "hosted",
+		Secrets:   SecretsCapability{Providers: []string{"kube"}},
+		Feedback:  FeedbackCapability{Channel: "email", Target: "feedback@mitos.run"},
+		Version:   "1.6.0",
+	}
+	c := New(Deps{Capabilities: want})
+	_, caps := getCaps(t, c)
+	if caps.Feedback.Channel != "email" || caps.Feedback.Target != "feedback@mitos.run" {
+		t.Errorf("feedback = %+v, want email/feedback@mitos.run", caps.Feedback)
+	}
+	if caps.Version != "1.6.0" {
+		t.Errorf("version = %q, want 1.6.0", caps.Version)
+	}
 }

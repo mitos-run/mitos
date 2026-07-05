@@ -2,7 +2,7 @@
 // TDD: this file was written before content.ts existed.
 
 import { describe, it, expect } from 'vitest'
-import { FIRST_RUN, RUNTIMES, getFirstRun } from './content'
+import { FIRST_RUN, RUNTIMES, getFirstRun, SYNTHETIC_TRIGGER } from './content'
 
 const DASH_RE = /[–—]/
 
@@ -111,5 +111,31 @@ describe('snippets use the hosted surface a new signup can actually run', () => 
         expect(entry.snippets[runtime]).not.toMatch(/\w+\.(py|js)\b/)
       }
     }
+  })
+})
+
+describe('SYNTHETIC_TRIGGER curl is a real, plain-curl-able unary route', () => {
+  // Every exec RPC on the surface is streaming (Exec is bidi, ExecStream is
+  // server-streaming) and rejects plain curl's application/json body with a
+  // 415; the only true unary JSON route is POST /v1/fork, which itself
+  // creates a Running sandbox and flips the first-activity signal. The curl
+  // snippet must stick to that route and never regress to a dead
+  // Connect-streaming endpoint.
+  it('targets /v1/fork', () => {
+    expect(SYNTHETIC_TRIGGER.curl).toContain('/v1/fork')
+  })
+
+  it('never references the sandbox.v1.Sandbox Connect service', () => {
+    expect(SYNTHETIC_TRIGGER.curl).not.toContain('/sandbox.v1.Sandbox/')
+  })
+
+  // A hardcoded id (e.g. "trigger-1") means pasting the same command twice
+  // hits a duplicate-id conflict against the real API; the example must
+  // generate a fresh id on every run via shell substitution instead.
+  it('uses a shell-substituted, copy-paste-safe id instead of a hardcoded literal', () => {
+    expect(SYNTHETIC_TRIGGER.curl).not.toContain('"trigger-1"')
+    // The id must break out of the single-quoted -d body to let bash expand
+    // $(date +%s); a literal $(...) left inside single quotes never runs.
+    expect(SYNTHETIC_TRIGGER.curl).toContain(`"id":"trigger-'$(date +%s)'"`)
   })
 })

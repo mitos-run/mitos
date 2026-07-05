@@ -65,8 +65,10 @@ var (
 // an error.
 type OrgProvisioner interface {
 	// Provision ensures the tenant Org resource exists for orgID with the given
-	// display name. It MUST treat an already-existing org as success.
-	Provision(ctx context.Context, orgID, displayName string) error
+	// display name and home region (issue #712 phase 0; empty region means the
+	// deployment's registry default, and implementations may treat it as a
+	// no-op label). It MUST treat an already-existing org as success.
+	Provision(ctx context.Context, orgID, displayName, region string) error
 }
 
 // EmailSender is the seam that delivers the verification email. The fake
@@ -81,6 +83,11 @@ type EmailSender interface {
 	// their first fork. It carries no secret; the email is delivered to the
 	// user's inbox and is never logged.
 	SendApproved(ctx context.Context, email string) error
+	// SendInvite delivers an org-invitation email carrying token (the raw
+	// invite token; a secret, never logged or stored). Implementations
+	// mirror saas.InviteEmailSender's signature so the SAME concrete sender
+	// backs both the onboarding funnel and the console invites seam.
+	SendInvite(ctx context.Context, email, orgName, inviterName, token string) error
 }
 
 // FakeEmailSender is the in-memory EmailSender used in tests. It captures the
@@ -88,16 +95,20 @@ type EmailSender interface {
 // for a human clicking the link. It is NOT for production: a real sender never
 // retains tokens.
 type FakeEmailSender struct {
-	mu       sync.Mutex
-	sent     map[string]string // email -> last token sent
-	approved map[string]bool   // email -> approval sent
+	mu            sync.Mutex
+	sent          map[string]string // email -> last token sent
+	approved      map[string]bool   // email -> approval sent
+	approvedCount map[string]int    // email -> how many times SendApproved was called
+	invited       map[string]string // email -> last invite token sent
 }
 
 // NewFakeEmailSender returns an empty fake sender.
 func NewFakeEmailSender() *FakeEmailSender {
 	return &FakeEmailSender{
-		sent:     map[string]string{},
-		approved: map[string]bool{},
+		sent:          map[string]string{},
+		approved:      map[string]bool{},
+		approvedCount: map[string]int{},
+		invited:       map[string]string{},
 	}
 }
 
@@ -114,6 +125,7 @@ func (f *FakeEmailSender) SendApproved(_ context.Context, email string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.approved[email] = true
+	f.approvedCount[email]++
 	return nil
 }
 
@@ -125,12 +137,38 @@ func (f *FakeEmailSender) LastToken(email string) string {
 	return f.sent[email]
 }
 
+// SendInvite records the raw invite token for email so a test can retrieve
+// it, standing in for a human reading the invite email.
+func (f *FakeEmailSender) SendInvite(_ context.Context, email, _, _, token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.invited[email] = token
+	return nil
+}
+
+// LastInviteToken returns the most recent invite token sent to email, or ""
+// if none. This is a TEST helper standing in for the user reading the email.
+func (f *FakeEmailSender) LastInviteToken(email string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.invited[email]
+}
+
 // Approved returns true when SendApproved has been called for email. This is a
 // TEST helper so A3's test can assert an approval was sent.
 func (f *FakeEmailSender) Approved(email string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.approved[email]
+}
+
+// ApprovedCount returns how many times SendApproved has been called for
+// email. This is a TEST helper for asserting idempotent approval (issue
+// #714) never re-sends the notification.
+func (f *FakeEmailSender) ApprovedCount(email string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.approvedCount[email]
 }
 
 // E2ETokenSink captures raw verify tokens at signup time so a QA harness can
@@ -234,6 +272,18 @@ type PendingSignup struct {
 	// verify time. The pending record is NOT marked Verified, so a later approve
 	// and re-verify with the same token can still provision.
 	Waitlisted bool
+	// InviteTokenHash is the sha256 hash of a pending org-invite token carried
+	// from an invite-accept CTA that sent the visitor to sign up fresh
+	// (rather than through the session-required POST /console/invites/accept
+	// path). Empty when the signup carried no invite context. Only the HASH
+	// is stored, matching TokenHash above and saas.Invitation.TokenHash: the
+	// raw invite token is never persisted. At Verify time, a non-empty value
+	// is looked up directly (saas.Store.GetInvitationByTokenHash uses the
+	// identical hash), so the account additionally auto-joins that
+	// invitation's org, in addition to its own Personal org, PROVIDED the
+	// invite is still pending and the verified email satisfies
+	// saas.InviteEmailMatches.
+	InviteTokenHash string
 }
 
 // WaitlistEntry records a signup captured while the funnel is in waitlist mode.
@@ -455,6 +505,20 @@ type SignupResult struct {
 // signup_started event. It NEVER logs the email or the token. An invalid or
 // absent useCase is stored as "".
 func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResult, error) {
+	return s.signUp(ctx, email, useCase, "")
+}
+
+// SignUpWithInvite behaves exactly like SignUp but additionally carries the
+// hash of a pending org-invite token through to Verify, so a fresh signup
+// whose email was already invited to an org auto-joins that org on
+// verification (see PendingSignup.InviteTokenHash). inviteToken is the RAW
+// token from the invite link; only its hash is ever persisted. An empty
+// inviteToken behaves identically to SignUp.
+func (s *Service) SignUpWithInvite(ctx context.Context, email, useCase, inviteToken string) (SignupResult, error) {
+	return s.signUp(ctx, email, useCase, inviteToken)
+}
+
+func (s *Service) signUp(ctx context.Context, email, useCase, inviteToken string) (SignupResult, error) {
 	if email == "" {
 		return SignupResult{}, ErrInvalidEmail
 	}
@@ -468,8 +532,22 @@ func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResu
 	now := s.now()
 
 	if s.mode == ModeWaitlist {
-		if err := s.pending.AddWaitlist(ctx, WaitlistEntry{Email: email, CreatedAt: now}); err != nil {
-			return SignupResult{}, fmt.Errorf("onboarding sign up: record waitlist: %w", err)
+		// Dedupe by canonical identity: a repeat submission of the same
+		// address (a visitor double-clicking Join, or a client retry after a
+		// dropped response) is a no-op rather than a second row, so the
+		// waitlist an operator later reviews has one row per person, not one
+		// row per submission. Best-effort: PendingStore has no unique
+		// constraint on email, so two concurrent FIRST-time submissions of
+		// the same address could still race into two rows; harmless, since
+		// approval targets an email, not a row index.
+		already, err := s.waitlistHasEmail(ctx, canonical)
+		if err != nil {
+			return SignupResult{}, fmt.Errorf("onboarding sign up: check waitlist: %w", err)
+		}
+		if !already {
+			if err := s.pending.AddWaitlist(ctx, WaitlistEntry{Email: email, CreatedAt: now}); err != nil {
+				return SignupResult{}, fmt.Errorf("onboarding sign up: record waitlist: %w", err)
+			}
 		}
 		// The waitlist subject keys on the canonical identity hash so the analytics
 		// event carries no PII and folded variants of one identity map to one
@@ -499,6 +577,12 @@ func (s *Service) SignUp(ctx context.Context, email, useCase string) (SignupResu
 		CreatedAt:      now,
 		ExpiresAt:      now.Add(s.tokenTTL),
 		UseCase:        validateUseCase(useCase),
+	}
+	if inviteToken != "" {
+		// Only the HASH is stored, in the identical form
+		// saas.Store.GetInvitationByTokenHash keys on, so Verify can look it
+		// up directly without ever handling the raw invite token again.
+		pending.InviteTokenHash = hashString(inviteToken)
 	}
 	if err := s.pending.PutPending(ctx, pending); err != nil {
 		return SignupResult{}, fmt.Errorf("onboarding sign up: store pending: %w", err)
@@ -642,7 +726,7 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 	// landing in an org with no namespace; the provisioner is required to be
 	// idempotent so a retry is safe.
 	if s.provision != nil {
-		if err := s.provision.Provision(ctx, org.ID, org.Name); err != nil {
+		if err := s.provision.Provision(ctx, org.ID, org.Name, org.HomeRegion); err != nil {
 			return VerifyResult{}, fmt.Errorf("onboarding verify: provision tenant org: %w", err)
 		}
 	} else {
@@ -669,6 +753,13 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 		return VerifyResult{}, fmt.Errorf("onboarding verify: mark verified: %w", err)
 	}
 
+	// Auto-join a pending org invite carried through from signup, in ADDITION
+	// to the Personal org just provisioned above. Best-effort: any failure
+	// here (unknown/removed invite, expired, email mismatch) never fails the
+	// signup itself; the user still gets their account and can accept the
+	// invite explicitly later via POST /console/invites/accept.
+	s.autoJoinPendingInvite(ctx, pending, acct, now)
+
 	// The funnel subject transitions from the pending id to the account id; record
 	// both events under the pending id so the funnel can be followed from
 	// signup_started through verified and key_issued.
@@ -684,10 +775,73 @@ func (s *Service) Verify(ctx context.Context, rawToken string) (VerifyResult, er
 	}, nil
 }
 
+// autoJoinPendingInvite looks up the invitation pending.InviteTokenHash
+// refers to (a no-op when empty, i.e. the common case of a signup with no
+// invite context) and, if it is still effectively pending and acct's email
+// matches the invite's address, adds acct as a member of the invitation's
+// org at its role and marks the invitation accepted. The match is either
+// saas.InviteEmailMatches (exact match, or same-domain colleague match on a
+// non-consumer domain) OR both addresses folding to the same canonicalEmail:
+// signup dedup already canonicalizes (strips a "+tag", and for gmail.com /
+// googlemail.com also strips dots and folds the domain), so without this an
+// invite sent to "j.ohn+work@gmail.com" would never auto-join a "john@gmail.com"
+// signup even though signup's own dedup treats them as the same person.
+// saas.InviteEmailMatches alone cannot express this: gmail.com is a
+// consumer domain there, so it requires an exact address match. Every
+// failure path (unknown invite, expired, mismatch, or a store error) is
+// swallowed: this is a best-effort UX nicety layered on top of the REQUIRED
+// signup flow, never a reason to fail Verify. The explicit POST
+// /console/invites/accept endpoint remains the primary, always-available
+// accept path.
+func (s *Service) autoJoinPendingInvite(ctx context.Context, pending PendingSignup, acct saas.Account, now time.Time) {
+	if pending.InviteTokenHash == "" {
+		return
+	}
+	inv, err := s.store.GetInvitationByTokenHash(ctx, pending.InviteTokenHash)
+	if err != nil {
+		return
+	}
+	if inv.EffectiveState(now) != saas.InvitationPending {
+		return
+	}
+	inviteCanon, inviteOK := canonicalEmail(inv.Email)
+	acctCanon, acctOK := canonicalEmail(acct.Email)
+	canonicalMatch := inviteOK && acctOK && inviteCanon == acctCanon
+	if !saas.InviteEmailMatches(inv.Email, acct.Email) && !canonicalMatch {
+		return
+	}
+	if err := s.store.PutMembership(ctx, saas.Membership{
+		AccountID: acct.ID,
+		OrgID:     inv.OrgID,
+		Role:      inv.Role,
+		CreatedAt: now,
+	}); err != nil {
+		return
+	}
+	_ = s.store.UpdateInvitationState(ctx, inv.ID, saas.InvitationAccepted)
+}
+
 // JoinWaitlist returns the recorded waitlist entries (operator surface for the
 // design-partner invite flow). The real invite/notify path is a follow-up.
 func (s *Service) JoinWaitlist(ctx context.Context) ([]WaitlistEntry, error) {
 	return s.pending.Waitlist(ctx)
+}
+
+// waitlistHasEmail reports whether canonical (an already-canonicalized
+// identity, see canonicalEmail) is already recorded on the waitlist, so
+// signUp's ModeWaitlist branch can skip adding a duplicate row for a repeat
+// submission of the same person.
+func (s *Service) waitlistHasEmail(ctx context.Context, canonical string) (bool, error) {
+	entries, err := s.pending.Waitlist(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if c, ok := canonicalEmail(e.Email); ok && c == canonical {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // RecordFirstSandbox records that subject created its first sandbox. The gateway

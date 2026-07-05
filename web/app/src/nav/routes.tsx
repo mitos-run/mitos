@@ -20,9 +20,15 @@ import { Settings } from '../views/Settings'
 import { Retention } from '../views/Retention'
 import { Roles } from '../views/Roles'
 import { ProjectDetail } from '../views/projects/ProjectDetail'
+import { AcceptInvite } from '../auth/AcceptInvite'
+import { AdminOverview } from '../views/admin/Overview'
+import { AdminOrgs } from '../views/admin/Orgs'
+import { AdminNodes } from '../views/admin/Nodes'
+import { AdminWaitlist } from '../views/admin/Waitlist'
+import { AdminAudit } from '../views/admin/Audit'
 
-export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Billing'
-export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Billing']
+export type NavGroupName = 'Run' | 'Build' | 'Govern' | 'Billing' | 'Operate'
+export const GROUP_ORDER: NavGroupName[] = ['Run', 'Build', 'Govern', 'Billing', 'Operate']
 
 export type RouteDef = {
   path: string
@@ -59,6 +65,20 @@ export const ROUTES: RouteDef[] = [
   // Account settings is reached from the top-bar account menu, not the sidebar;
   // the route stays registered (and palette-searchable) but hidden from nav.
   { path: '/settings', label: 'Settings', group: 'Govern', element: () => <Settings />, hidden: true },
+  // Invite-accept confirm screen: reached only via an invite link, never the
+  // sidebar. The SAME component renders the pre-auth summary
+  // (auth/preauthRouter.tsx); here authenticated=true selects the
+  // confirm-join screen instead.
+  { path: '/invite/accept', label: 'Accept invite', group: 'Govern', element: () => <AcceptInvite authenticated />, hidden: true, when: (c) => c.teams },
+  // Operate: the instance-operator plane, visible only to a caller the
+  // server has granted the admin capability (MITOS_CONSOLE_INSTANCE_ADMINS,
+  // or the community-edition single-org-owner fallback). See
+  // internal/saas/console/admin.go.
+  { path: '/admin', label: 'Overview', group: 'Operate', element: () => <AdminOverview />, when: (c) => !!c.admin },
+  { path: '/admin/orgs', label: 'Organizations', group: 'Operate', element: () => <AdminOrgs />, when: (c) => !!c.admin },
+  { path: '/admin/nodes', label: 'Nodes', group: 'Operate', element: () => <AdminNodes />, when: (c) => !!c.admin },
+  { path: '/admin/waitlist', label: 'Waitlist', group: 'Operate', element: () => <AdminWaitlist />, when: (c) => !!c.admin },
+  { path: '/admin/audit', label: 'Audit', group: 'Operate', element: () => <AdminAudit />, when: (c) => !!c.admin },
 ]
 
 export function visibleRoutes(caps: Capabilities): RouteDef[] {

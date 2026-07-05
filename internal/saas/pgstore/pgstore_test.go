@@ -51,7 +51,7 @@ func truncateAll(t *testing.T, dsn string) {
 	}
 	defer pool.Close()
 	_, err = pool.Exec(context.Background(),
-		`TRUNCATE accounts, orgs, memberships, api_keys RESTART IDENTITY CASCADE`)
+		`TRUNCATE accounts, orgs, memberships, api_keys, invitations RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("truncate: %v", err)
 	}

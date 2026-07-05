@@ -22,6 +22,23 @@ func TestSettingsPermissionOnAdminNotMember(t *testing.T) {
 	}
 }
 
+// TestCanGrantRole pins the full role-grant ceiling matrix enforced by both
+// InvitationService.CreateInvite and AccountService.SetMemberRole: only an
+// owner may grant the owner role; every other built-in role is grantable by
+// anyone (the permission gate that they hold PermManageMembers at all is a
+// separate, already-enforced check).
+func TestCanGrantRole(t *testing.T) {
+	roles := []Role{RoleOwner, RoleAdmin, RoleBilling, RoleMember, RoleViewer}
+	for _, actor := range roles {
+		for _, target := range roles {
+			want := target != RoleOwner || actor == RoleOwner
+			if got := canGrantRole(actor, target); got != want {
+				t.Errorf("canGrantRole(%s, %s) = %v, want %v", actor, target, got, want)
+			}
+		}
+	}
+}
+
 func TestRolePermissions(t *testing.T) {
 	cases := []struct {
 		role Role

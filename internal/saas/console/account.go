@@ -121,15 +121,20 @@ type SessionView struct {
 	Current   bool      `json:"current"`
 }
 
-// accountView builds an AccountView from a saas.Account and its memberships.
-func accountView(acct saas.Account, mems []saas.Membership) AccountView {
+// accountView builds an AccountView from a saas.Account and its memberships,
+// joining each membership's org HomeRegion from orgs (keyed by org id). orgs
+// is best-effort: a membership whose org is missing from the map (a lookup
+// failure upstream) simply gets an empty HomeRegion rather than failing the
+// whole view.
+func accountView(acct saas.Account, mems []saas.Membership, orgs map[string]saas.Organization) AccountView {
 	mv := make([]MemberView, 0, len(mems))
 	for _, m := range mems {
 		mv = append(mv, MemberView{
-			AccountID: m.AccountID,
-			OrgID:     m.OrgID,
-			Role:      m.Role,
-			CreatedAt: m.CreatedAt,
+			AccountID:  m.AccountID,
+			OrgID:      m.OrgID,
+			Role:       m.Role,
+			CreatedAt:  m.CreatedAt,
+			HomeRegion: orgs[m.OrgID].HomeRegion,
 		})
 	}
 	return AccountView{
@@ -156,7 +161,10 @@ func (c *Console) handleGetAccount(w http.ResponseWriter, r *http.Request) {
 		c.failAccount(w, err, "the account profile could not be read")
 		return
 	}
-	writeJSON(w, http.StatusOK, accountView(acct, mems))
+	// Resolve orgs (issue #712's HomeRegion join) from the memberships already
+	// read above, so the account view does not re-list memberships.
+	orgs := c.deps.Accounts.OrganizationsFor(r.Context(), mems)
+	writeJSON(w, http.StatusOK, accountView(acct, mems, orgs))
 }
 
 // updateProfileRequest is the PATCH /console/account body. Only non-empty fields
@@ -196,15 +204,18 @@ func (c *Console) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
 		c.failAccount(w, err, "the account profile could not be read after update")
 		return
 	}
+	// Target is deliberately empty: the actor IS the subject of a profile
+	// update, so a Target duplicating ActorID adds nothing.
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "profile.update",
-		Target:  accountID,
-		Detail:  "updated account profile",
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "profile.update",
+		TargetType: "profile",
+		Detail:     "updated account profile",
+		At:         c.deps.Now(),
 	})
-	writeJSON(w, http.StatusOK, accountView(updated, mems))
+	orgs := c.deps.Accounts.OrganizationsFor(r.Context(), mems)
+	writeJSON(w, http.StatusOK, accountView(updated, mems, orgs))
 }
 
 // handleListSessions returns the caller's sessions. The account id is from
@@ -238,6 +249,15 @@ func (c *Console) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("id")
+	// Resolve the session's own label before revoking it, best-effort, so the
+	// audit event's TargetName is more legible than the bare session id.
+	var targetName string
+	for _, s := range c.deps.Sessions.ListByAccount(accountID) {
+		if s.ID == sessionID {
+			targetName = s.Label
+			break
+		}
+	}
 	if err := c.deps.Sessions.Revoke(accountID, sessionID); err != nil {
 		if errors.Is(err, saas.ErrNotFound) {
 			apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
@@ -249,12 +269,14 @@ func (c *Console) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "session.revoke",
-		Target:  sessionID,
-		Detail:  "revoked session " + sessionID,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "session.revoke",
+		Target:     sessionID,
+		TargetType: "session",
+		TargetName: targetName,
+		Detail:     "revoked session " + sessionID,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": sessionID})
 }
@@ -268,13 +290,15 @@ func (c *Console) handleRevokeAllSessions(w http.ResponseWriter, r *http.Request
 		return
 	}
 	c.deps.Sessions.RevokeAll(accountID)
+	// Target is deliberately empty: this is a bulk action on the caller's own
+	// sessions, so there is no single target id to duplicate against ActorID.
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "session.revoke_all",
-		Target:  accountID,
-		Detail:  "revoked all sessions",
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "session.revoke_all",
+		TargetType: "session",
+		Detail:     "revoked all sessions",
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"revoked_all": true})
 }

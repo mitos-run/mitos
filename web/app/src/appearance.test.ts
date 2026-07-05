@@ -1,7 +1,7 @@
 // Behavior tests for the appearance module: round-trip localStorage persistence
 // and document.documentElement.dataset side-effects.
-import { describe, it, expect, beforeEach } from 'vitest'
-import { getAppearance, setAppearance } from './appearance'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { getAppearance, setAppearance, applyAppearanceOnLoad, subscribe } from './appearance'
 
 beforeEach(() => {
   localStorage.clear()
@@ -34,11 +34,16 @@ describe('appearance', () => {
     expect(document.documentElement.dataset['density']).toBe('compact')
   })
 
-  it('returns defaults when nothing is stored', () => {
+  it('returns defaults when nothing is stored, with theme defaulting to dark', () => {
     const got = getAppearance()
     expect(got.reducedMotion).toBe(false)
     expect(got.density).toBe('comfortable')
-    expect(got.theme).toBe('system')
+    expect(got.theme).toBe('dark')
+  })
+
+  it('applies dataset.theme = dark when nothing is stored (brand default, not OS preference)', () => {
+    applyAppearanceOnLoad()
+    expect(document.documentElement.dataset['theme']).toBe('dark')
   })
 
   it('round-trips theme through setAppearance -> getAppearance', () => {
@@ -62,8 +67,50 @@ describe('appearance', () => {
     expect(document.documentElement.dataset['theme']).toBeUndefined()
   })
 
-  it('falls back to the system theme when the stored value is invalid', () => {
+  it('falls back to the default (dark) theme when the stored value is invalid', () => {
     localStorage.setItem('mitos-appearance', JSON.stringify({ theme: 'sepia' }))
-    expect(getAppearance().theme).toBe('system')
+    expect(getAppearance().theme).toBe('dark')
+  })
+
+  it('returns the dark default when localStorage.getItem throws', () => {
+    const spy = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('storage unavailable')
+    })
+    try {
+      const got = getAppearance()
+      expect(got).toEqual({ reducedMotion: false, density: 'comfortable', theme: 'dark' })
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
+describe('appearance subscribe', () => {
+  it('notifies subscribers after setAppearance persists and applies', () => {
+    const listener = vi.fn()
+    subscribe(listener)
+    setAppearance({ reducedMotion: false, density: 'comfortable', theme: 'light' })
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(document.documentElement.dataset['theme']).toBe('light')
+  })
+
+  it('stops notifying once unsubscribed', () => {
+    const listener = vi.fn()
+    const unsubscribe = subscribe(listener)
+    unsubscribe()
+    setAppearance({ reducedMotion: false, density: 'comfortable', theme: 'light' })
+    expect(listener).not.toHaveBeenCalled()
+  })
+
+  it('isolates a throwing listener so later subscribers still get notified', () => {
+    const throwing = vi.fn(() => {
+      throw new Error('boom')
+    })
+    const after = vi.fn()
+    subscribe(throwing)
+    subscribe(after)
+    setAppearance({ reducedMotion: false, density: 'comfortable', theme: 'light' })
+    expect(throwing).toHaveBeenCalledTimes(1)
+    expect(after).toHaveBeenCalledTimes(1)
   })
 })

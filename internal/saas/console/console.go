@@ -40,7 +40,13 @@ type BillingReader struct {
 // A nil seam is filled with its in-memory tested default so a caller can stand
 // up a working, org-scoped BFF with just the account service.
 type Deps struct {
-	Accounts    *saas.AccountService
+	Accounts *saas.AccountService
+	// Invitations is the org invitation seam (create/list/revoke/resend/
+	// lookup/accept). Nil (the default) means invitations are NOT enabled on
+	// this deployment: the invite endpoints return a clean "not enabled"
+	// response instead of panicking. The production binary wires this from
+	// the SAME saas.Store the AccountService uses.
+	Invitations *saas.InvitationService
 	Usage       usage.UsageStore
 	Prices      usage.PriceList
 	Billing     BillingReader
@@ -104,10 +110,48 @@ type Deps struct {
 	ResourceProjects ResourceProjectStore
 	// Capabilities is the deployment edition + feature flags the console
 	// advertises at GET /console/capabilities. Left zero, it defaults to the
-	// self-hosted community edition.
+	// self-hosted community edition. Its Plan/Entitlements are the
+	// UNAUTHENTICATED-request/boot-time default; New always recomputes
+	// Entitlements from Plan and Edition so a caller cannot pass a stale or
+	// mismatched pair.
 	Capabilities Capabilities
-	Log          *slog.Logger
-	Now          func() time.Time
+	// Plans resolves an org's current billing plan for the per-request
+	// Plan/Entitlements resolution in handleCapabilities and the
+	// entitlementsFor gating helper. Defaults to a StaticPlanSource that
+	// resolves every org to PlanFree, so the BFF is safe to instantiate
+	// without a real plan/subscription backend.
+	Plans billing.PlanSource
+	// InstanceAdminEmails is the deployment-level allowlist of account emails
+	// granted the instance-operator capability (GET/POST /console/admin/...),
+	// matched case-insensitively (New normalizes case and whitespace). This
+	// grant sits ABOVE org RBAC: see admin.go's package doc. Empty means no
+	// email is granted the capability via this path; the community-edition
+	// single-org-owner fallback in isInstanceAdmin still applies regardless.
+	InstanceAdminEmails []string
+	// Orgs is the org-directory seam the instance-operator plane reads: list
+	// EVERY organization on this deployment and its membership, deliberately
+	// NOT scoped to the caller's own org (every other seam here is
+	// org-scoped; this one backs the operator surface behind
+	// isInstanceAdmin, not a tenant-facing view). saas.Store satisfies this
+	// directly, matching the drawdown driver's own narrow org-iteration seam
+	// (cmd/console/drawdown.go). Defaults to an empty in-memory directory so
+	// the BFF is safe to instantiate without a real store.
+	Orgs OrgDirectory
+	// Nodes is the k8s node-listing seam for GET /console/admin/nodes.
+	// Unlike every other seam here, a nil Nodes is a MEANINGFUL, PERMANENT
+	// state that New deliberately does NOT fill with a default: it means no
+	// Kubernetes client is configured on this deployment, and the endpoint
+	// honestly reports {"available": false} rather than fabricating an
+	// empty node list.
+	Nodes NodeSource
+	// Waitlist is the seam over the onboarding funnel's recorded waitlist
+	// entries and their approval (see internal/saas/onboarding.PendingStore
+	// and onboarding.ApproveWaitlistEntry). Defaults to an empty,
+	// approve-disabled in-memory seam so the BFF is safe to instantiate
+	// without real onboarding wiring.
+	Waitlist WaitlistSource
+	Log      *slog.Logger
+	Now      func() time.Time
 }
 
 // Console is the org-scoped BFF. It reads the caller and org from the request
@@ -115,8 +159,9 @@ type Deps struct {
 // ONLY the caller's org data. It never logs or returns a key value except the
 // one-time raw key on create.
 type Console struct {
-	deps Deps
-	mux  *http.ServeMux
+	deps            Deps
+	mux             *http.ServeMux
+	inviteRateLimit *inviteRateLimiter
 }
 
 // New builds a Console, filling in in-memory seam defaults and a default price
@@ -195,12 +240,42 @@ func New(deps Deps) *Console {
 	if deps.Capabilities.Edition == "" {
 		deps.Capabilities = defaultCapabilities()
 	}
+	if deps.Capabilities.Plan == "" {
+		deps.Capabilities.Plan = billing.PlanFree
+	}
+	// Entitlements is always SERVER-COMPUTED from Plan and Edition, never
+	// caller-supplied, so a Deps literal can never pass a stale or mismatched
+	// Plan/Entitlements pair.
+	deps.Capabilities.Entitlements = billing.EntitlementsFor(deps.Capabilities.Plan, deps.Capabilities.Edition)
+	if deps.Plans == nil {
+		deps.Plans = billing.NewStaticPlanSource(nil)
+	}
+	if deps.Orgs == nil {
+		deps.Orgs = nullOrgDirectory{}
+	}
+	if deps.Waitlist == nil {
+		deps.Waitlist = nullWaitlistSource{}
+	}
+	// Normalize the instance-admin allowlist ONCE here (lowercase, trimmed,
+	// empties dropped) so isInstanceAdmin's lookup is a plain map/slice
+	// membership check against an already-canonical caller email. Deps.Nodes
+	// is deliberately left untouched: nil is a meaningful permanent state
+	// (see its doc), not something to default.
+	if len(deps.InstanceAdminEmails) > 0 {
+		normalized := make([]string, 0, len(deps.InstanceAdminEmails))
+		for _, e := range deps.InstanceAdminEmails {
+			if e = strings.ToLower(strings.TrimSpace(e)); e != "" {
+				normalized = append(normalized, e)
+			}
+		}
+		deps.InstanceAdminEmails = normalized
+	}
 	// Wrap the audit recorder with a DispatchingRecorder so every audit event
 	// is best-effort forwarded to the org's enabled sinks. The webhook sink is
 	// the default dispatcher; tests inject a sinkFunc via NewDispatchingRecorder.
 	deps.Audit = NewDispatchingRecorder(deps.Audit, deps.Sinks, newWebhookSink()).
 		withLog(deps.Log)
-	c := &Console{deps: deps}
+	c := &Console{deps: deps, inviteRateLimit: newInviteRateLimiter(inviteRateLimitPerOrg, inviteRateLimitWindow)}
 	c.routes()
 	return c
 }
@@ -220,12 +295,27 @@ func (c *Console) routes() {
 	mux.HandleFunc("POST /console/billing/spend-cap", c.handleSetSpendCap)
 	mux.HandleFunc("GET /console/billing/portal", c.handleBillingPortal)
 	mux.HandleFunc("GET /console/billing/topup", c.handleBillingTopUp)
+	mux.HandleFunc("GET /console/boxes", c.handleListBoxes)
 	mux.HandleFunc("GET /console/sandboxes", c.handleListSandboxes)
+	mux.HandleFunc("POST /console/sandboxes", c.handleCreateSandbox)
 	mux.HandleFunc("GET /console/sandboxes/{id}", c.handleInspectSandbox)
 	mux.HandleFunc("DELETE /console/sandboxes/{id}", c.handleTerminateSandbox)
+	mux.HandleFunc("POST /console/sandboxes/{id}/fork", c.handleForkSandbox)
+	mux.HandleFunc("POST /console/sandboxes/{id}/exec", c.handleExecSandbox)
 	mux.HandleFunc("GET /console/sandboxes/{id}/logs", c.handleSandboxLogs)
+	mux.HandleFunc("GET /console/sandboxes/{id}/logs/stream", c.handleSandboxLogsStream)
 	mux.HandleFunc("PUT /console/sandboxes/{id}/project", c.handleSetSandboxProject)
 	mux.HandleFunc("GET /console/members", c.handleListMembers)
+	mux.HandleFunc("DELETE /console/members/{accountID}", c.handleRemoveMember)
+	mux.HandleFunc("GET /console/invites", c.handleListInvites)
+	mux.HandleFunc("POST /console/invites", c.handleCreateInvite)
+	mux.HandleFunc("DELETE /console/invites/{id}", c.handleRevokeInvite)
+	mux.HandleFunc("POST /console/invites/{id}/resend", c.handleResendInvite)
+	// NOTE: GET /console/invites/lookup is deliberately NOT registered here.
+	// It is PUBLIC (pre-auth) and is mounted by the binary directly on the
+	// top-level mux, outside this Console's session-middleware wrapping; see
+	// Console.LookupInvite and cmd/console/main.go.
+	mux.HandleFunc("POST /console/invites/accept", c.handleAcceptInvite)
 	mux.HandleFunc("GET /console/audit", c.handleAudit)
 	mux.HandleFunc("GET /console/audit/export", c.handleAuditExport)
 	mux.HandleFunc("GET /console/audit/retention", c.handleGetRetention)
@@ -256,6 +346,15 @@ func (c *Console) routes() {
 	mux.HandleFunc("GET /console/roles", c.handleListRoles)
 	mux.HandleFunc("POST /console/roles", c.handleUpsertRole)
 	mux.HandleFunc("DELETE /console/roles/{name}", c.handleDeleteRole)
+	// Instance-operator plane (admin.go): every handler additionally requires
+	// isInstanceAdmin via authorizeAdmin, ABOVE the session auth every other
+	// route above already requires.
+	mux.HandleFunc("GET /console/admin/overview", c.handleAdminOverview)
+	mux.HandleFunc("GET /console/admin/orgs", c.handleAdminOrgs)
+	mux.HandleFunc("GET /console/admin/nodes", c.handleAdminNodes)
+	mux.HandleFunc("GET /console/admin/waitlist", c.handleAdminWaitlist)
+	mux.HandleFunc("POST /console/admin/waitlist/{id}/approve", c.handleAdminWaitlistApprove)
+	mux.HandleFunc("GET /console/admin/audit", c.handleAdminAudit)
 	c.mux = mux
 }
 
@@ -359,12 +458,14 @@ func (c *Console) handleCreateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "key.create",
-		Target:  created.Record.ID,
-		Detail:  "created api key " + created.Record.Prefix,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "key.create",
+		Target:     created.Record.ID,
+		TargetType: "key",
+		TargetName: created.Record.Name,
+		Detail:     "created api key " + created.Record.Prefix,
+		At:         c.deps.Now(),
 	})
 	// The raw key is returned EXACTLY ONCE here and is never stored, logged, or
 	// returned again. Every later read shows only the masked prefix.
@@ -383,17 +484,31 @@ func (c *Console) handleRevokeKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keyID := r.PathValue("id")
+	// Resolve the key's own name before revoking it, best-effort, so the audit
+	// event's TargetName is more legible than the bare id. A lookup failure (or
+	// the key already being gone) just leaves TargetName empty.
+	var keyName string
+	if keys, err := c.deps.Accounts.ListKeys(r.Context(), accountID, orgID); err == nil {
+		for _, k := range keys {
+			if k.ID == keyID {
+				keyName = k.Name
+				break
+			}
+		}
+	}
 	if err := c.deps.Accounts.RevokeKey(r.Context(), accountID, keyID); err != nil {
 		c.failAccount(w, err, "the key could not be revoked for this organization")
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "key.revoke",
-		Target:  keyID,
-		Detail:  "revoked api key " + keyID,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "key.revoke",
+		Target:     keyID,
+		TargetType: "key",
+		TargetName: keyName,
+		Detail:     "revoked api key " + keyID,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "revoked": keyID})
 }
@@ -674,24 +789,39 @@ func (c *Console) handleTerminateSandbox(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "sandbox.terminate",
-		Target:  id,
-		Detail:  "terminated sandbox " + id,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "sandbox.terminate",
+		Target:     id,
+		TargetType: "sandbox",
+		Detail:     "terminated sandbox " + id,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "terminated": id})
 }
 
 // --- Org / members / audit (over #210 plus the audit seam) ---
 
-// MemberView is the console shape of one org membership.
+// MemberView is the console shape of one org membership. Email and
+// DisplayName are joined from the member's account (best-effort, the same
+// lookup the audit actor/target names use); a lookup failure leaves both
+// empty rather than failing the whole list, so one bad row never breaks the
+// members view.
 type MemberView struct {
-	AccountID string    `json:"account_id"`
-	OrgID     string    `json:"org_id"`
-	Role      saas.Role `json:"role"`
-	CreatedAt time.Time `json:"created_at"`
+	AccountID   string    `json:"account_id"`
+	OrgID       string    `json:"org_id"`
+	Role        saas.Role `json:"role"`
+	CreatedAt   time.Time `json:"created_at"`
+	Email       string    `json:"email"`
+	DisplayName string    `json:"display_name"`
+	// HomeRegion is the membership's org's data-residency anchor (issue #712
+	// phase 0), read-only here: it is set once at org creation from the
+	// deployment's placement registry default and never edited through this
+	// view. Empty means the deployment's registry default (an org created
+	// before this field existed, or one never stamped). Joined best-effort
+	// from the org lookup in accountView; a lookup failure leaves it empty
+	// rather than failing the whole membership list.
+	HomeRegion string `json:"home_region"`
 }
 
 func (c *Console) handleListMembers(w http.ResponseWriter, r *http.Request) {
@@ -707,7 +837,12 @@ func (c *Console) handleListMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]MemberView, 0, len(members))
 	for _, m := range members {
-		out = append(out, MemberView{AccountID: m.AccountID, OrgID: m.OrgID, Role: m.Role, CreatedAt: m.CreatedAt})
+		mv := MemberView{AccountID: m.AccountID, OrgID: m.OrgID, Role: m.Role, CreatedAt: m.CreatedAt}
+		if acct, err := c.deps.Accounts.GetAccount(r.Context(), m.AccountID); err == nil {
+			mv.Email = acct.Email
+			mv.DisplayName = acct.DisplayName
+		}
+		out = append(out, mv)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "members": out})
 }
@@ -724,7 +859,7 @@ func (c *Console) handleAudit(w http.ResponseWriter, r *http.Request) {
 		c.failAccount(w, err, "the audit log could not be read for this organization")
 		return
 	}
-	events, err := c.deps.Audit.List(r.Context(), orgID)
+	events, err := c.deps.Audit.List(r.Context(), orgID, DefaultAuditListLimit)
 	if err != nil {
 		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the audit log could not be read"))
 		return
@@ -815,12 +950,14 @@ func (c *Console) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "project.create",
-		Target:  p.ID,
-		Detail:  "created project " + p.Name,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "project.create",
+		Target:     p.ID,
+		TargetType: "project",
+		TargetName: p.Name,
+		Detail:     "created project " + p.Name,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusCreated, p)
 }
@@ -849,6 +986,9 @@ func (c *Console) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, saas.ErrForbidden):
 			apierr.Encode(w, apierr.Get(apierr.CodeForbidden).
 				WithCause("the caller does not have permission to change member roles"))
+		case errors.Is(err, saas.ErrRoleNotGrantable):
+			apierr.Encode(w, apierr.Get(apierr.CodeForbidden).
+				WithCause("only an owner can grant the owner role"))
 		case errors.Is(err, saas.ErrNotFound):
 			apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
 				WithCause("the target account is not a member of this organization"))
@@ -857,15 +997,54 @@ func (c *Console) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Resolve the TARGET account's own name (not the actor's) best-effort, so
+	// the audit sentence can read "changed Carol's role" instead of a bare
+	// account id.
+	var targetName string
+	if acct, err := c.deps.Accounts.GetAccount(r.Context(), targetID); err == nil {
+		targetName = displayNameOrEmail(acct)
+	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "member.role",
-		Target:  targetID,
-		Detail:  "set role " + string(req.Role),
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "member.role",
+		Target:     targetID,
+		TargetType: "member",
+		TargetName: targetName,
+		Detail:     "set role " + string(req.Role),
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "account_id": targetID, "role": req.Role})
+}
+
+// --- Boxes (the read-only Box reservation catalog, over billing.BoxCatalog) ---
+
+// BoxView is the console's shape of one Box catalog reservation: a fixed
+// vCPU/RAM shape reserved for a flat monthly price (see billing.Reservation).
+// All catalog values are ILLUSTRATIVE, matching billing.BoxCatalog's own
+// no-unverified-claims note.
+type BoxView struct {
+	Key          string `json:"key"`
+	VCPU         int    `json:"vcpu"`
+	MemGiB       int    `json:"mem_gib"`
+	MonthlyCents int64  `json:"monthly_cents"`
+}
+
+// handleListBoxes returns the Box catalog. It is not org-scoped data (the
+// catalog is the same for every org on this deployment) but still requires an
+// authenticated caller, matching every other console read endpoint.
+func (c *Console) handleListBoxes(w http.ResponseWriter, r *http.Request) {
+	_, _, e, ok := c.caller(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	catalog := billing.BoxCatalog()
+	out := make([]BoxView, 0, len(catalog))
+	for _, res := range catalog {
+		out = append(out, BoxView{Key: res.Key, VCPU: res.VCPU, MemGiB: res.MemGiB, MonthlyCents: res.MonthlyCents})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"boxes": out})
 }
 
 // --- Audit sinks (GET/POST/DELETE /console/audit/sinks) ---
@@ -898,6 +1077,13 @@ func (c *Console) handleCreateSink(w http.ResponseWriter, r *http.Request) {
 		apierr.Encode(w, e)
 		return
 	}
+	// Audit-sink streaming is a hosted-only convenience gated on the org's
+	// plan (billing.Entitlements.AuditStreaming); the self-hosted community
+	// edition always resolves AuditStreaming true, so this is a no-op there.
+	if !c.entitlementsFor(r.Context(), orgID).AuditStreaming {
+		apierr.Encode(w, auditStreamingGatedError())
+		return
+	}
 	var req createSinkRequest
 	if err := decodeBody(r, &req); err != nil {
 		apierr.Encode(w, apierr.Get(apierr.CodeInvalidJSON).
@@ -915,12 +1101,17 @@ func (c *Console) handleCreateSink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "audit.sink.create",
-		Target:  cfg.ID,
-		Detail:  "created audit sink type " + cfg.Type,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "audit.sink.create",
+		Target:     cfg.ID,
+		TargetType: "sink",
+		// TargetName is the sink TYPE, never its Endpoint: the endpoint URL may
+		// carry an opaque token in its path or query (see webhookSink's own
+		// no-log rule), so it must never land in the audit trail.
+		TargetName: cfg.Type,
+		Detail:     "created audit sink type " + cfg.Type,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusCreated, cfg)
 }
@@ -934,6 +1125,15 @@ func (c *Console) handleDeleteSink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	// Resolve the sink's type before deleting it, best-effort, for TargetName
+	// (never the Endpoint; see the create handler's comment on why).
+	var targetName string
+	for _, cfg := range c.deps.Sinks.List(r.Context(), orgID) {
+		if cfg.ID == id {
+			targetName = cfg.Type
+			break
+		}
+	}
 	if err := c.deps.Sinks.Delete(r.Context(), orgID, id); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
@@ -945,14 +1145,55 @@ func (c *Console) handleDeleteSink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "audit.sink.delete",
-		Target:  id,
-		Detail:  "deleted audit sink " + id,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "audit.sink.delete",
+		Target:     id,
+		TargetType: "sink",
+		TargetName: targetName,
+		Detail:     "deleted audit sink " + id,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "deleted": id})
+}
+
+// entitlementsFor resolves orgID's plan entitlements for gating hosted-only
+// conveniences (audit-sink streaming and, in future, SSO enforcement/SCIM). A
+// plan-lookup failure fails CLOSED to the Free entitlements rather than
+// silently granting a hosted convenience the org has not paid for; the
+// self-hosted community edition always resolves to every entitlement enabled
+// regardless of the looked-up plan (billing.EntitlementsFor's own override).
+func (c *Console) entitlementsFor(ctx context.Context, orgID string) billing.Entitlements {
+	plan := billing.PlanFree
+	if c.deps.Plans != nil {
+		if p, err := c.deps.Plans.GetPlan(ctx, orgID); err == nil {
+			plan = p
+		}
+	}
+	return billing.EntitlementsFor(plan, c.deps.Capabilities.Edition)
+}
+
+// auditStreamingGatedError is the 402 returned when an org without the
+// AuditStreaming entitlement tries to create an audit sink. It is built
+// directly (like failSandbox's not_implemented case) rather than via
+// apierr.Catalogue: that catalogue is normative for the forkd/sandbox-server
+// runtime API, a different surface than this console BFF's own error shape.
+func auditStreamingGatedError() apierr.Error {
+	return apierr.Error{
+		Code:    "plan_required",
+		Message: "audit-sink streaming requires the Team plan",
+		// Cause is the field the SPA surfaces to the user (apiErrorMessage
+		// prefers cause over message), so it names the Team plan directly
+		// rather than only describing the gap abstractly.
+		Cause: "audit-sink streaming (forwarding events to webhook, s3, splunk, or datadog) requires the Team plan",
+		// A single string literal, not a "..." + "..." concatenation: hack/apierrlint
+		// (issue #28's static remediation guarantee) only recognizes a bare
+		// *ast.BasicLit as a provably non-empty Remediation, so a concatenated
+		// expression reads as "non-literal, cannot prove non-empty" and fails the
+		// go-lint CI job even though the string itself is non-empty at runtime.
+		Remediation: "Upgrade this organization to the Team plan, or self-host the community edition, which includes audit streaming. The audit log itself, and its NDJSON export, remain fully available on every plan.",
+		Status:      http.StatusPaymentRequired,
+	}
 }
 
 // allowedSinkTypes is the set of sink type values accepted by handleCreateSink.
@@ -984,14 +1225,35 @@ func validateSinkRequest(req createSinkRequest) error {
 // --- helpers ---
 
 // audit records an event best-effort; an audit failure never fails the user
-// action but is logged.
+// action but is logged. It fills in ActorType (defaulting to "user") and, when
+// ActorName is unset, resolves it from the actor's account (display name,
+// falling back to email) via a single best-effort lookup. A lookup failure
+// (account deleted, store hiccup) leaves ActorName empty rather than failing
+// the action: the audit event is always recorded.
 func (c *Console) audit(ctx context.Context, ev AuditEvent) {
 	if c.deps.Audit == nil {
 		return
 	}
+	if ev.ActorType == "" {
+		ev.ActorType = "user"
+	}
+	if ev.ActorName == "" && ev.ActorID != "" && c.deps.Accounts != nil {
+		if acct, err := c.deps.Accounts.GetAccount(ctx, ev.ActorID); err == nil {
+			ev.ActorName = displayNameOrEmail(acct)
+		}
+	}
 	if err := c.deps.Audit.Record(ctx, ev); err != nil {
 		c.deps.Log.Warn("console audit record failed", "org", ev.OrgID, "action", ev.Action, "err", err.Error())
 	}
+}
+
+// displayNameOrEmail returns acct's DisplayName, falling back to its Email
+// when no display name has been set (the common case right after sign-up).
+func displayNameOrEmail(acct saas.Account) string {
+	if acct.DisplayName != "" {
+		return acct.DisplayName
+	}
+	return acct.Email
 }
 
 // failAccount maps an account-service error to the public envelope. A wrong-org /
@@ -1013,15 +1275,32 @@ func (c *Console) failAccount(w http.ResponseWriter, err error, _ string) {
 }
 
 // failSandbox maps a sandbox-control error to the public envelope. A not-found
-// (which also covers a cross-org sandbox id) is not_found.
+// (which also covers a cross-org sandbox id) is not_found; ErrUnsupported (the
+// verb has no real backend on this deployment yet, a documented follow-up, not
+// a fabricated success) is 501 so the SPA can show an honest state instead of a
+// silent no-op.
 func (c *Console) failSandbox(w http.ResponseWriter, err error) {
-	if errors.Is(err, ErrNotFound) {
+	switch {
+	case errors.Is(err, ErrNotFound):
 		apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
 			WithCause("the sandbox does not exist or is not in this organization"))
-		return
+	case errors.Is(err, ErrUnsupported):
+		// Built directly rather than via apierr.Catalogue: that catalogue is
+		// normative for the forkd/sandbox-server runtime API (doc-synced by
+		// TestDocCatalogueIsInSyncWithCode), a different surface than this
+		// console BFF's own error shape. Reusing apierr.Error/Encode here just
+		// keeps the wire envelope consistent with every other console error.
+		apierr.Encode(w, apierr.Error{
+			Code:        "not_implemented",
+			Message:     "this operation is not available on this deployment yet",
+			Cause:       err.Error(),
+			Remediation: "This is a documented follow-up, not a misconfiguration; check docs/saas/console.md for status or ask the operator.",
+			Status:      http.StatusNotImplemented,
+		})
+	default:
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).
+			WithCause("the sandbox request could not be served"))
 	}
-	apierr.Encode(w, apierr.Get(apierr.CodeInternal).
-		WithCause("the sandbox request could not be served"))
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

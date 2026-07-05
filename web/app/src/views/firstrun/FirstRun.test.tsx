@@ -4,8 +4,8 @@
 // DOM and accessible shape. Hooks mocked with vi.mock, mirroring the pattern
 // in Instruments.test.tsx.
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 
 // Mock TanStack Router Link so tests render without a full router context.
@@ -435,6 +435,84 @@ describe('FirstRun step 3: first call', () => {
     })
     expect(screen.queryByRole('link', { name: /view usage/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: /add credits/i })).not.toBeInTheDocument()
+  })
+})
+
+// ---- Step 0: endowed progress ------------------------------------------------
+
+describe('FirstRun step 0: account created', () => {
+  it('renders a pre-checked step 0 before step 1', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.getByText('Account created')).toBeInTheDocument()
+    })
+    const step = document.querySelector('[data-step="account"]')
+    expect(step).toHaveAttribute('data-done', 'true')
+  })
+})
+
+// ---- Step 3: 90s waiting timeout -> troubleshooting panel -------------------
+
+describe('FirstRun step 3: 90s waiting timeout', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('does not show the troubleshooting panel before 90s', () => {
+    render(<FirstRun uc="rollouts" />)
+    act(() => {
+      vi.advanceTimersByTime(89_000)
+    })
+    expect(screen.queryByText(/still waiting/i)).not.toBeInTheDocument()
+  })
+
+  it('shows the troubleshooting panel with checklist and synthetic trigger at 90s', () => {
+    render(<FirstRun uc="rollouts" />)
+    act(() => {
+      vi.advanceTimersByTime(90_000)
+    })
+    expect(screen.getByText(/still waiting/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/api\.mitos\.run/).length).toBeGreaterThan(0)
+    expect(screen.getByText(/mitos run "echo hello"/)).toBeInTheDocument()
+    expect(screen.getAllByText(/curl/).length).toBeGreaterThan(0)
+  })
+
+  it('clears the troubleshooting panel once activity arrives', () => {
+    const { rerender } = render(<FirstRun uc="rollouts" />)
+    act(() => {
+      vi.advanceTimersByTime(90_000)
+    })
+    expect(screen.getByText(/still waiting/i)).toBeInTheDocument()
+
+    mockUseFirstActivity.mockReturnValue({ data: { active: true }, isLoading: false })
+    rerender(<FirstRun uc="rollouts" />)
+
+    expect(screen.queryByText(/still waiting/i)).not.toBeInTheDocument()
+  })
+})
+
+// ---- Celebration: Division glyph + fork-tree link ---------------------------
+
+describe('FirstRun celebration: fork tree glyph', () => {
+  it('shows a "See your fork tree" link to /forks when active', async () => {
+    mockUseFirstActivity.mockReturnValue({ data: { active: true }, isLoading: false })
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      const link = screen.getByRole('link', { name: /see your fork tree/i })
+      expect(link).toHaveAttribute('href', '/forks')
+    })
+  })
+
+  it('does not show the "See your fork tree" link while waiting', async () => {
+    render(<FirstRun uc="rollouts" />)
+    await waitFor(() => {
+      expect(screen.getByText(/Waiting for your first call/i)).toBeInTheDocument()
+    })
+    expect(screen.queryByRole('link', { name: /see your fork tree/i })).not.toBeInTheDocument()
   })
 })
 

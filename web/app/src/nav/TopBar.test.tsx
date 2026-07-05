@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { createRef } from 'react'
 import { TopBar } from './TopBar'
+import type { Capabilities } from '../api'
 
 vi.mock('@tanstack/react-router', () => ({ Link: (p: any) => <a href={p.to}>{p.children}</a> }))
 vi.mock('../data/account-settings', () => ({
@@ -10,10 +11,15 @@ vi.mock('../data/account-settings', () => ({
   useSignOut: () => ({ mutate: vi.fn(), isPending: false }),
 }))
 
+const caps: Capabilities = {
+  edition: 'community', billing: false, signup: false, teams: true, idp: 'oidc',
+  orgSwitcher: false, secrets: { providers: ['kube'] }, proof: true, ownership: 'self-hosted',
+}
+
 describe('TopBar', () => {
   it('renders the brand, a search trigger that fires onSearch, and the account menu', async () => {
     const onSearch = vi.fn()
-    render(<TopBar onSearch={onSearch} onToggleDrawer={() => {}} drawerOpen={false} menuButtonRef={createRef()} />)
+    render(<TopBar caps={caps} route="/" onSearch={onSearch} onToggleDrawer={() => {}} drawerOpen={false} menuButtonRef={createRef()} />)
     expect(screen.getByText('Mitos')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: /search/i }))
     expect(onSearch).toHaveBeenCalled()

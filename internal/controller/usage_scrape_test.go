@@ -200,3 +200,38 @@ func TestHuskPodScrapeListerSelectsClaimedOrgLabeledPods(t *testing.T) {
 		}
 	}
 }
+
+// TestHuskPodScrapeListerBestEffortRegion asserts the lister carries a pod's
+// mitos.run/region label (issue #712 phase 0) into HuskPod.Region when
+// present, and leaves it empty (never omitting the pod) when absent: unlike
+// OrgID, an unresolved region never gates billability.
+func TestHuskPodScrapeListerBestEffortRegion(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	withRegion := scrapablePod("python-husk-region", "sb-region1", "acme", "10.0.0.5")
+	withRegion.Labels[tenant.RegionLabelKey] = "fra"
+	withoutRegion := scrapablePod("python-husk-noregion", "sb-region2", "acme", "10.0.0.6")
+
+	cl := fakeclient.NewClientBuilder().WithScheme(scheme).WithObjects(withRegion, withoutRegion).Build()
+	lister := &HuskPodScrapeLister{Client: cl}
+	got, err := lister.ListHuskPods(context.Background())
+	if err != nil {
+		t.Fatalf("ListHuskPods: %v", err)
+	}
+	byVM := map[string]usage.HuskPod{}
+	for _, p := range got {
+		byVM[p.VMID] = p
+	}
+	if byVM["python-husk-region"].Region != "fra" {
+		t.Errorf("region = %q, want fra", byVM["python-husk-region"].Region)
+	}
+	p, ok := byVM["python-husk-noregion"]
+	if !ok {
+		t.Fatal("pod with no region label must still be scraped (region never gates billability)")
+	}
+	if p.Region != "" {
+		t.Errorf("region = %q, want empty", p.Region)
+	}
+}

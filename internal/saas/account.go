@@ -18,6 +18,11 @@ type AccountService struct {
 	keys  *KeyService
 	now   func() time.Time
 	idgen func() string
+	// homeRegion is the deployment's placement registry default (issue #712
+	// phase 0), stamped on the Personal org SignUp mints. Empty is a valid
+	// value: it means "the deployment's registry default", resolved wherever
+	// HomeRegion is read, not encoded as a literal here.
+	homeRegion string
 }
 
 // NewAccountService builds an account service over store and the key service.
@@ -28,7 +33,7 @@ func NewAccountService(store Store, keys *KeyService, opts ...KeyServiceOption) 
 	for _, o := range opts {
 		o(cfg)
 	}
-	return &AccountService{store: store, keys: keys, now: cfg.now, idgen: cfg.idgen}
+	return &AccountService{store: store, keys: keys, now: cfg.now, idgen: cfg.idgen, homeRegion: cfg.homeRegion}
 }
 
 // SignUp provisions a new account and its Personal organization, makes the
@@ -44,10 +49,11 @@ func (s *AccountService) SignUp(ctx context.Context, email string) (Account, Org
 	}
 	now := s.now()
 	org := Organization{
-		ID:        s.idgen(),
-		Name:      "Personal",
-		CreatedAt: now,
-		Personal:  true,
+		ID:         s.idgen(),
+		Name:       "Personal",
+		CreatedAt:  now,
+		Personal:   true,
+		HomeRegion: s.homeRegion,
 	}
 	acct := Account{
 		ID:            s.idgen(),
@@ -108,6 +114,25 @@ func (s *AccountService) Organizations(ctx context.Context, accountID string) ([
 	return out, nil
 }
 
+// OrganizationsFor resolves the orgs named by mems, keyed by org id. It is the
+// zero-extra-round-trip variant of Organizations for callers that already hold
+// the account's memberships (from Profile): it skips the membership list and
+// does one GetOrg per unique org. Best-effort, matching Organizations: a
+// failed org lookup is skipped rather than failing the whole map, so a caller
+// joining orgs onto a view degrades to a missing entry rather than an error.
+func (s *AccountService) OrganizationsFor(ctx context.Context, mems []Membership) map[string]Organization {
+	out := make(map[string]Organization, len(mems))
+	for _, m := range mems {
+		if _, ok := out[m.OrgID]; ok {
+			continue
+		}
+		if org, err := s.store.GetOrg(ctx, m.OrgID); err == nil {
+			out[m.OrgID] = org
+		}
+	}
+	return out
+}
+
 // isMember reports whether accountID belongs to orgID. It is the authorization
 // guard the CLI key verbs use so an account cannot manage another org's keys.
 func (s *AccountService) isMember(ctx context.Context, accountID, orgID string) bool {
@@ -146,9 +171,12 @@ func (s *AccountService) MemberRole(ctx context.Context, accountID, orgID string
 
 // SetMemberRole changes targetAccountID's role within orgID. The actor must
 // hold a role that can manage members (Owner or Admin); otherwise ErrForbidden
-// is returned. The target must already be a member; otherwise ErrNotFound is
-// returned. The last owner of an org cannot be demoted; ErrLastOwner is
-// returned in that case.
+// is returned. Even a PermManageMembers holder cannot grant the owner role
+// unless the actor is ALREADY an owner (canGrantRole); an admin attempting to
+// promote someone to owner gets ErrRoleNotGrantable, closing the privilege-
+// escalation path where an admin mints a new owner. The target must already
+// be a member; otherwise ErrNotFound is returned. The last owner of an org
+// cannot be demoted; ErrLastOwner is returned in that case.
 func (s *AccountService) SetMemberRole(ctx context.Context, actorID, orgID, targetAccountID string, role Role) error {
 	actorRole, err := s.memberRole(ctx, actorID, orgID)
 	if err != nil {
@@ -157,7 +185,28 @@ func (s *AccountService) SetMemberRole(ctx context.Context, actorID, orgID, targ
 	if !actorRole.Can(PermManageMembers) {
 		return ErrForbidden
 	}
+	if !canGrantRole(actorRole, role) {
+		return ErrRoleNotGrantable
+	}
 	return s.store.SetMembershipRole(ctx, orgID, targetAccountID, role)
+}
+
+// RemoveMember removes targetAccountID's membership from orgID on behalf of
+// actorID. Removing ONESELF is always allowed (leaving an org needs no
+// special permission); removing someone else requires the actor's role to
+// grant PermManageMembers, otherwise ErrForbidden. In either case the
+// store's last-owner protection applies: removing the sole remaining owner
+// returns ErrLastOwner. The target must already be a member (ErrNotFound
+// otherwise).
+func (s *AccountService) RemoveMember(ctx context.Context, actorID, orgID, targetAccountID string) error {
+	actorRole, err := s.memberRole(ctx, actorID, orgID)
+	if err != nil {
+		return err
+	}
+	if actorID != targetAccountID && !actorRole.Can(PermManageMembers) {
+		return ErrForbidden
+	}
+	return s.store.DeleteMembership(ctx, orgID, targetAccountID)
 }
 
 // CreateKey mints a scoped key for an org on behalf of accountID, enforcing that
@@ -208,6 +257,15 @@ type ProfileUpdate struct {
 	DisplayName string
 	Timezone    string
 	Locale      string
+}
+
+// GetAccount returns the account by id with no membership check: a plain,
+// read-only lookup. It is used for best-effort display-name resolution (the
+// console audit log's actor and target names) where the caller is not
+// necessarily the account itself, so the membership-guarded Profile is not
+// the right seam.
+func (s *AccountService) GetAccount(ctx context.Context, id string) (Account, error) {
+	return s.store.GetAccount(ctx, id)
 }
 
 // Profile returns the account and its memberships for accountID. It is the

@@ -1,9 +1,13 @@
-// FirstRun.tsx: three-step guided first-run shown on the Overview to a new org.
+// FirstRun.tsx: guided first-run shown on the Overview to a new org.
 //
+// Step 0: account created, pre-checked. Endowed progress: the card starts
+//         visibly underway instead of at zero.
 // Step 1: copy your masked API key.
 // Step 2: pick a runtime, copy the runnable snippet.
-// Step 3: live "Waiting for your first call..." that celebrates when the first
-//         exec lands.
+// Step 3: live "Waiting for your first call..."; after 90s with no activity a
+//         troubleshooting panel appears (checklist + a synthetic trigger
+//         snippet) while polling keeps running; celebrates with the Division
+//         glyph and a "See your fork tree" link when the first exec lands.
 //
 // Brand: Fluorescence tokens only; no hardcoded hex. Card from @mitos/brand.
 // Copy button: Clipboard API, aria-live announcement, failure fallback message,
@@ -12,12 +16,12 @@
 //   (arrow keys), aria-live for copy + step completion, prefers-reduced-motion
 //   respected. No em or en dashes.
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from '@tanstack/react-router'
-import { Card } from '@mitos/brand'
+import { Card, Division } from '@mitos/brand'
 import { useBilling } from '../../data/account'
 import { useFirstActivity } from '../../data/firstActivity'
-import { getFirstRun, RUNTIMES } from './content'
+import { getFirstRun, RUNTIMES, SYNTHETIC_TRIGGER } from './content'
 import type { Runtime } from './content'
 import { peekFirstKey, takeFirstKey, maskKey } from './firstKey'
 import { Celebrate } from '../../ui/Celebrate'
@@ -244,6 +248,57 @@ const styles = `
   clip-path: inset(50%);
   white-space: nowrap;
 }
+/* Troubleshooting panel: appears after 90s of waiting with no first call. */
+.firstrun-troubleshoot {
+  margin: var(--space-4) 0 0;
+  padding: var(--space-4);
+  background: var(--field-1, var(--field));
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-md);
+}
+.firstrun-troubleshoot-lede {
+  font-size: var(--step--1);
+  color: var(--ink-2);
+  margin: 0 0 var(--space-3);
+  line-height: var(--lh-base);
+}
+.firstrun-troubleshoot-list {
+  margin: 0 0 var(--space-4);
+  padding-left: var(--space-5);
+  font-size: var(--step--1);
+  color: var(--ink-2);
+  line-height: var(--lh-base);
+}
+.firstrun-troubleshoot-list li {
+  margin: 0 0 var(--space-2);
+}
+.firstrun-troubleshoot-snippet {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  color: var(--cyan);
+  white-space: pre;
+  overflow-x: auto;
+  margin: 0 0 var(--space-3);
+  display: block;
+}
+.firstrun-troubleshoot-note {
+  font-size: var(--step--1);
+  color: var(--ink-2);
+  margin: 0;
+  line-height: var(--lh-base);
+}
+/* Celebration: Division glyph + fork-tree link, alongside the confetti burst. */
+.firstrun-celebrate-glyph {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-3);
+}
+.firstrun-forks-link {
+  font-size: var(--step-0);
+  font-weight: 500;
+}
 `
 
 // ---- isFirstRun predicate ---------------------------------------------------
@@ -261,6 +316,11 @@ export function isFirstRun(
   const hasLive = (sandboxes ?? []).some((s) => s.phase === 'Running')
   return forksServed === 0 && !hasLive
 }
+
+// How long step 3 waits, with no first call, before it shows the
+// troubleshooting panel. Chosen to be well past a slow cold start but not so
+// long that a genuinely stuck user is left with only the pulsing dots.
+const WAITING_TIMEOUT_MS = 90_000
 
 // ---- FirstRun component -----------------------------------------------------
 
@@ -298,6 +358,19 @@ export function FirstRun({ uc }: FirstRunProps) {
   // Live first-activity poll: active flips true when the first exec lands.
   const activity = useFirstActivity(true)
   const active = activity.data?.active === true
+
+  // Waiting timeout: after WAITING_TIMEOUT_MS with no first call, surface a
+  // troubleshooting panel while polling continues in the background. Clears
+  // the moment activity lands so the panel never lingers into the celebration.
+  const [timedOut, setTimedOut] = useState(false)
+  useEffect(() => {
+    if (active) {
+      setTimedOut(false)
+      return
+    }
+    const timer = setTimeout(() => setTimedOut(true), WAITING_TIMEOUT_MS)
+    return () => clearTimeout(timer)
+  }, [active])
 
   // ---- handlers -------------------------------------------------------------
 
@@ -367,6 +440,23 @@ export function FirstRun({ uc }: FirstRunProps) {
             Free credit available. Run your first fork to see your spend here.
           </p>
         )}
+
+        {/* Step 0: account created, always done. Endowed progress so the card
+            starts visibly underway instead of at zero. */}
+        <section
+          data-step="account"
+          data-done="true"
+          className="firstrun-step"
+          aria-label="Step 0: account created"
+        >
+          <div className="firstrun-step-header">
+            <span className="firstrun-step-num" aria-hidden="true">0</span>
+            <p className="firstrun-step-title">Account created</p>
+            <span className="firstrun-step-check" aria-hidden="true">
+              {'✓'}
+            </span>
+          </div>
+        </section>
 
         {/* Step 1: copy your key */}
         <section
@@ -524,7 +614,36 @@ export function FirstRun({ uc }: FirstRunProps) {
             <p className="firstrun-waiting">Waiting for your first call...</p>
           )}
 
+          {!active && timedOut && (
+            <div className="firstrun-troubleshoot" aria-live="polite">
+              <p className="firstrun-troubleshoot-lede">
+                Still waiting after 90 seconds. A few things to check:
+              </p>
+              <ul className="firstrun-troubleshoot-list">
+                <li>Is the exported key the one you copied in step 1, not one from an earlier visit?</li>
+                <li>Is the host set to https://api.mitos.run, the hosted API endpoint?</li>
+                <li>Does your network allow outbound egress to api.mitos.run?</li>
+              </ul>
+              <p className="firstrun-troubleshoot-lede">
+                Try a synthetic trigger to confirm the wiring works. Polling keeps
+                running while you do.
+              </p>
+              <code className="firstrun-troubleshoot-snippet">{SYNTHETIC_TRIGGER.cli}</code>
+              <code className="firstrun-troubleshoot-snippet">{SYNTHETIC_TRIGGER.curl}</code>
+              <p className="firstrun-troubleshoot-note">{SYNTHETIC_TRIGGER.note}</p>
+            </div>
+          )}
+
           <Celebrate active={active} />
+
+          {active && (
+            <div className="firstrun-celebrate-glyph">
+              <Division size={40} />
+              <Link to="/forks" className="firstrun-next-link firstrun-forks-link">
+                See your fork tree
+              </Link>
+            </div>
+          )}
 
           {active && (
             <ul className="firstrun-next-links">

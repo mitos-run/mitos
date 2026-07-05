@@ -21,6 +21,7 @@ func (errSendApproved) SendVerification(_ context.Context, _, _ string) error { 
 func (errSendApproved) SendApproved(_ context.Context, _ string) error {
 	return errors.New("smtp: connection refused")
 }
+func (errSendApproved) SendInvite(_ context.Context, _, _, _, _ string) error { return nil }
 
 // fixedNow is the deterministic clock injected in tests. Using a concrete time
 // makes Add calls reproducible regardless of wall-clock drift.
@@ -304,5 +305,98 @@ func TestApproveSignup_SendApprovedFailure500(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("allowlist must contain the row even when SendApproved fails")
+	}
+}
+
+// --- ApproveWaitlistEntry (the exported helper the console instance-admin
+// waitlist adapter reuses, so an admin approving a waitlist entry produces
+// the SAME allowlist row and email as POST /internal/approve-signup) ---
+
+// TestApproveWaitlistEntry_SuccessAddsAllowlistAndSendsEmail mirrors the HTTP
+// handler's own happy-path test, calling the exported function directly.
+func TestApproveWaitlistEntry_SuccessAddsAllowlistAndSendsEmail(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+
+	canonical, alreadyApproved, err := ApproveWaitlistEntry(context.Background(), al, em, "User+tag@Example.com", "approved via admin", fixedNow())
+	if err != nil {
+		t.Fatalf("ApproveWaitlistEntry: %v", err)
+	}
+	if canonical != "user@example.com" {
+		t.Fatalf("canonical = %q, want user@example.com", canonical)
+	}
+	if alreadyApproved {
+		t.Fatal("a fresh approval must not report alreadyApproved")
+	}
+	if ok, _ := al.IsAllowed(context.Background(), "user@example.com"); !ok {
+		t.Fatal("allowlist does not contain the approved canonical email")
+	}
+	if !em.Approved("user+tag@example.com") {
+		t.Fatal("SendApproved was not called with the delivery-form email")
+	}
+}
+
+// TestApproveWaitlistEntry_InvalidEmail asserts a malformed email returns
+// ErrInvalidEmail and touches neither the allowlist nor the email sender.
+func TestApproveWaitlistEntry_InvalidEmail(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+
+	_, _, err := ApproveWaitlistEntry(context.Background(), al, em, "not-an-email", "", fixedNow())
+	if !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("err = %v, want ErrInvalidEmail", err)
+	}
+	if ok, _ := al.IsAllowed(context.Background(), "not-an-email"); ok {
+		t.Fatal("allowlist must not be modified on an invalid email")
+	}
+}
+
+// TestApproveWaitlistEntry_SendFailureLeavesAllowlistRow asserts a
+// SendApproved failure surfaces its own error (not ErrInvalidEmail, not the
+// allowlist-add sentinel) while the allowlist row still lands (idempotent
+// retry-safe), matching the HTTP handler's own 500 behavior.
+func TestApproveWaitlistEntry_SendFailureLeavesAllowlistRow(t *testing.T) {
+	al := NewMemAllowlist(nil)
+
+	_, _, err := ApproveWaitlistEntry(context.Background(), al, errSendApproved{}, "err@example.com", "", fixedNow())
+	if err == nil {
+		t.Fatal("expected an error when SendApproved fails")
+	}
+	if errors.Is(err, ErrInvalidEmail) || errors.Is(err, errApproveAllowlistAdd) {
+		t.Fatalf("err = %v, want a bare send-failure error", err)
+	}
+	if ok, _ := al.IsAllowed(context.Background(), "err@example.com"); !ok {
+		t.Fatal("allowlist must contain the row even when SendApproved fails")
+	}
+}
+
+// TestApproveWaitlistEntry_AlreadyApprovedDoesNotResend asserts a second
+// approval of the same canonical email is idempotent: SendApproved is
+// called only once (issue #714: a repeat admin approve must not re-send the
+// notification), and the second call reports alreadyApproved.
+func TestApproveWaitlistEntry_AlreadyApprovedDoesNotResend(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+
+	_, first, err := ApproveWaitlistEntry(context.Background(), al, em, "repeat@example.com", "first approval", fixedNow())
+	if err != nil {
+		t.Fatalf("first approval: %v", err)
+	}
+	if first {
+		t.Fatal("first approval must not report alreadyApproved")
+	}
+
+	canonical, second, err := ApproveWaitlistEntry(context.Background(), al, em, "repeat@example.com", "second approval", fixedNow())
+	if err != nil {
+		t.Fatalf("second approval: %v", err)
+	}
+	if !second {
+		t.Fatal("second approval of the same email must report alreadyApproved")
+	}
+	if canonical != "repeat@example.com" {
+		t.Fatalf("canonical = %q, want repeat@example.com", canonical)
+	}
+	if got := em.ApprovedCount("repeat@example.com"); got != 1 {
+		t.Fatalf("SendApproved called %d times, want exactly 1", got)
 	}
 }

@@ -1,7 +1,7 @@
 // Task 4: Members (role management) and Projects views.
 // TDD suite: covers list rendering, loading/empty states, role change, and project creation.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { fireEvent, waitFor, screen } from '@testing-library/react'
+import { fireEvent, waitFor, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { renderAt } from '../test/utils'
 import type { Capabilities } from '../api'
@@ -27,6 +27,13 @@ const projects = [
   { id: 'p1', org_id: 'o1', name: 'alpha', description: 'first project', created_at: '2026-04-01T00:00:00Z' },
 ]
 
+const invitations = [
+  {
+    id: 'inv-1', org_id: 'o1', email: 'carol@example.com', role: 'member', state: 'pending',
+    inviter_id: 'alice', inviter_name: 'Alice', created_at: '2026-05-01T00:00:00Z', expires_at: '2026-05-08T00:00:00Z',
+  },
+]
+
 function mockFetch(overrides: Record<string, unknown> = {}) {
   vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
     const url = String(input).split('?')[0]
@@ -40,6 +47,18 @@ function mockFetch(overrides: Record<string, unknown> = {}) {
     }
     if (url.match(/\/console\/members\/[^/]+\/role/) && method === 'POST') {
       return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (url.match(/\/console\/members\/[^/]+$/) && method === 'DELETE') {
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (url.endsWith('/console/invites') && method === 'GET') {
+      return Promise.resolve(new Response(JSON.stringify(overrides['invites'] ?? { org_id: 'o1', invitations }), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (url.match(/\/console\/invites\/[^/]+$/) && method === 'DELETE') {
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    }
+    if (url.match(/\/console\/invites\/[^/]+\/resend/) && method === 'POST') {
+      return Promise.resolve(new Response(JSON.stringify(invitations[0]), { status: 200, headers: { 'content-type': 'application/json' } }))
     }
     if (url.endsWith('/console/projects') && method === 'GET') {
       return Promise.resolve(new Response(JSON.stringify(overrides['projects'] ?? { org_id: 'o1', projects }), { status: 200, headers: { 'content-type': 'application/json' } }))
@@ -60,9 +79,10 @@ describe('Members view', () => {
   it('renders the members table with Account, Role, and Joined columns', async () => {
     await renderAt('/members', caps)
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument())
-    expect(screen.getByRole('columnheader', { name: /account/i })).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: /role/i })).toBeInTheDocument()
-    expect(screen.getByRole('columnheader', { name: /joined/i })).toBeInTheDocument()
+    const table = within(screen.getByRole('table', { name: /^members$/i }))
+    expect(table.getByRole('columnheader', { name: /account/i })).toBeInTheDocument()
+    expect(table.getByRole('columnheader', { name: /role/i })).toBeInTheDocument()
+    expect(table.getByRole('columnheader', { name: /joined/i })).toBeInTheDocument()
     expect(screen.getByText('bob')).toBeInTheDocument()
   })
 
@@ -113,6 +133,137 @@ describe('Members view', () => {
     await userEvent.type(searchBox, 'alice')
     expect(screen.getByText('alice')).toBeInTheDocument()
     expect(screen.queryByText('bob')).not.toBeInTheDocument()
+  })
+
+  it('shows the display name and email when the server provides them', async () => {
+    mockFetch({
+      members: {
+        org_id: 'o1',
+        members: [
+          { account_id: 'alice', org_id: 'o1', role: 'owner', created_at: '2026-01-01T00:00:00Z', display_name: 'Alice Anderson', email: 'alice@acme.dev' },
+        ],
+      },
+    })
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('Alice Anderson')).toBeInTheDocument())
+    expect(screen.getByText('alice@acme.dev')).toBeInTheDocument()
+    // The raw account id is no longer the primary label once a name is known.
+    expect(screen.queryByText('alice')).not.toBeInTheDocument()
+  })
+
+  it('opens the invite modal from the page header action', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /invite people/i }))
+    expect(screen.getByRole('dialog', { name: /invite people/i })).toBeInTheDocument()
+    expect(screen.getByLabelText(/email addresses/i)).toBeInTheDocument()
+  })
+
+  it('shows the empty state with an Invite people action when there are no members', async () => {
+    mockFetch({ members: { org_id: 'o1', members: [] } })
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByRole('heading', { name: /no members/i })).toBeInTheDocument())
+    // The empty state's own action button, distinct from the header's.
+    expect(screen.getAllByRole('button', { name: /invite people/i }).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('lists pending invitations with resend and revoke actions', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('carol@example.com')).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: /resend invitation to carol@example.com/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /revoke invitation to carol@example.com/i })).toBeInTheDocument()
+  })
+
+  it('revokes a pending invitation and shows a success toast', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('carol@example.com')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /revoke invitation to carol@example.com/i }))
+    await waitFor(() => expect(screen.getByRole('status')).toBeInTheDocument())
+  })
+
+  it('shows no pending invitations message when there are none', async () => {
+    mockFetch({ invites: { org_id: 'o1', invitations: [] } })
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument())
+    expect(screen.getByText(/no pending invitations/i)).toBeInTheDocument()
+  })
+
+  it('removes a member after confirming, and shows a success toast', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /remove bob/i }))
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^remove$/i }))
+    await waitFor(() => expect(screen.getByRole('status')).toBeInTheDocument())
+  })
+
+  it('cancelling the remove confirmation leaves the member in place', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /remove bob/i }))
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(screen.getByText('bob')).toBeInTheDocument()
+  })
+
+  // Mobile + shared-modal parity: the confirm dialog carries the same
+  // .modal / .modal-backdrop classes as InviteModal and NewSandboxModal so it
+  // gets the <=480px full-screen-sheet treatment and safe-area padding from
+  // base.css, instead of the old raw position:fixed styling.
+  it('renders the remove confirmation inside the shared .modal with a .modal-backdrop sibling', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /remove bob/i }))
+    const dialog = screen.getByRole('alertdialog')
+    expect(dialog.className).toContain('modal')
+    expect(dialog.parentElement?.className).toContain('modal-backdrop')
+  })
+
+  // Destructive confirm: Escape closes it, but a backdrop click must not
+  // (a stray click cannot silently confirm removing someone from the org).
+  it('closes the remove confirmation on Escape', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /remove bob/i }))
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(screen.getByText('bob')).toBeInTheDocument()
+  })
+
+  it('does not close the remove confirmation on a backdrop click', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /remove bob/i }))
+    const dialog = screen.getByRole('alertdialog')
+    const backdrop = dialog.parentElement as HTMLElement
+    fireEvent.mouseDown(backdrop, { target: backdrop })
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+  })
+
+  // Shared useModalFocus behavior (issue #713): focuses Cancel (the
+  // non-destructive default) on open, traps Tab within the dialog, and
+  // returns focus to the row's Remove button once it closes.
+  it('focuses Cancel on open and traps Tab back to it from the Remove button', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /remove bob/i }))
+    const dialog = screen.getByRole('alertdialog')
+    const cancelButton = within(dialog).getByRole('button', { name: /cancel/i })
+    expect(cancelButton).toHaveFocus()
+    const confirmButton = within(dialog).getByRole('button', { name: /^remove$/i })
+    confirmButton.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(cancelButton).toHaveFocus()
+  })
+
+  it('returns focus to the row Remove button once the confirmation is cancelled', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    const removeButton = screen.getByRole('button', { name: /remove bob/i })
+    fireEvent.click(removeButton)
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(removeButton).toHaveFocus()
   })
 })
 

@@ -27,6 +27,11 @@ type Termination struct {
 	// OrgID is the owning org from the TRUSTED mitos.run/org pod label. Empty
 	// means unattributed (self-host single-tenant): never billable, ignored.
 	OrgID string
+	// Region is the placement value (issue #712 phase 0) from the TRUSTED
+	// mitos.run/region pod label, best-effort: empty for a single-value
+	// deployment or a sandbox that predates this field. Never gates
+	// billability, unlike OrgID.
+	Region string
 	// StartedAt is the claim's start time (Status.StartedAt); zero if unknown.
 	// It only matters for a sandbox that terminated before its first scrape.
 	StartedAt time.Time

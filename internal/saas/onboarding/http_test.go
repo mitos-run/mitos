@@ -638,3 +638,132 @@ func TestSignupOddValidEmailReturnsUniform202(t *testing.T) {
 			oddRR.Body.String(), normalRR.Body.String())
 	}
 }
+
+// postWaitlistJSON mounts only RoutesWaitlistOnly (never the full signup/
+// verify set) and posts body to /onboarding/waitlist.
+func postWaitlistJSON(h *Handler, body string) *httptest.ResponseRecorder {
+	mux := http.NewServeMux()
+	h.RoutesWaitlistOnly(mux)
+	req := httptest.NewRequest(http.MethodPost, "/onboarding/waitlist", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+// TestWaitlistJoinRecordsEntryAndReturns202 asserts POST /onboarding/waitlist
+// records a waitlist entry and returns 202, without provisioning anything.
+func TestWaitlistJoinRecordsEntryAndReturns202(t *testing.T) {
+	h, hr := newHandler(t, ModeWaitlist)
+
+	rr := postWaitlistJSON(h, `{"email":"join@example.com"}`)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202; body %s", rr.Code, rr.Body.String())
+	}
+
+	wl, err := hr.svc.JoinWaitlist(context.Background())
+	if err != nil {
+		t.Fatalf("JoinWaitlist: %v", err)
+	}
+	if len(wl) != 1 || wl[0].Email != "join@example.com" {
+		t.Fatalf("waitlist = %+v", wl)
+	}
+
+	// No account, no email sent: this is intake only.
+	if _, err := hr.store.GetAccountByEmail(context.Background(), "join@example.com"); !errors.Is(err, saas.ErrNotFound) {
+		t.Fatalf("waitlist join must not provision an account, got %v", err)
+	}
+}
+
+// TestWaitlistJoinDoesNotEnumerate asserts a duplicate join returns the exact
+// same 202 as a fresh one (only one row recorded), so a probe cannot tell an
+// address is already on the list.
+func TestWaitlistJoinDoesNotEnumerate(t *testing.T) {
+	h, hr := newHandler(t, ModeWaitlist)
+
+	first := postWaitlistJSON(h, `{"email":"dup@example.com"}`)
+	second := postWaitlistJSON(h, `{"email":"dup@example.com"}`)
+
+	if first.Code != http.StatusAccepted || second.Code != http.StatusAccepted {
+		t.Fatalf("status codes: first=%d second=%d, want both 202", first.Code, second.Code)
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("bodies differ between fresh and duplicate join (enumeration leak):\nfirst=%s\nsecond=%s",
+			first.Body.String(), second.Body.String())
+	}
+
+	wl, err := hr.svc.JoinWaitlist(context.Background())
+	if err != nil {
+		t.Fatalf("JoinWaitlist: %v", err)
+	}
+	if len(wl) != 1 {
+		t.Fatalf("waitlist = %+v, want exactly one deduped entry", wl)
+	}
+}
+
+// TestWaitlistJoinRejectsBadEmail asserts a malformed email is a 400, the
+// same validation the full signup path applies.
+func TestWaitlistJoinRejectsBadEmail(t *testing.T) {
+	h, _ := newHandler(t, ModeWaitlist)
+	rr := postWaitlistJSON(h, `{"email":"not-an-email"}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status %d, want 400; body %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestWaitlistJoinVelocityCapReturnsUniform202 asserts a per-IP velocity cap
+// silently caps the intake (no new row past the cap) but still returns the
+// same uniform 202, so an over-cap client learns nothing.
+func TestWaitlistJoinVelocityCapReturnsUniform202(t *testing.T) {
+	hr := newHarness(t, ModeWaitlist)
+	h := NewHandler(hr.svc, nil, WithVelocity(NewVelocity(1, time.Hour)), WithTrustedProxyHops(1))
+	mux := http.NewServeMux()
+	h.RoutesWaitlistOnly(mux)
+
+	postWithXFF := func(xff, email string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/onboarding/waitlist", strings.NewReader(`{"email":"`+email+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Forwarded-For", xff)
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		return rr
+	}
+
+	first := postWithXFF("9.9.9.9", "capped1@example.com")
+	second := postWithXFF("9.9.9.9", "capped2@example.com")
+	if first.Code != http.StatusAccepted || second.Code != http.StatusAccepted {
+		t.Fatalf("status codes: first=%d second=%d, want both 202", first.Code, second.Code)
+	}
+	if first.Body.String() != second.Body.String() {
+		t.Fatalf("velocity-capped body differs from normal (enumeration leak):\nfirst=%s\nsecond=%s",
+			first.Body.String(), second.Body.String())
+	}
+
+	wl, err := hr.svc.JoinWaitlist(context.Background())
+	if err != nil {
+		t.Fatalf("JoinWaitlist: %v", err)
+	}
+	if len(wl) != 1 || wl[0].Email != "capped1@example.com" {
+		t.Fatalf("waitlist = %+v, want only the first (under-cap) entry", wl)
+	}
+}
+
+// TestWaitlistOnlyRoutesOmitSignupAndVerify asserts RoutesWaitlistOnly mounts
+// ONLY the waitlist intake: there is no verify token to redeem and no
+// account is ever provisioned in this mode, so /onboarding/signup and
+// /onboarding/verify must both be absent (404).
+func TestWaitlistOnlyRoutesOmitSignupAndVerify(t *testing.T) {
+	h, _ := newHandler(t, ModeWaitlist)
+	mux := http.NewServeMux()
+	h.RoutesWaitlistOnly(mux)
+
+	for _, path := range []string{"/onboarding/signup", "/onboarding/verify"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"email":"x@example.com"}`))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("%s: status %d, want 404 (not mounted in waitlist-only mode)", path, rr.Code)
+		}
+	}
+}

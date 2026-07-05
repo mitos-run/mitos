@@ -10,6 +10,18 @@
 
 * { box-sizing: border-box; }
 
+/* overflow-x: hidden on both html and body: the mobile pass found (and fixed
+   above, see .sr-only and AppShell's <main> min-width:0) a real bug where the
+   page body could genuinely be scrolled/dragged horizontally on a phone,
+   caused by a positioned descendant's containing block skipping past every
+   intermediate overflow-x:auto wrapper straight to the root. Those two fixes
+   address the confirmed mechanism, but this class of bug (an escaping
+   containing block, or a future component that forgets its own wrapper) is
+   easy to reintroduce one component at a time. This is the same
+   belt-and-suspenders clamp already used on the marketing site
+   (website/src/styles/base.css): whichever element ends up as "the scrolling
+   element", it is clamped, so a future regression degrades to clipped
+   content instead of a swipeable page. */
 html, body {
   margin: 0;
   background: var(--field);
@@ -18,6 +30,7 @@ html, body {
   font-size: var(--step-0);
   line-height: var(--lh-body);
   -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
 }
 
 /* The fixed sensor field: faint reticle + grain, < a few % luminance. */
@@ -152,9 +165,28 @@ a { color: var(--cyan); }
 .skeleton-row { animation: pulse 1.2s var(--ease) infinite; }
 @keyframes pulse { 50% { opacity: 0.5; } }
 
-/* Screen-reader only: visually hidden but accessible to assistive technology. */
+/* Screen-reader only: visually hidden but accessible to assistive technology.
+   top/left: 0 is load-bearing, not cosmetic. Without an explicit inset, an
+   absolutely positioned element with no positioned ancestor is placed at its
+   "static position" (roughly where it would sit if it were still in normal
+   flow) relative to the initial containing block. Every .tbl action-column
+   header uses this class inside a <th> (e.g. `<span className="sr-only">
+   Details</span>`), and on a narrow viewport that table is forced wide
+   (.tbl { min-width: 600px }) and clipped only visually by its
+   overflow-x:auto wrapper. Visual clipping does not stop an absolutely
+   positioned descendant's LAYOUT geometry (its scrollable-overflow
+   contribution) from propagating to its containing block, which for an
+   unpositioned ancestor chain is the document root: the far-right static
+   position of the hidden span was silently forcing document scrollWidth past
+   the viewport width, i.e. the page body itself became horizontally
+   scrollable even though every table looked correctly clipped. Pinning the
+   position removes that phantom contribution; it is still a zero-size,
+   clipped, off-flow box, so it stays invisible and does not affect the
+   screen-reader/focus order (that is DOM order, not visual position). */
 .sr-only {
   position: absolute;
+  top: 0;
+  left: 0;
   width: 1px;
   height: 1px;
   padding: 0;
@@ -172,26 +204,38 @@ a { color: var(--cyan); }
   align-items: center;
 }
 
-.menu-button {
+/* Shared 44x44 quiet icon-button base for .menu-button, .theme-toggle, and
+   .feedback-button (see .theme-toggle / .feedback-button below): box model
+   and focus treatment are identical; each keeps its own display, color,
+   transition, and hover rules. */
+.menu-button,
+.theme-toggle,
+.feedback-button {
   min-width: 44px;
   min-height: 44px;
-  display: none; /* hidden on desktop; shown by the mobile media query below */
   align-items: center;
   justify-content: center;
   background: transparent;
   border: none;
-  color: var(--ink);
   cursor: pointer;
   border-radius: var(--r-sm);
   padding: var(--space-2);
+}
+
+.menu-button:focus-visible,
+.theme-toggle:focus-visible,
+.feedback-button:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+.menu-button {
+  display: none; /* hidden on desktop; shown by the mobile media query below */
+  color: var(--ink);
   transition: background var(--dur) var(--ease);
 }
 
 .menu-button:hover { background: var(--field-1); }
-.menu-button:focus-visible {
-  outline: 2px solid var(--cyan);
-  outline-offset: 2px;
-}
 
 /* Retired: .top-bar mobile-brand rules. TopBar (.topbar) now owns the brand
    and the hamburger at all breakpoints. The .top-bar class is no longer used. */
@@ -686,6 +730,34 @@ html[data-reduce-motion="1"] * {
 
 .topbar-help:hover { color: var(--ink-2); }
 
+/* Theme toggle: quiet icon button, same footprint and focus treatment as
+   .menu-button (shared rule above), always visible (unlike the mobile-only
+   menu button). */
+.theme-toggle {
+  display: flex;
+  color: var(--ink-3);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.theme-toggle:hover {
+  background: var(--field-1);
+  color: var(--ink-2);
+}
+
+/* Feedback button: quiet icon button, same footprint and focus treatment as
+   .theme-toggle, always visible. Sits between the Help link and the theme
+   toggle in TopBar. */
+.feedback-button {
+  display: flex;
+  color: var(--ink-3);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.feedback-button:hover {
+  background: var(--field-1);
+  color: var(--ink-2);
+}
+
 /* Search trigger: looks like a quiet input field. Hairline border, field fill,
    dim placeholder text, kbd shortcut in a faint pill. Not a real input. */
 .search-trigger {
@@ -895,16 +967,105 @@ html[data-reduce-motion="1"] * {
   margin: var(--space-2) 0 0;
 }
 
-/* The action slot keeps the primary action aligned to the title baseline. */
+/* The action slot keeps the primary action aligned to the title baseline.
+   flex-wrap: multiple actions never force a horizontal scroll; they wrap to
+   their own line instead. */
 .page-header-actions {
   flex-shrink: 0;
   display: flex;
   gap: var(--space-2);
+  flex-wrap: wrap;
 }
 
 @media (max-width: 768px) {
   .page-header {
     flex-direction: column;
     align-items: stretch;
+  }
+}
+
+/* Stat tile grids (Usage, Billing balance/spend, Boxes catalog): auto-fill
+   columns that collapse to one on a narrow viewport. The min() wrapper is the
+   overflow-safe form of minmax() (see .cockpit-grid above): the track's
+   minimum is clamped to 100% of the container, so a viewport (or nested
+   panel) narrower than the nominal tile width never forces a horizontal
+   scrollbar on the page body. */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
+  gap: var(--space-4);
+}
+
+/* Shared modal: centered card on desktop, full-screen sheet on small phones.
+   Used by InviteModal and NewSandboxModal (both dialog-role confirmations). */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: var(--space-4);
+}
+
+.modal {
+  width: 100%;
+  max-width: 480px;
+  max-height: calc(100dvh - 2 * var(--space-4));
+  overflow-y: auto;
+  padding: var(--space-6);
+}
+
+/* Below 480px width the modal becomes a full-screen sheet: no floating card,
+   no backdrop margin, safe-area padding so notches/home-indicators never
+   clip the close/cancel controls. */
+@media (max-width: 480px) {
+  .modal-backdrop {
+    padding: 0;
+  }
+
+  .modal {
+    max-width: 100dvw;
+    width: 100dvw;
+    height: 100dvh;
+    max-height: 100dvh;
+    border-radius: 0;
+    padding: calc(var(--space-5) + env(safe-area-inset-top)) var(--space-4)
+      calc(var(--space-5) + env(safe-area-inset-bottom));
+  }
+}
+
+/* Fork-tree node detail panel: a normal card on desktop; a bottom sheet
+   pinned to the viewport edge on phones, so opening it never pushes the
+   accessible table further down an already-tall page. */
+@media (max-width: 480px) {
+  .fork-node-panel {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 150;
+    margin: 0;
+    max-height: 80vh;
+    overflow-y: auto;
+    border-radius: var(--r-lg) var(--r-lg) 0 0;
+    padding-bottom: calc(var(--space-5) + env(safe-area-inset-bottom));
+  }
+}
+
+/* Coarse pointers (touch): bump interactive chrome that is otherwise sized
+   for a mouse cursor up to the 44px minimum hit-area recommendation. Gated
+   on pointer:coarse so desktop density is untouched. */
+@media (pointer: coarse) {
+  .btn,
+  .search-trigger,
+  .palette li button {
+    min-height: 44px;
+  }
+
+  .palette li button {
+    display: flex;
+    align-items: center;
   }
 }

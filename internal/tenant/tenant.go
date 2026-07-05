@@ -14,6 +14,18 @@ package tenant
 // and the console / usage resolver read; changing it is a breaking change.
 const OrgLabelKey = "mitos.run/org"
 
+// RegionLabelKey is the label carrying a placement value (issue #712 phase
+// 0's placement.Registry) on a tenant-owned Sandbox: the console's cluster
+// adapter stamps it on every tree root at creation time (empty region means
+// the deployment's registry default, so nothing is stamped at all), and a
+// fork MUST copy it verbatim from its parent rather than re-resolving it,
+// because a live CoW fork cannot cross clusters (region is a property of the
+// fork tree, not of each fork individually). The usage pipeline reads it
+// best-effort at attribution time; an object with no label (created before
+// this existed, or on a deployment that never set one) simply has an empty
+// region.
+const RegionLabelKey = "mitos.run/region"
+
 // namespacePrefix is the prefix for an org's hard-isolation namespace.
 const namespacePrefix = "mitos-org-"
 

@@ -69,3 +69,39 @@ describe('routes config', () => {
     expect(visibleRoutes(base).find((r) => r.path === '/settings')).toBeDefined()
   })
 })
+
+describe('Operate nav group (instance-operator plane)', () => {
+  const adminPaths = ['/admin', '/admin/orgs', '/admin/nodes', '/admin/waitlist', '/admin/audit']
+
+  it('adds Operate to GROUP_ORDER after Billing', () => {
+    expect(GROUP_ORDER).toContain('Operate')
+    expect(GROUP_ORDER.indexOf('Operate')).toBeGreaterThan(GROUP_ORDER.indexOf('Billing'))
+  })
+
+  it('hides every /admin route when caps.admin is absent or false', () => {
+    const visible = visibleRoutes(base)
+    for (const path of adminPaths) {
+      expect(visible.find((r) => r.path === path)).toBeUndefined()
+    }
+    const visibleFalse = visibleRoutes({ ...base, admin: false })
+    for (const path of adminPaths) {
+      expect(visibleFalse.find((r) => r.path === path)).toBeUndefined()
+    }
+  })
+
+  it('shows every /admin route, grouped under Operate, when caps.admin is true', () => {
+    const visible = visibleRoutes({ ...base, admin: true })
+    for (const path of adminPaths) {
+      const route = visible.find((r) => r.path === path)
+      expect(route).toBeDefined()
+      expect(route?.group).toBe('Operate')
+    }
+  })
+
+  it('never shows an /admin route in the nav for a non-admin caller', () => {
+    const nav = navRoutes(base)
+    for (const path of adminPaths) {
+      expect(nav.find((r) => r.path === path)).toBeUndefined()
+    }
+  })
+})

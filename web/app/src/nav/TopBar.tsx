@@ -1,14 +1,19 @@
 // The global top bar: the single brand home, the mobile drawer toggle, a
-// discoverable search trigger, a help link, and the account menu. Styled to
-// continue the marketing site nav (translucent 64px bar) so the website to app
-// handoff is seamless.
+// discoverable search trigger, a help link, a theme toggle, and the account
+// menu. Styled to continue the marketing site nav (translucent 64px bar) so
+// the website to app handoff is seamless.
 import type { RefObject } from 'react'
 import { Link } from '@tanstack/react-router'
 import { Mark } from '@mitos/brand'
+import type { Capabilities } from '../api'
 import { SearchTrigger } from './SearchTrigger'
+import { ThemeToggle } from './ThemeToggle'
+import { FeedbackButton } from './FeedbackButton'
 import { AccountMenu } from './AccountMenu'
 
-export function TopBar({ onSearch, onToggleDrawer, drawerOpen, menuButtonRef }: {
+export function TopBar({ caps, route, onSearch, onToggleDrawer, drawerOpen, menuButtonRef }: {
+  caps: Capabilities
+  route: string
   onSearch: () => void
   onToggleDrawer: () => void
   drawerOpen: boolean
@@ -38,6 +43,8 @@ export function TopBar({ onSearch, onToggleDrawer, drawerOpen, menuButtonRef }: 
         <div className="topbar-spacer" />
         <SearchTrigger onClick={onSearch} />
         <a className="topbar-help" href="/docs" target="_blank" rel="noreferrer">Help</a>
+        <FeedbackButton caps={caps} route={route} />
+        <ThemeToggle />
         <AccountMenu />
       </div>
     </header>

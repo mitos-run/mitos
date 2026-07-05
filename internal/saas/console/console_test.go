@@ -479,12 +479,12 @@ func TestSandboxTerminateOwnSucceedsAndAudits(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("terminate own status = %d body=%s", w.Code, w.Body.String())
 	}
-	events, _ := f.audit.List(context.Background(), f.aliceOrg)
+	events, _ := f.audit.List(context.Background(), f.aliceOrg, 0)
 	if len(events) == 0 || events[0].Action != "sandbox.terminate" {
 		t.Errorf("expected a sandbox.terminate audit event, got %+v", events)
 	}
 	// The audit event must NOT have landed in bob's log.
-	bobEvents, _ := f.audit.List(context.Background(), f.bobOrg)
+	bobEvents, _ := f.audit.List(context.Background(), f.bobOrg, 0)
 	if len(bobEvents) != 0 {
 		t.Errorf("alice terminate leaked into bob audit log: %+v", bobEvents)
 	}
@@ -513,6 +513,35 @@ func TestMembersRefusesCrossOrg(t *testing.T) {
 	w := f.req(t, "GET", "/console/members", "", f.aliceAcct, f.bobOrg)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("cross-org members status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestMembersIncludeEmailAndDisplayName asserts the server joins each member's
+// account record so the UI can show a name and email instead of a bare
+// account id (the same join the audit actor lookup uses). alice never sets a
+// DisplayName by default, so her row's DisplayName is empty until updated.
+func TestMembersIncludeEmailAndDisplayName(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.accounts.UpdateProfile(context.Background(), f.aliceAcct, saas.ProfileUpdate{DisplayName: "Alice A"}); err != nil {
+		t.Fatalf("update profile: %v", err)
+	}
+	w := f.req(t, "GET", "/console/members", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Members []MemberView `json:"members"`
+	}
+	decode(t, w, &resp)
+	if len(resp.Members) != 1 {
+		t.Fatalf("members = %+v, want exactly 1", resp.Members)
+	}
+	m := resp.Members[0]
+	if m.Email != "alice@example.com" {
+		t.Errorf("Email = %q, want alice@example.com", m.Email)
+	}
+	if m.DisplayName != "Alice A" {
+		t.Errorf("DisplayName = %q, want Alice A", m.DisplayName)
 	}
 }
 
@@ -565,6 +594,28 @@ func TestTemplatesReturnsOnlyCallerOrg(t *testing.T) {
 	}
 }
 
+// --- Boxes ---
+
+// TestBoxesReturnsCatalog asserts GET /console/boxes returns the full Box
+// catalog (not org-scoped data, but still requiring an authenticated caller).
+func TestBoxesReturnsCatalog(t *testing.T) {
+	f := newFixture(t)
+	w := f.req(t, "GET", "/console/boxes", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Boxes []BoxView `json:"boxes"`
+	}
+	decode(t, w, &resp)
+	if len(resp.Boxes) != 3 {
+		t.Fatalf("boxes = %+v, want 3 catalog entries", resp.Boxes)
+	}
+	if resp.Boxes[0].Key != "box_s" || resp.Boxes[0].VCPU != 2 || resp.Boxes[0].MemGiB != 4 || resp.Boxes[0].MonthlyCents != 1900 {
+		t.Errorf("boxes[0] = %+v, want box_s 2 vCPU/4 GiB $19", resp.Boxes[0])
+	}
+}
+
 // --- Auth gate ---
 
 func TestEveryEndpointRefusesMissingOrgContext(t *testing.T) {
@@ -584,6 +635,7 @@ func TestEveryEndpointRefusesMissingOrgContext(t *testing.T) {
 		{"GET", "/console/audit/retention"},
 		{"PUT", "/console/audit/retention"},
 		{"GET", "/console/templates"},
+		{"GET", "/console/boxes"},
 		{"GET", "/console/projects"},
 		{"POST", "/console/projects"},
 		{"POST", "/console/members/someacct/role"},
