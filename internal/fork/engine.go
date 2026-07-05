@@ -982,7 +982,7 @@ func NewEngine(dataDir, firecrackerBin, kernelPath string, jailer firecracker.Ja
 		onStarted := func(pid int, js firecracker.JailerState) {
 			e.journalBuild(id, pid, js, cfg.Network != nil)
 		}
-		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands, workload, onStarted)
+		_, err := tmplMgr.CreateTemplate(id, cfg, initCommands, workload, false, onStarted)
 		return err
 	}
 	e.captureGuestReady = guestgrpc.WaitReady
