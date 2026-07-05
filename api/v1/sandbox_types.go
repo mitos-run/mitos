@@ -312,6 +312,19 @@ const (
 	SecretInherit SecretInheritanceMode = "inherit"
 )
 
+// Condition vocabulary shared between the controller (which writes fork
+// status conditions) and the SaaS control plane (which translates them into
+// public HTTP envelopes). Both sides MUST use these symbols: a renamed
+// literal on either side would silently downgrade the dedicated
+// secret-inheritance 403 into the generic rejection 409.
+const (
+	// ConditionRejected is the condition type a terminal fork rejection carries.
+	ConditionRejected = "Rejected"
+	// ReasonSecretInheritanceDenied is the Rejected reason for the default-deny
+	// secret-inheritance gate (fork asked to inherit without the explicit opt-in).
+	ReasonSecretInheritanceDenied = "SecretInheritanceDenied"
+)
+
 // SandboxStatus consolidates SandboxClaimStatus and SandboxForkStatus.
 type SandboxStatus struct {
 	// Phase is the sandbox lifecycle phase. The phase-name set is carried from

@@ -217,9 +217,11 @@ Fork semantics in hosted mode: `mitos fork <id> --count N` calls `POST /v1/fork`
 N times with `{"template": <id>}`. The gateway resolves the sandbox to its
 original template and forks from that snapshot. The source sandbox keeps running
 and each child is an independent sibling forked from the same template snapshot.
-This matches the Python SDK `DirectSandbox.fork()` and `mcp.HTTPBackend.Fork()`
-behavior. A true live memory fork of a running sandbox requires cluster mode with
-a KVM node (the `spec.source.fromSandbox` path).
+This matches `mcp.HTTPBackend.Fork()`. Note the hosted API also serves a TRUE
+live fork at `POST /v1/sandboxes/<id>/fork` (the child inherits the running
+source's current memory and disk; see `docs/saas/accounts-gateway.md`), which
+the Python SDK `DirectSandbox.fork()` drives; moving the CLI onto that route is
+a follow-up.
 
 ### Cluster backend (kubeconfig)
 

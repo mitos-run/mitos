@@ -301,19 +301,25 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusOK
 	}
 
-	// Product telemetry: a successful create emits a sandbox.created event. This is
-	// a no-op when telemetry is disabled (the default). The event carries ONLY
-	// non-PII properties (a success flag and, when present, the non-identifying
-	// pool name the control plane echoes via the X-Mitos-Pool response header); the
-	// org id is hashed by the emitter and never sent raw. No body, image content,
-	// or customer payload is inspected.
-	if op == "sandbox.create" && status >= 200 && status < 300 && g.tel.Enabled() {
+	// Product telemetry: a successful create emits a sandbox.created event and a
+	// successful live fork (sandbox.fork) emits sandbox.forked, so feature
+	// adoption is measurable per verb. This is a no-op when telemetry is disabled
+	// (the default). The event carries ONLY non-PII properties (a success flag
+	// and, when present, the non-identifying pool name the control plane echoes
+	// via the X-Mitos-Pool response header); the org id is hashed by the emitter
+	// and never sent raw. No body, image content, or customer payload is
+	// inspected.
+	if (op == "sandbox.create" || op == "sandbox.fork") && status >= 200 && status < 300 && g.tel.Enabled() {
 		props := map[string]any{"success": true}
 		if pool := resp.Header.Get("X-Mitos-Pool"); pool != "" {
 			props["pool"] = pool
 		}
+		name := "sandbox.created"
+		if op == "sandbox.fork" {
+			name = "sandbox.forked"
+		}
 		g.tel.Emit(r.Context(), telemetry.Event{
-			Name:       "sandbox.created",
+			Name:       name,
 			OrgID:      orgID,
 			Properties: props,
 		})

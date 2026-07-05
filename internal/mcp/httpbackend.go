@@ -41,7 +41,7 @@ func validSandboxID(id string) bool {
 // Transport split (issue #358): the runtime calls (exec, file read, file write)
 // ride the Connect sandbox.v1.Sandbox protocol via the in-module generated
 // connect-go client (ExecStream, ReadFile, WriteFile RPCs); the lifecycle calls
-// (fork, terminate) stay on the legacy /v1 JSON routes via do. Both reach the
+// (create, fork, terminate) stay on the /v1 JSON routes via do. Both reach the
 // same baseURL with the same bearer token; the sandbox id rides the
 // X-Sandbox-Id header on the runtime RPCs.
 //
@@ -87,11 +87,33 @@ func newSandboxID() string {
 	return "sbx-" + hex.EncodeToString(b[:])
 }
 
+// httpStatusError is a non-2xx /v1 response. The status and (already redacted)
+// body stay structured so a caller can branch on the exact failure, e.g. Fork's
+// live-route fallback, without parsing the error string. Its Error string is
+// byte-for-byte the message do has always produced.
+type httpStatusError struct {
+	Method string
+	Path   string
+	Status int
+	Body   string // redacted before construction; never carries the token
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("%s %s: status %d: %s", e.Method, e.Path, e.Status, e.Body)
+}
+
 // do issues an HTTP request to path with an optional JSON body and decodes a
 // 2xx JSON response into out (when out is non-nil). A non-2xx status becomes an
 // error carrying the response body as context, with any echo of the bearer
 // token redacted first so the secret never reaches a caller, a log, or an LLM.
 func (b *HTTPBackend) do(ctx context.Context, method, path string, body any, out any) error {
+	return b.doWithHeader(ctx, method, path, nil, body, out)
+}
+
+// doWithHeader is do with extra request headers (e.g. Idempotency-Key on a
+// fork). A nil header sends none beyond the standard Content-Type and
+// Authorization pair. A non-2xx status returns an *httpStatusError.
+func (b *HTTPBackend) doWithHeader(ctx context.Context, method, path string, header http.Header, body any, out any) error {
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -104,6 +126,11 @@ func (b *HTTPBackend) do(ctx context.Context, method, path string, body any, out
 	req, err := http.NewRequestWithContext(ctx, method, b.baseURL+path, reader)
 	if err != nil {
 		return fmt.Errorf("build %s request: %w", path, err)
+	}
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -121,7 +148,12 @@ func (b *HTTPBackend) do(ctx context.Context, method, path string, body any, out
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("%s %s: status %d: %s", method, path, resp.StatusCode, b.redact(string(respBody)))
+		return &httpStatusError{
+			Method: method,
+			Path:   path,
+			Status: resp.StatusCode,
+			Body:   b.redact(string(respBody)),
+		}
 	}
 
 	if out != nil {
@@ -356,16 +388,75 @@ func (b *HTTPBackend) WriteFile(ctx context.Context, sandboxID, path, content st
 	return nil
 }
 
-// Fork forks the sandbox replicas times. The sandbox-server fork endpoint has
-// no replicas parameter, so this issues one POST /v1/fork per replica. Caveat:
-// the sandbox-server /v1/fork "template" field is a template lookup, so this
-// passes the source sandbox id as the template key; on the standalone server a
-// fork-of-a-fork therefore requires that key to resolve to a known template.
-// The richer k8s SandboxFork path (true fork-of-a-running-sandbox) belongs to
-// the future k8s backend. A replicas value below 1 is treated as 1.
+// idempotencyHeader is the header carrying the fork idempotency key, matching
+// the Python and Go SDKs, so a transparently retried fork never double-creates
+// a child (issue #22).
+const idempotencyHeader = "Idempotency-Key"
+
+// newIdempotencyKey returns a random hex Idempotency-Key. An empty string (the
+// never-in-practice crypto/rand failure) means the header is simply omitted.
+func newIdempotencyKey() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// isLiveForkRouteMissing reports whether err is a ROUTE-LEVEL 404 for the
+// per-sandbox live-fork route: the server does not serve the route at all
+// (an older gateway without the sandbox.fork op, or an older standalone
+// sandbox-server whose mux answers a plain "404 page not found"). A 404 whose
+// error envelope names a missing SANDBOX or POOL is a real answer about the
+// fork source and must never be mistaken for a missing route.
+func isLiveForkRouteMissing(err error) bool {
+	var se *httpStatusError
+	if !errors.As(err, &se) || se.Status != http.StatusNotFound {
+		return false
+	}
+	var env struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if jsonErr := json.Unmarshal([]byte(se.Body), &env); jsonErr == nil && env.Error.Code != "" {
+		if env.Error.Code != "not_found" {
+			return false
+		}
+		// The older gateway's route-level 404 says "no such route or operation";
+		// a missing source says "no such sandbox" and a pool lookup says "no such
+		// pool", neither of which mentions a route or operation.
+		msg := strings.ToLower(env.Error.Message)
+		return strings.Contains(msg, "route") || strings.Contains(msg, "operation")
+	}
+	// Not the /v1 error envelope: an older standalone sandbox-server without
+	// the route answers with net/http's default "404 page not found".
+	return strings.Contains(strings.ToLower(se.Body), "page not found")
+}
+
+// Fork forks the RUNNING sandbox replicas times via the per-sandbox live-fork
+// route: one POST /v1/sandboxes/{id}/fork per child with {"id": <child>,
+// "pause_source": true} and a fresh Idempotency-Key, exactly like the Python
+// SDK's _fork_one. The server checkpoints the running source (memory plus
+// on-disk filesystem, captured while the source is paused so the two are
+// consistent) and boots each child from that checkpoint; the response is
+// create-shaped (id, endpoint, token, phase, template_id, fork_time_ms).
 //
-// On a mid-loop failure, the error wraps the already-created ids so callers can
-// terminate them: "fork created [id1 id2] before failing: <cause>".
+// The previous behavior (POST /v1/fork with the SOURCE SANDBOX ID in the
+// template field) only worked when that id happened to name a template; the
+// hosted control plane resolves the template field as a pool name, so it
+// failed with 404 `no such pool "sb-..."`.
+//
+// Compatibility: a server that does not serve the live-fork route answers the
+// FIRST call with a route-level 404 (see isLiveForkRouteMissing); Fork then
+// falls back ONCE to the legacy flat template route (POST /v1/fork
+// {template: sandboxID, id}) for every child. A 404 naming a missing sandbox
+// or pool is a real failure and is returned, never treated as a missing route.
+//
+// A replicas value below 1 is treated as 1. On a mid-loop failure, the error
+// wraps the already-created ids so callers can terminate them:
+// "fork created [id1 id2] before failing: <cause>".
 func (b *HTTPBackend) Fork(ctx context.Context, sandboxID string, replicas int) ([]string, error) {
 	if !validSandboxID(sandboxID) {
 		return nil, fmt.Errorf("fork: invalid sandbox id %q", sandboxID)
@@ -373,14 +464,36 @@ func (b *HTTPBackend) Fork(ctx context.Context, sandboxID string, replicas int) 
 	if replicas < 1 {
 		replicas = 1
 	}
+	livePath := "/v1/sandboxes/" + url.PathEscape(sandboxID) + "/fork"
+	useFlat := false
 	ids := make([]string, 0, replicas)
 	for i := 0; i < replicas; i++ {
 		id := newSandboxID()
 		var resp forkResponse
-		if err := b.do(ctx, http.MethodPost, "/v1/fork", map[string]any{
-			"template": sandboxID,
-			"id":       id,
-		}, &resp); err != nil {
+		var err error
+		if !useFlat {
+			header := http.Header{}
+			if key := newIdempotencyKey(); key != "" {
+				header.Set(idempotencyHeader, key)
+			}
+			err = b.doWithHeader(ctx, http.MethodPost, livePath, header, map[string]any{
+				"id":           id,
+				"pause_source": true,
+			}, &resp)
+			if err != nil && i == 0 && isLiveForkRouteMissing(err) {
+				// Older server without the live-fork route: fall back once to
+				// the legacy flat template route for this and every later child.
+				useFlat = true
+			}
+		}
+		if useFlat {
+			resp = forkResponse{}
+			err = b.do(ctx, http.MethodPost, "/v1/fork", map[string]any{
+				"template": sandboxID,
+				"id":       id,
+			}, &resp)
+		}
+		if err != nil {
 			return ids, fmt.Errorf("fork created %v before failing: %w", ids, err)
 		}
 		if resp.ID != "" {
