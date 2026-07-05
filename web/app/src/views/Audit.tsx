@@ -102,8 +102,10 @@ function SinksPanel() {
       await addSink.mutateAsync({ type: newType, endpoint: newEndpoint })
       setNewEndpoint('')
       notify('Sink added')
-    } catch {
-      notify('Failed to add sink', 'error')
+    } catch (err) {
+      // Surfaces the server's actionable cause (e.g. a plan_required 402
+      // naming the Team plan) instead of a generic failure message.
+      notify(err instanceof Error ? err.message : 'Failed to add sink', 'error')
     }
   }
 

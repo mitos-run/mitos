@@ -246,6 +246,7 @@ func (c *Console) routes() {
 	mux.HandleFunc("POST /console/billing/spend-cap", c.handleSetSpendCap)
 	mux.HandleFunc("GET /console/billing/portal", c.handleBillingPortal)
 	mux.HandleFunc("GET /console/billing/topup", c.handleBillingTopUp)
+	mux.HandleFunc("GET /console/boxes", c.handleListBoxes)
 	mux.HandleFunc("GET /console/sandboxes", c.handleListSandboxes)
 	mux.HandleFunc("POST /console/sandboxes", c.handleCreateSandbox)
 	mux.HandleFunc("GET /console/sandboxes/{id}", c.handleInspectSandbox)
@@ -947,6 +948,36 @@ func (c *Console) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"org_id": orgID, "account_id": targetID, "role": req.Role})
 }
 
+// --- Boxes (the read-only Box reservation catalog, over billing.BoxCatalog) ---
+
+// BoxView is the console's shape of one Box catalog reservation: a fixed
+// vCPU/RAM shape reserved for a flat monthly price (see billing.Reservation).
+// All catalog values are ILLUSTRATIVE, matching billing.BoxCatalog's own
+// no-unverified-claims note.
+type BoxView struct {
+	Key          string `json:"key"`
+	VCPU         int    `json:"vcpu"`
+	MemGiB       int    `json:"mem_gib"`
+	MonthlyCents int64  `json:"monthly_cents"`
+}
+
+// handleListBoxes returns the Box catalog. It is not org-scoped data (the
+// catalog is the same for every org on this deployment) but still requires an
+// authenticated caller, matching every other console read endpoint.
+func (c *Console) handleListBoxes(w http.ResponseWriter, r *http.Request) {
+	_, _, e, ok := c.caller(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	catalog := billing.BoxCatalog()
+	out := make([]BoxView, 0, len(catalog))
+	for _, res := range catalog {
+		out = append(out, BoxView{Key: res.Key, VCPU: res.VCPU, MemGiB: res.MemGiB, MonthlyCents: res.MonthlyCents})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"boxes": out})
+}
+
 // --- Audit sinks (GET/POST/DELETE /console/audit/sinks) ---
 
 // handleListSinks returns the org's configured audit-sink destinations.
@@ -1082,7 +1113,10 @@ func auditStreamingGatedError() apierr.Error {
 	return apierr.Error{
 		Code:    "plan_required",
 		Message: "audit-sink streaming requires the Team plan",
-		Cause:   "this organization's plan does not include forwarding audit events to external sinks",
+		// Cause is the field the SPA surfaces to the user (apiErrorMessage
+		// prefers cause over message), so it names the Team plan directly
+		// rather than only describing the gap abstractly.
+		Cause: "audit-sink streaming (forwarding events to webhook, s3, splunk, or datadog) requires the Team plan",
 		Remediation: "Upgrade to the Team plan to forward audit events to configured sinks (webhook, s3, splunk, datadog). " +
 			"The audit log itself, and its NDJSON export, remain fully available on every plan.",
 		Status: http.StatusPaymentRequired,

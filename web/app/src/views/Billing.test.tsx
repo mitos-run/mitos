@@ -15,6 +15,8 @@ const caps: Capabilities = {
   secrets: { providers: ['kube'] },
   proof: false,
   ownership: 'hosted',
+  plan: 'free',
+  entitlements: { ssoEnforced: false, scim: false, auditStreaming: false, auditRetentionDays: 30, seatPriceCents: 0 },
 }
 
 const billingPayload = {
@@ -30,19 +32,32 @@ const billingPayload = {
   topup_available: true,
 }
 
-function mockFetch(postResponse?: object) {
+const boxesPayload = {
+  boxes: [
+    { key: 'box_s', vcpu: 2, mem_gib: 4, monthly_cents: 1900 },
+    { key: 'box_m', vcpu: 4, mem_gib: 8, monthly_cents: 3900 },
+    { key: 'box_l', vcpu: 8, mem_gib: 16, monthly_cents: 7500 },
+  ],
+}
+
+function mockFetch(postResponse?: object, capsOverride?: Capabilities) {
   vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
     const url = String(input).split('?')[0]
     const method = (init?.method ?? 'GET').toUpperCase()
 
     if (url.endsWith('/console/capabilities')) {
       return Promise.resolve(
-        new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }),
+        new Response(JSON.stringify(capsOverride ?? caps), { status: 200, headers: { 'content-type': 'application/json' } }),
       )
     }
     if (url.endsWith('/console/billing') && method === 'GET') {
       return Promise.resolve(
         new Response(JSON.stringify(billingPayload), { status: 200, headers: { 'content-type': 'application/json' } }),
+      )
+    }
+    if (url.endsWith('/console/boxes') && method === 'GET') {
+      return Promise.resolve(
+        new Response(JSON.stringify(boxesPayload), { status: 200, headers: { 'content-type': 'application/json' } }),
       )
     }
     if (url.endsWith('/console/billing/spend-cap') && method === 'POST') {
@@ -349,5 +364,80 @@ describe('Add credits section', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '$10.00' })).toBeInTheDocument())
     expect(screen.getByRole('button', { name: /add credits/i })).toBeInTheDocument()
     expect(screen.queryByText(/adding credits is not available yet/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('Plan card', () => {
+  it('shows the current plan and its entitlements', async () => {
+    await renderAt('/billing', caps)
+    await waitFor(() => expect(screen.getByText('Free')).toBeInTheDocument())
+    expect(screen.getByText(/sso enforcement: off/i)).toBeInTheDocument()
+    expect(screen.getByText(/audit retention: 30 days/i)).toBeInTheDocument()
+  })
+
+  it('shows the Team plan with entitlements on and unlimited retention shown correctly', async () => {
+    const teamCaps: Capabilities = {
+      ...caps,
+      plan: 'team',
+      entitlements: { ssoEnforced: true, scim: true, auditStreaming: true, auditRetentionDays: 365, seatPriceCents: 2000 },
+    }
+    mockFetch(undefined, teamCaps)
+    await renderAt('/billing', teamCaps)
+    await waitFor(() => expect(screen.getByText('Team')).toBeInTheDocument())
+    expect(screen.getByText(/sso enforcement: on/i)).toBeInTheDocument()
+    expect(screen.getByText(/audit retention: 365 days/i)).toBeInTheDocument()
+  })
+
+  it('shows the self-hosted note and unlimited retention for the community edition', async () => {
+    const communityCaps: Capabilities = {
+      ...caps,
+      edition: 'community',
+      ownership: 'self-hosted',
+      plan: 'free',
+      entitlements: { ssoEnforced: true, scim: true, auditStreaming: true, auditRetentionDays: 0, seatPriceCents: 0 },
+    }
+    mockFetch(undefined, communityCaps)
+    await renderAt('/billing', communityCaps)
+    await waitFor(() => expect(screen.getByText(/every feature is included/i)).toBeInTheDocument())
+    expect(screen.getByText(/audit retention: unlimited/i)).toBeInTheDocument()
+  })
+})
+
+describe('Boxes section', () => {
+  it('lists the Box catalog', async () => {
+    await renderAt('/billing', caps)
+    await waitFor(() => expect(screen.getByText('2 vCPU / 4 GiB')).toBeInTheDocument())
+    expect(screen.getByText('$19.00/mo')).toBeInTheDocument()
+    expect(screen.getByText('4 vCPU / 8 GiB')).toBeInTheDocument()
+    expect(screen.getByText('8 vCPU / 16 GiB')).toBeInTheDocument()
+  })
+
+  it('deep-links the billing portal when a top-up provider is configured', async () => {
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+    const portalSpy = vi.spyOn(api, 'billingPortal').mockResolvedValue('https://portal.example/session')
+    await renderAt('/billing', caps)
+    const btn = await waitFor(() => screen.getByRole('button', { name: /manage in billing portal/i }))
+    fireEvent.click(btn)
+    await waitFor(() => expect(portalSpy).toHaveBeenCalled())
+    await waitFor(() => expect(openSpy).toHaveBeenCalledWith('https://portal.example/session', '_blank'))
+  })
+
+  it('shows an honest contact message instead of a fake purchase flow when no top-up provider is configured', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input).split('?')[0]
+      const method = (init?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/console/capabilities'))
+        return Promise.resolve(new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }))
+      if (url.endsWith('/console/billing') && method === 'GET')
+        return Promise.resolve(
+          new Response(JSON.stringify({ ...billingPayload, topup_available: false }), { status: 200, headers: { 'content-type': 'application/json' } }),
+        )
+      if (url.endsWith('/console/boxes') && method === 'GET')
+        return Promise.resolve(new Response(JSON.stringify(boxesPayload), { status: 200, headers: { 'content-type': 'application/json' } }))
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    await renderAt('/billing', caps)
+    await waitFor(() => expect(screen.getByText(/contact us to reserve a box/i)).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: /manage in billing portal/i })).not.toBeInTheDocument()
   })
 })

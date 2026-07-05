@@ -1,10 +1,12 @@
-// Billing view: status badge, balance and spend (cents to dollars), cap info,
-// a spend-cap form (soft/hard in dollars), an add-credits section (preset tiers
-// plus a custom amount), a ledger table (Time, Amount, Reason), and a "Manage
+// Billing view: plan card, status badge, balance and spend (cents to
+// dollars), cap info, a spend-cap form (soft/hard in dollars), an add-credits
+// section (preset tiers plus a custom amount), a Boxes section (the reserved-
+// capacity catalog), a ledger table (Time, Amount, Reason), and a "Manage
 // billing" button. Gated on c.billing.
 import { useState } from 'react'
-import { useBilling, useSetSpendCap } from '../data/account'
+import { useBilling, useSetSpendCap, useBoxes } from '../data/account'
 import { useAccount } from '../data/account-settings'
+import { useCapabilities } from '../data/query'
 import { api } from '../api'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
@@ -35,6 +37,92 @@ const TOPUP_TIERS: Array<{ cents: number; label: string }> = [
   { cents: 5000, label: fmtDollars(5000) },
   { cents: 10000, label: fmtDollars(10000) },
 ]
+
+const PLAN_LABELS: Record<string, string> = { free: 'Free', team: 'Team' }
+
+// PlanCard shows the caller's org's current plan and the entitlements it
+// unlocks, from capabilities (server-resolved per org). It renders nothing
+// until capabilities with a plan have loaded, so it never flashes a wrong
+// plan.
+function PlanCard() {
+  const { data: caps } = useCapabilities()
+  if (!caps?.plan || !caps.entitlements) return null
+  const e = caps.entitlements
+  const label = PLAN_LABELS[caps.plan] ?? caps.plan
+
+  return (
+    <section style={{ marginBottom: 'var(--space-6)' }}>
+      <h2 style={{ marginBottom: 'var(--space-3)' }}>Plan</h2>
+      <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)', maxWidth: 420 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-3)', flexWrap: 'wrap' }}>
+          <span
+            className="mono"
+            style={{ padding: 'var(--space-1) var(--space-3)', borderRadius: 'var(--r-sm)', background: 'var(--field-1)', fontSize: 'var(--step--1)' }}
+          >
+            {label}
+          </span>
+          {caps.edition === 'community' && (
+            <span className="t-dim" style={{ fontSize: 'var(--step--1)' }}>
+              Self-hosted: every feature is included, no plan required.
+            </span>
+          )}
+        </div>
+        <ul className="t-dim" style={{ margin: 0, paddingLeft: 'var(--space-5)', fontSize: 'var(--step--1)', display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
+          <li>SSO enforcement: {e.ssoEnforced ? 'on' : 'off'}</li>
+          <li>SCIM provisioning: {e.scim ? 'on' : 'off'}</li>
+          <li>Audit-sink streaming: {e.auditStreaming ? 'on' : 'off'}</li>
+          <li>Audit retention: {e.auditRetentionDays > 0 ? `${e.auditRetentionDays} days` : 'unlimited'}</li>
+        </ul>
+        {caps.edition === 'hosted' && caps.plan === 'free' && (
+          <p className="t-dim" style={{ fontSize: 'var(--step--1)', margin: 0 }}>
+            The Team plan adds SSO enforcement, SCIM, and audit-sink streaming with extended retention.
+          </p>
+        )}
+      </div>
+    </section>
+  )
+}
+
+// BoxesSection lists the Box reservation catalog (illustrative pricing) and
+// an honest purchase-path state: when a top-up provider is configured it
+// deep-links the billing portal (the same seam the "Manage billing" button
+// uses); otherwise it shows a calm contact message rather than a fake
+// purchase flow.
+function BoxesSection({ topUpAvailable, onManageBilling }: { topUpAvailable: boolean; onManageBilling: () => void }) {
+  const { data: boxes, isLoading } = useBoxes()
+
+  return (
+    <>
+      <h2 style={{ marginBottom: 'var(--space-3)' }}>Boxes</h2>
+      <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-4)' }}>
+        Reserved monthly capacity, billed at a discount to pay-as-you-go usage. Pricing is illustrative.
+      </p>
+      {isLoading ? (
+        <Skeleton rows={3} />
+      ) : !boxes || boxes.length === 0 ? (
+        <EmptyState title="No boxes available" body="The reserved-capacity catalog could not be loaded." />
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 'var(--space-4)', marginBottom: 'var(--space-4)' }}>
+          {boxes.map((b) => (
+            <div key={b.key} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+              <strong>{b.vcpu} vCPU / {b.mem_gib} GiB</strong>
+              <span className="mono">{fmtDollars(b.monthly_cents)}/mo</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {topUpAvailable ? (
+        <button className="btn" onClick={onManageBilling} style={{ marginBottom: 'var(--space-6)' }}>
+          Manage in billing portal
+        </button>
+      ) : (
+        <p className="t-dim" style={{ fontSize: 'var(--step--1)', marginBottom: 'var(--space-6)' }}>
+          Contact us to reserve a box while self-serve purchase is built.
+        </p>
+      )}
+    </>
+  )
+}
 
 export function Billing() {
   const { data, isLoading } = useBilling()
@@ -110,6 +198,8 @@ export function Billing() {
   return (
     <section>
       <PageHeader title="Billing" lede="Balance, spend, and ledger for this org." />
+
+      <PlanCard />
 
       {isLoading ? (
         <Skeleton rows={4} />
@@ -266,6 +356,8 @@ export function Billing() {
               Adding credits is not available yet. Please check back soon.
             </p>
           )}
+
+          <BoxesSection topUpAvailable={data.topup_available} onManageBilling={() => void onManageBilling()} />
 
           <h2 style={{ marginBottom: 'var(--space-3)' }}>Ledger</h2>
           {data.ledger_entries.length === 0 ? (

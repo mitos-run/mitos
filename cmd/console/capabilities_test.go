@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/console"
 )
 
@@ -167,4 +169,45 @@ func TestAuthConnectorsEndpoint(t *testing.T) {
 			t.Error("signup = true, want false when caps.Signup is unset")
 		}
 	})
+}
+
+// TestPlanSourceFromEnvDefaultsToFree asserts that with MITOS_CONSOLE_TEAM_ORGS
+// unset, every org resolves to PlanFree: the manual-grant allowlist is empty
+// by default.
+func TestPlanSourceFromEnvDefaultsToFree(t *testing.T) {
+	t.Setenv("MITOS_CONSOLE_TEAM_ORGS", "")
+	src := planSourceFromEnv()
+	plan, err := src.GetPlan(context.Background(), "any-org")
+	if err != nil {
+		t.Fatalf("GetPlan: %v", err)
+	}
+	if plan != billing.PlanFree {
+		t.Errorf("plan = %q, want free", plan)
+	}
+}
+
+// TestPlanSourceFromEnvGrantsListedOrgs asserts a comma-separated
+// MITOS_CONSOLE_TEAM_ORGS grants exactly those org ids PlanTeam and leaves
+// every other org on PlanFree.
+func TestPlanSourceFromEnvGrantsListedOrgs(t *testing.T) {
+	t.Setenv("MITOS_CONSOLE_TEAM_ORGS", "org-a, org-b")
+	src := planSourceFromEnv()
+
+	for _, orgID := range []string{"org-a", "org-b"} {
+		plan, err := src.GetPlan(context.Background(), orgID)
+		if err != nil {
+			t.Fatalf("GetPlan(%s): %v", orgID, err)
+		}
+		if plan != billing.PlanTeam {
+			t.Errorf("GetPlan(%s) = %q, want team", orgID, plan)
+		}
+	}
+
+	plan, err := src.GetPlan(context.Background(), "org-c")
+	if err != nil {
+		t.Fatalf("GetPlan(org-c): %v", err)
+	}
+	if plan != billing.PlanFree {
+		t.Errorf("GetPlan(org-c) = %q, want free (not listed)", plan)
+	}
 }

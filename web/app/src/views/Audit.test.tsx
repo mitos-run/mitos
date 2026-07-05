@@ -1,6 +1,6 @@
 // Audit view tests: filterable event table + retention panel + sinks panel.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { waitFor, screen } from '@testing-library/react'
+import { fireEvent, waitFor, screen } from '@testing-library/react'
 import { renderAt } from '../test/utils'
 import type { Capabilities } from '../api'
 
@@ -110,6 +110,39 @@ describe('Audit view', () => {
     // The default beforeEach fixture has no actor_name/target_name.
     await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument())
     expect(screen.getByText('k1')).toBeInTheDocument()
+  })
+
+  it('shows the server plan_required cause when adding a sink is plan-gated', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input).split('?')[0]
+      const method = ((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/console/capabilities'))
+        return Promise.resolve(new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }))
+      if (url.endsWith('/console/audit/sinks') && method === 'GET')
+        return Promise.resolve(new Response(JSON.stringify({ sinks: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      if (url.endsWith('/console/audit/sinks') && method === 'POST')
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: {
+                code: 'plan_required',
+                message: 'audit-sink streaming requires the Team plan',
+                cause: 'audit-sink streaming (forwarding events to webhook, s3, splunk, or datadog) requires the Team plan',
+                remediation: 'Upgrade to the Team plan.',
+              },
+            }),
+            { status: 402, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+
+    await renderAt('/audit', caps)
+    const endpointInput = await waitFor(() => screen.getByLabelText(/sink endpoint/i))
+    fireEvent.change(endpointInput, { target: { value: 'https://example.com/hook' } })
+    fireEvent.click(screen.getByRole('button', { name: /add sink/i }))
+
+    await waitFor(() => expect(screen.getByText(/requires the team plan/i)).toBeInTheDocument())
   })
 
   it('Export control is an anchor linking to /console/audit/export', async () => {

@@ -243,6 +243,10 @@ func main() {
 		// Edition + feature flags from the server-controlled environment the chart
 		// sets; the SAME binary serves both editions.
 		Capabilities: caps,
+		// The org -> plan lookup: a static manual-grant allowlist
+		// (MITOS_CONSOLE_TEAM_ORGS) until a real subscription/payment
+		// integration exists. Every org not listed resolves to PlanFree.
+		Plans: planSourceFromEnv(),
 		// Wire the real session store so /console/account/sessions reflects live
 		// sessions. The adapter translates saas.Session to console.SessionRecord.
 		// Both dev and production share the same store; in dev the store is empty

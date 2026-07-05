@@ -594,6 +594,28 @@ func TestTemplatesReturnsOnlyCallerOrg(t *testing.T) {
 	}
 }
 
+// --- Boxes ---
+
+// TestBoxesReturnsCatalog asserts GET /console/boxes returns the full Box
+// catalog (not org-scoped data, but still requiring an authenticated caller).
+func TestBoxesReturnsCatalog(t *testing.T) {
+	f := newFixture(t)
+	w := f.req(t, "GET", "/console/boxes", "", f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Boxes []BoxView `json:"boxes"`
+	}
+	decode(t, w, &resp)
+	if len(resp.Boxes) != 3 {
+		t.Fatalf("boxes = %+v, want 3 catalog entries", resp.Boxes)
+	}
+	if resp.Boxes[0].Key != "box_s" || resp.Boxes[0].VCPU != 2 || resp.Boxes[0].MemGiB != 4 || resp.Boxes[0].MonthlyCents != 1900 {
+		t.Errorf("boxes[0] = %+v, want box_s 2 vCPU/4 GiB $19", resp.Boxes[0])
+	}
+}
+
 // --- Auth gate ---
 
 func TestEveryEndpointRefusesMissingOrgContext(t *testing.T) {
@@ -613,6 +635,7 @@ func TestEveryEndpointRefusesMissingOrgContext(t *testing.T) {
 		{"GET", "/console/audit/retention"},
 		{"PUT", "/console/audit/retention"},
 		{"GET", "/console/templates"},
+		{"GET", "/console/boxes"},
 		{"GET", "/console/projects"},
 		{"POST", "/console/projects"},
 		{"POST", "/console/members/someacct/role"},

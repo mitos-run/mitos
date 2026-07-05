@@ -10,6 +10,18 @@ export class UnauthorizedError extends Error {
   }
 }
 
+// Entitlements is the resolved set of plan-gated hosted conveniences for the
+// caller's org (mitos.run/mitos/internal/saas/billing.Entitlements). On the
+// self-hosted community edition every field is on with auditRetentionDays 0
+// (unlimited): the engine is never gated by plan.
+export type Entitlements = {
+  ssoEnforced: boolean
+  scim: boolean
+  auditStreaming: boolean
+  auditRetentionDays: number
+  seatPriceCents: number
+}
+
 export type Capabilities = {
   edition: 'community' | 'hosted'
   billing: boolean
@@ -23,6 +35,11 @@ export type Capabilities = {
   // authConnectors is the sorted list of configured social-login providers.
   // Present when the server is new enough to return it; absent on old deploys.
   authConnectors?: string[]
+  // plan and entitlements are present when the server is new enough to
+  // return them; absent on old deploys. plan is "free" or "team" on a hosted
+  // deployment (informational only on community, which is never plan-gated).
+  plan?: 'free' | 'team'
+  entitlements?: Entitlements
 }
 
 export type AuthConnectorsResponse = {
@@ -102,6 +119,9 @@ export type AuditEvent = {
   at: string
 }
 export type TemplateView = { name: string; org_id: string; description: string; image: string; updated_at: string }
+// BoxView is one entry in the Box reservation catalog (illustrative pricing;
+// see mitos.run/mitos/internal/saas/billing.Reservation).
+export type BoxView = { key: string; vcpu: number; mem_gib: number; monthly_cents: number }
 export type UsageResponse = { org_id: string; records: unknown[]; totals: Record<string, number>; cost: Record<string, number> }
 export type BillingView = { org_id: string; status: string; balance_cents: number; spend_cents: number; soft_cap_cents: number; hard_cap_cents: number; ledger_entries: Array<{ ts?: string; cents?: number; reason?: string }>; topup_available: boolean }
 
@@ -312,6 +332,7 @@ export const api = {
   usage: () => get<UsageResponse>('/console/usage?from=&to='),
   audit: () => get<{ events: AuditEvent[] }>('/console/audit').then((r) => r.events ?? []),
   templates: () => get<{ templates: TemplateView[] }>('/console/templates').then((r) => r.templates ?? []),
+  boxes: () => get<{ boxes: BoxView[] }>('/console/boxes').then((r) => r.boxes ?? []),
   billing: () => get<BillingView>('/console/billing'),
   billingPortal: () => get<{ url: string }>('/console/billing/portal').then((r) => r.url),
   topupUrl: (amountCents: number) =>
@@ -431,7 +452,10 @@ export const api = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ type, endpoint }),
     })
-    if (!r.ok) throw new Error(`add sink: ${r.status}`)
+    // Surfaces the apierr cause (e.g. "audit-sink streaming requires the Team
+    // plan" on a 402) instead of a bare status code, so a plan-gated org sees
+    // an honest, actionable message rather than a generic failure.
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'add sink'))
     return (await r.json()) as SinkView
   },
   deleteAuditSink: async (id: string) => {

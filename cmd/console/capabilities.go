@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"mitos.run/mitos/internal/saas/billing"
 	"mitos.run/mitos/internal/saas/console"
 )
 
@@ -101,6 +102,15 @@ func newAuthConnectorsHandler(caps console.Capabilities) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
 	}
+}
+
+// planSourceFromEnv builds the console's org -> plan lookup from
+// MITOS_CONSOLE_TEAM_ORGS, a comma-separated list of org ids manually granted
+// PlanTeam. This is an early manual-grant mechanism, standing in for a real
+// subscription/payment integration; every org not listed resolves to
+// PlanFree. Unset or empty grants no org Team.
+func planSourceFromEnv() *billing.StaticPlanSource {
+	return billing.NewStaticPlanSource(splitNonEmpty(os.Getenv("MITOS_CONSOLE_TEAM_ORGS")))
 }
 
 func envOr(key, def string) string {
