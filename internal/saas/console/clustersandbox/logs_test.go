@@ -261,18 +261,64 @@ func TestReadBoundedLineEOFMidLineStripsTrailingCR(t *testing.T) {
 	}
 }
 
-// TestPushDropOldestDropsOldestWhenFull is the deterministic unit test for
-// the bounded, drop-oldest buffer streamPodLines relies on to bound memory
-// against a slow sink: once full, pushing one more line drops the OLDEST
-// queued line, not the newest.
-func TestPushDropOldestDropsOldestWhenFull(t *testing.T) {
-	ch := make(chan []byte, 2)
-	pushDropOldest(ch, []byte("a"))
-	pushDropOldest(ch, []byte("b"))
-	pushDropOldest(ch, []byte("c")) // "a" is the oldest; it must be dropped
+// TestLineBufferPushDropsOldestWhenOverByteCap is the deterministic unit
+// test for lineBuffer's drop-oldest behavior at small scale: once the total
+// queued bytes would exceed maxLogBufferBytes, push drops from the front
+// (oldest first) until the newest line fits, never dropping the newest line
+// itself.
+func TestLineBufferPushDropsOldestWhenOverByteCap(t *testing.T) {
+	buf := newLineBuffer()
+	// Three lines whose first two together already exceed a tiny custom
+	// budget would be awkward to express against the real (4 MiB)
+	// maxLogBufferBytes, so this test instead drives push directly with
+	// lines sized relative to the real cap: two lines just over half the
+	// cap each, so the second push's drop-oldest loop must evict the first.
+	half := maxLogBufferBytes/2 + 1
+	a := bytes.Repeat([]byte("a"), half)
+	b := bytes.Repeat([]byte("b"), half)
+	buf.push(a)
+	buf.push(b) // "a" no longer fits alongside "b"; it must be dropped
 
-	first, second := string(<-ch), string(<-ch)
-	if first != "b" || second != "c" {
-		t.Fatalf("drained = [%q %q], want [\"b\" \"c\"] (drop-oldest)", first, second)
+	lines, _, _ := buf.drain()
+	if len(lines) != 1 || string(lines[0]) != string(b) {
+		t.Fatalf("drained %d line(s), want exactly the newest (b) line; oldest (a) was not dropped", len(lines))
+	}
+}
+
+// TestLineBufferPushBoundsTotalBytesAndKeepsNewest is the TDD test for the
+// MAJOR fix in issue #726: pushing many near-1-MiB lines (each individually
+// under maxLogLineBytes, exactly as a chatty sandbox's real log lines would
+// be truncated to by discardOversizedLine) must NEVER let the buffer's total
+// queued bytes exceed maxLogBufferBytes, regardless of how many lines a slow
+// consumer lets accumulate. The prior line-COUNT cap (512 lines) allowed up
+// to ~512 MiB here; the byte-bounded queue must hold at most a handful of
+// near-1-MiB lines. The newest line must always survive (drop-oldest, never
+// drop-newest).
+func TestLineBufferPushBoundsTotalBytesAndKeepsNewest(t *testing.T) {
+	buf := newLineBuffer()
+	const lineSize = maxLogLineBytes - 10 // near 1 MiB, comfortably under maxLogBufferBytes on its own
+	const pushCount = 50                  // 50 * ~1 MiB > 48 MiB, far over the 4 MiB cap
+
+	var last []byte
+	for i := 0; i < pushCount; i++ {
+		line := bytes.Repeat([]byte{byte('a' + i%26)}, lineSize)
+		last = line
+		buf.push(line)
+		if buf.bytes > maxLogBufferBytes {
+			t.Fatalf("after push %d: buffered bytes = %d, want <= maxLogBufferBytes (%d)", i, buf.bytes, maxLogBufferBytes)
+		}
+	}
+
+	lines, _, _ := buf.drain()
+	if len(lines) == 0 {
+		t.Fatal("every line was dropped; the newest line must always be kept")
+	}
+	if newest := lines[len(lines)-1]; string(newest) != string(last) {
+		t.Fatal("the newest pushed line was not the newest line retained; drop-oldest was violated")
+	}
+	// Sanity: with lineSize near 1 MiB and a 4 MiB cap, at most a handful of
+	// lines can coexist, proving this is nowhere near the old ~512-line cap.
+	if len(lines) > 10 {
+		t.Fatalf("retained %d lines of ~1 MiB each, want a small handful under the 4 MiB cap", len(lines))
 	}
 }

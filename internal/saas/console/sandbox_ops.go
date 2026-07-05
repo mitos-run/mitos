@@ -574,6 +574,16 @@ func (c *Console) handleSandboxLogsStream(w http.ResponseWriter, r *http.Request
 			}
 			if !sink.wrote {
 				writeSSEHeaders(w)
+				// Without this, an empty stream (StreamLogs completed
+				// cleanly with zero lines, e.g. no log output yet) would
+				// send its 200 SSE headers here but sink.wrote would stay
+				// false forever: heartbeat() no-ops on !wrote, so the
+				// ticker.C case below would never emit another byte for
+				// the rest of this connection's life, and an idle-timeout
+				// proxy between the console and the browser could drop it
+				// as dead despite the connection being intentionally held
+				// open.
+				sink.wrote = true
 			}
 			flusher.Flush()
 		case <-ticker.C:

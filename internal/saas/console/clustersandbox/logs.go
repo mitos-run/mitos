@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -55,13 +56,19 @@ func (p clientsetPodLogStreamer) StreamPodLogs(ctx context.Context, ns, pod stri
 	return p.cs.CoreV1().Pods(ns).GetLogs(pod, &opts).Stream(ctx)
 }
 
-// logLineBufferCap bounds how many pod-log lines StreamLogs holds between the
-// upstream follow read and the sink write. A slow sink (a laggy client, or
-// one that stopped reading) must never make this accumulate unbounded memory:
-// once the buffer is full, the OLDEST queued line is dropped to make room for
-// the newest, so a lagging client sees a gap in the tail rather than the
-// console process growing without bound.
-const logLineBufferCap = 512
+// maxLogBufferBytes bounds the total BYTES StreamLogs holds queued between
+// the upstream follow read and the sink write. A prior line-COUNT cap (512
+// lines) let a slow sink accumulate up to 512 x maxLogLineBytes (~512 MiB)
+// per stream, since each line can independently be as large as
+// maxLogLineBytes; several concurrent slow viewers could exhaust the
+// multi-tenant console's memory. A slow sink (a laggy client, or one that
+// stopped reading) must never make this accumulate unbounded memory: once
+// the queued bytes exceed this cap, the OLDEST queued lines are dropped, by
+// bytes, to make room for the newest, so a lagging client sees a gap in the
+// tail rather than the console process growing without bound. A single line
+// is always <= maxLogLineBytes (1 MiB, enforced upstream by
+// discardOversizedLine), so it always fits within this cap on its own.
+const maxLogBufferBytes = 4 * 1024 * 1024
 
 // maxLogLineBytes bounds a single line's buffered length: a pod writing one
 // absurdly long line with no newline must not grow memory without bound
@@ -101,30 +108,28 @@ func (s *Control) StreamLogs(ctx context.Context, orgID, sandboxID string, sink 
 }
 
 // streamPodLines pumps newline-delimited lines from r into sink through a
-// bounded, drop-oldest buffer (logLineBufferCap) so a slow sink cannot make
-// this hold unbounded memory. It returns when ctx is done (r is closed, which
-// stops the upstream follow), r reaches a clean EOF (nil error), or
-// sink.Write errors (the client disconnected). A single line over
-// maxLogLineBytes does not end the follow: it is replaced by
+// byte-bounded, drop-oldest buffer (lineBuffer, capped at maxLogBufferBytes)
+// so a slow sink cannot make this hold unbounded memory. It returns when ctx
+// is done (r is closed, which stops the upstream follow), r reaches a clean
+// EOF (nil error), or sink.Write errors (the client disconnected). A single
+// line over maxLogLineBytes does not end the follow: it is replaced by
 // truncatedLineMarker and streaming continues with the next line.
 func streamPodLines(ctx context.Context, r io.ReadCloser, sink console.LogSink) error {
 	defer r.Close()
 
-	lines := make(chan []byte, logLineBufferCap)
-	scanDone := make(chan error, 1)
+	buf := newLineBuffer()
 	go func() {
-		defer close(lines)
 		br := bufio.NewReaderSize(r, maxLogLineBytes)
 		for {
 			line, err := readBoundedLine(br)
 			if len(line) > 0 {
-				pushDropOldest(lines, line)
+				buf.push(line)
 			}
 			if err != nil {
 				if err == io.EOF {
-					scanDone <- nil // a clean end, matching bufio.Scanner's nil Err() on EOF
+					buf.close(nil) // a clean end, matching bufio.Scanner's nil Err() on EOF
 				} else {
-					scanDone <- err
+					buf.close(err)
 				}
 				return
 			}
@@ -135,12 +140,15 @@ func streamPodLines(ctx context.Context, r io.ReadCloser, sink console.LogSink) 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case line, ok := <-lines:
-			if !ok {
-				return <-scanDone // nil on a clean EOF
+		case <-buf.notify:
+			lines, closed, err := buf.drain()
+			for _, line := range lines {
+				if writeErr := sink.Write(line); writeErr != nil {
+					return writeErr
+				}
 			}
-			if err := sink.Write(line); err != nil {
-				return err
+			if closed {
+				return err // nil on a clean EOF
 			}
 		}
 	}
@@ -205,20 +213,79 @@ func discardOversizedLine(br *bufio.Reader) ([]byte, error) {
 	}
 }
 
-// pushDropOldest sends line on ch, dropping the oldest queued line first if
-// ch is full. It never blocks: there is exactly one producer goroutine
-// (streamPodLines's scan loop above), so the drop-then-retry loop always
-// terminates in at most one drop.
-func pushDropOldest(ch chan []byte, line []byte) {
-	for {
-		select {
-		case ch <- line:
-			return
-		default:
-			select {
-			case <-ch:
-			default:
-			}
-		}
+// lineBuffer is a byte-bounded, drop-oldest queue of pending log lines
+// shared between streamPodLines's single producer goroutine (the upstream
+// scan loop) and its consumer (the ctx/notify select loop). It replaces a
+// plain buffered channel because a channel can only bound line COUNT, not
+// total bytes; lineBuffer instead tracks running byte size and drops from
+// the front until push's new line fits under maxLogBufferBytes.
+//
+// notify is a capacity-1 "something changed" signal, not a data channel: the
+// consumer wakes on it and then calls drain to actually read the queued
+// lines (and the closed/err state) under the lock. This is the standard
+// level-triggered wakeup idiom, so a signal coalesced by the capacity-1
+// buffer while the consumer is busy is never a lost wakeup: the consumer
+// always re-checks state after waking, and every state change (push, close)
+// posts to notify after releasing the lock.
+type lineBuffer struct {
+	mu     sync.Mutex
+	lines  [][]byte
+	bytes  int
+	notify chan struct{}
+	closed bool
+	err    error
+}
+
+func newLineBuffer() *lineBuffer {
+	return &lineBuffer{notify: make(chan struct{}, 1)}
+}
+
+// push appends line to the queue, then drops the OLDEST queued lines (by
+// bytes, never the just-appended newest one) until the total is back within
+// maxLogBufferBytes. A single line is always <= maxLogLineBytes (well under
+// maxLogBufferBytes, enforced upstream by discardOversizedLine), so the
+// newest line alone always fits and is never itself dropped.
+func (b *lineBuffer) push(line []byte) {
+	b.mu.Lock()
+	b.lines = append(b.lines, line)
+	b.bytes += len(line)
+	for b.bytes > maxLogBufferBytes && len(b.lines) > 1 {
+		b.bytes -= len(b.lines[0])
+		b.lines[0] = nil
+		b.lines = b.lines[1:]
+	}
+	b.mu.Unlock()
+	b.wake()
+}
+
+// close records the scan loop's terminal outcome (nil for a clean EOF, the
+// read error otherwise) for drain to report once every already-queued line
+// has been drained.
+func (b *lineBuffer) close(err error) {
+	b.mu.Lock()
+	b.closed = true
+	b.err = err
+	b.mu.Unlock()
+	b.wake()
+}
+
+// drain atomically takes every currently queued line (resetting the queue to
+// empty) along with the closed/err state, so the consumer can forward the
+// lines to sink and then decide whether to keep looping.
+func (b *lineBuffer) drain() (lines [][]byte, closed bool, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	lines, b.lines = b.lines, nil
+	b.bytes = 0
+	return lines, b.closed, b.err
+}
+
+// wake posts a non-blocking signal to notify; a already-pending signal (the
+// consumer has not yet woken to consume it) makes this a no-op, since the
+// consumer will observe the latest state on its next drain regardless.
+func (b *lineBuffer) wake() {
+	select {
+	case b.notify <- struct{}{}:
+	default:
 	}
 }
