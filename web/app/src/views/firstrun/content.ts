@@ -182,10 +182,23 @@ export function getFirstRun(uc?: string): FirstRunContent {
 // of whichever runtime tab they picked above. The CLI one-liner is `mitos run
 // <command>` (create, exec, terminate, documented in docs/cli.md). The curl
 // pair mirrors the same two calls the CLI makes under the hood: POST /v1/fork
-// (fields: template, id, per internal/mcp/httpbackend.go) then POST /v1/exec
-// with the sandbox id in the X-Sandbox-Id header (proto/sandbox/v1/sandbox.proto
-// ExecStreamRequest.command), so it is grounded in the real wire shape, not
-// invented.
+// (fields: template, id, per internal/mcp/httpbackend.go), then a runtime call
+// against the sandbox.v1.Sandbox Connect service.
+//
+// The runtime call is POST /sandbox.v1.Sandbox/ExecStream (the native Connect
+// path, id via the X-Sandbox-Id header), NOT the "friendly alias"
+// /v1/sandboxes/<id>/exec: that alias maps the "exec" verb to the bidi Exec
+// method (internal/saas/controlplane/proxy.go connectMethod, case "exec":
+// return "Exec"; mirrored in internal/saas/gateway.go runtimeMethod), which
+// per proto/sandbox/v1/sandbox.proto requires HTTP/2 duplex and a nested
+// {"open":{"command":...}} body (ExecRequest.open, an ExecOpen), not a flat
+// command string. ExecStream is the documented HTTP/1.1-reachable,
+// non-interactive counterpart (same proto file, ExecStreamRequest, field
+// `command`) and is what internal/mcp/httpbackend.go HTTPBackend.Exec calls
+// under the hood, so the flat {"command":"echo hello"} body below is grounded
+// in ExecStreamRequest.command, not invented. docs/api/v2-spec.md documents
+// the same native-path-plus-X-Sandbox-Id-header pattern for the sibling
+// RunCode server-streaming RPC.
 export const SYNTHETIC_TRIGGER = {
   cli: 'mitos run "echo hello"',
   curl: `\
@@ -193,7 +206,7 @@ curl -s -X POST https://api.mitos.run/v1/fork \\
   -H "Authorization: Bearer $MITOS_API_KEY" -H "Content-Type: application/json" \\
   -d '{"template":"python","id":"trigger-1"}'
 
-curl -s -X POST https://api.mitos.run/v1/exec \\
+curl -s -X POST https://api.mitos.run/sandbox.v1.Sandbox/ExecStream \\
   -H "Authorization: Bearer $MITOS_API_KEY" -H "X-Sandbox-Id: trigger-1" -H "Content-Type: application/json" \\
   -d '{"command":"echo hello"}'`,
 }
