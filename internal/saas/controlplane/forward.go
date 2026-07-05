@@ -254,7 +254,7 @@ func (k *K8sControlPlane) pollReady(ctx context.Context, ns, name string, starte
 		// The secrets gate gets its own 403 whose remediation names the exact
 		// wire-level opt-in, so an agent can self-correct in one round trip.
 		if c := rejectedCondition(&sb); c != nil {
-			if c.Reason == "SecretInheritanceDenied" {
+			if c.Reason == v1.ReasonSecretInheritanceDenied {
 				return errResp(withStatus(apierr.Get(apierr.CodeForbidden).
 					WithMessage("the fork was rejected: the source sandbox holds secrets").
 					WithCause(c.Message).
@@ -436,7 +436,7 @@ func (k *K8sControlPlane) readToken(ctx context.Context, ns, secretName string) 
 func rejectedCondition(sb *v1.Sandbox) *metav1.Condition {
 	for i := range sb.Status.Conditions {
 		c := &sb.Status.Conditions[i]
-		if c.Type == "Rejected" && c.Status == metav1.ConditionTrue {
+		if c.Type == v1.ConditionRejected && c.Status == metav1.ConditionTrue {
 			return c
 		}
 	}
