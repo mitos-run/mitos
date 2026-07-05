@@ -260,13 +260,17 @@ func viewOf(sb *v1.Sandbox, orgID string) console.SandboxView {
 	// written by Create from console.SandboxCreateRequest.VCPUs/MemGiB, both
 	// already int32 and bounds-checked against allowedVCPUs/allowedMemGiB, so
 	// this only matters for out-of-band edits.
-	if v, err := strconv.ParseInt(sb.Annotations[requestedVCPUsAnnotation], 10, 32); err == nil {
+	// The v > 0 guard rejects a negative annotation (e.g. a hand-edited or
+	// corrupted "-1") the same way an out-of-range or non-numeric one is
+	// already rejected: fields stay zero rather than reporting a negative
+	// VCPUs/MemBytes to a caller.
+	if v, err := strconv.ParseInt(sb.Annotations[requestedVCPUsAnnotation], 10, 32); err == nil && v > 0 {
 		vcpus = int32(v)
 	}
 	// memBytes = requested GiB << 30: bounding the parsed value to int32 here
 	// also bounds the shift result well within int64 (max ~2^31 << 30 ==
 	// 2^61), so it cannot overflow the way an unbounded int64 GiB value would.
-	if v, err := strconv.ParseInt(sb.Annotations[requestedMemGiBAnnotation], 10, 32); err == nil {
+	if v, err := strconv.ParseInt(sb.Annotations[requestedMemGiBAnnotation], 10, 32); err == nil && v > 0 {
 		memBytes = int64(v) << 30
 	}
 	return console.SandboxView{

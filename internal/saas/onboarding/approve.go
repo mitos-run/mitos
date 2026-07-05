@@ -137,7 +137,7 @@ func ApproveWaitlistEntry(ctx context.Context, allowlist Allowlist, email EmailS
 	}
 
 	if err := allowlist.Add(ctx, canonical, note, now); err != nil {
-		return "", fmt.Errorf("%w: %v", errApproveAllowlistAdd, err)
+		return "", fmt.Errorf("%w: %w", errApproveAllowlistAdd, err)
 	}
 	if err := email.SendApproved(ctx, delivery); err != nil {
 		return "", fmt.Errorf("onboarding: approve waitlist entry: send approved email: %w", err)

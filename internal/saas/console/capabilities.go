@@ -131,10 +131,18 @@ func defaultCapabilities() Capabilities {
 // request: capabilities must always be servable.
 func (c *Console) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	caps := c.deps.Capabilities
+	// Admin is explicitly reset here (rather than left at whatever
+	// deps.Capabilities.Admin happened to be) so the "an unauthenticated
+	// request always sees false" guarantee documented on the Admin field is
+	// enforced by this function itself, not by the convention that no code
+	// path currently sets that field on the boot-time default.
+	caps.Admin = false
 	if orgID, ok := OrgFromContext(r.Context()); ok && c.deps.Plans != nil {
 		if plan, err := c.deps.Plans.GetPlan(r.Context(), orgID); err == nil {
 			caps.Plan = plan
 			caps.Entitlements = billing.EntitlementsFor(plan, caps.Edition)
+		} else if c.deps.Log != nil {
+			c.deps.Log.Warn("capabilities: plan lookup failed, serving boot-time default", "org", orgID, "err", err.Error())
 		}
 	}
 	if accountID, ok := CallerFromContext(r.Context()); ok {

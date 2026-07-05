@@ -107,6 +107,30 @@ func TestGetIgnoresOutOfRangeSizeAnnotations(t *testing.T) {
 	}
 }
 
+// TestGetIgnoresNegativeSizeAnnotations asserts that a requested-size
+// annotation holding a negative value (a hand-edited or corrupted "-1", well
+// within the int32 range so it parses cleanly) is ignored exactly like an
+// out-of-range or non-numeric one, leaving VCPUs/MemBytes at zero rather
+// than reporting a negative size.
+func TestGetIgnoresNegativeSizeAnnotations(t *testing.T) {
+	s := sb("alice", "sb-a2", "Ready")
+	s.Annotations = map[string]string{
+		requestedVCPUsAnnotation:  "-1",
+		requestedMemGiBAnnotation: "-1",
+	}
+	c := newControl(t, s)
+	v, err := c.Get(context.Background(), "alice", "sb-a2")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if v.VCPUs != 0 {
+		t.Errorf("VCPUs = %d, want 0 (negative annotation ignored)", v.VCPUs)
+	}
+	if v.MemBytes != 0 {
+		t.Errorf("MemBytes = %d, want 0 (negative annotation ignored)", v.MemBytes)
+	}
+}
+
 // TestGetCrossOrgIsNotFound asserts a sandbox owned by another org is reported
 // as not-found (the namespace boundary plus the label check), indistinguishable
 // from a missing one.
