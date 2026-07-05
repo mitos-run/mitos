@@ -250,10 +250,23 @@ func viewOf(sb *v1.Sandbox, orgID string) console.SandboxView {
 	}
 	var vcpus int32
 	var memBytes int64
-	if v, err := strconv.Atoi(sb.Annotations[requestedVCPUsAnnotation]); err == nil {
+	// ParseInt with bitSize 32, not Atoi + int32(v): Atoi returns a platform
+	// int (64-bit on every real target), so a corrupted or hand-edited
+	// annotation holding a value outside the int32 range would silently
+	// truncate/wrap (CodeQL go/incorrect-integer-conversion) instead of being
+	// rejected. ParseInt(..., 32) fails for any out-of-range value, so the
+	// annotation is ignored (fields stay zero) exactly like a parse failure,
+	// never wrapped into a bogus (possibly negative) size. Real annotations are
+	// written by Create from console.SandboxCreateRequest.VCPUs/MemGiB, both
+	// already int32 and bounds-checked against allowedVCPUs/allowedMemGiB, so
+	// this only matters for out-of-band edits.
+	if v, err := strconv.ParseInt(sb.Annotations[requestedVCPUsAnnotation], 10, 32); err == nil {
 		vcpus = int32(v)
 	}
-	if v, err := strconv.Atoi(sb.Annotations[requestedMemGiBAnnotation]); err == nil {
+	// memBytes = requested GiB << 30: bounding the parsed value to int32 here
+	// also bounds the shift result well within int64 (max ~2^31 << 30 ==
+	// 2^61), so it cannot overflow the way an unbounded int64 GiB value would.
+	if v, err := strconv.ParseInt(sb.Annotations[requestedMemGiBAnnotation], 10, 32); err == nil {
 		memBytes = int64(v) << 30
 	}
 	return console.SandboxView{

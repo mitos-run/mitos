@@ -82,6 +82,31 @@ func TestGetMapsViewFields(t *testing.T) {
 	}
 }
 
+// TestGetIgnoresOutOfRangeSizeAnnotations asserts that a requested-size
+// annotation holding a value outside the int32 range (out-of-band edit or
+// corruption; Create itself never writes one, since it only accepts the
+// bounded allowedVCPUs/allowedMemGiB sets) is ignored like any other parse
+// failure, leaving VCPUs/MemBytes at zero, rather than silently truncating or
+// wrapping into a bogus (possibly negative) value.
+func TestGetIgnoresOutOfRangeSizeAnnotations(t *testing.T) {
+	s := sb("alice", "sb-a1", "Ready")
+	s.Annotations = map[string]string{
+		requestedVCPUsAnnotation:  "99999999999",
+		requestedMemGiBAnnotation: "99999999999",
+	}
+	c := newControl(t, s)
+	v, err := c.Get(context.Background(), "alice", "sb-a1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if v.VCPUs != 0 {
+		t.Errorf("VCPUs = %d, want 0 (out-of-range annotation ignored)", v.VCPUs)
+	}
+	if v.MemBytes != 0 {
+		t.Errorf("MemBytes = %d, want 0 (out-of-range annotation ignored)", v.MemBytes)
+	}
+}
+
 // TestGetCrossOrgIsNotFound asserts a sandbox owned by another org is reported
 // as not-found (the namespace boundary plus the label check), indistinguishable
 // from a missing one.

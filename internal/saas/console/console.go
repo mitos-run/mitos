@@ -1174,9 +1174,13 @@ func auditStreamingGatedError() apierr.Error {
 		// prefers cause over message), so it names the Team plan directly
 		// rather than only describing the gap abstractly.
 		Cause: "audit-sink streaming (forwarding events to webhook, s3, splunk, or datadog) requires the Team plan",
-		Remediation: "Upgrade to the Team plan to forward audit events to configured sinks (webhook, s3, splunk, datadog). " +
-			"The audit log itself, and its NDJSON export, remain fully available on every plan.",
-		Status: http.StatusPaymentRequired,
+		// A single string literal, not a "..." + "..." concatenation: hack/apierrlint
+		// (issue #28's static remediation guarantee) only recognizes a bare
+		// *ast.BasicLit as a provably non-empty Remediation, so a concatenated
+		// expression reads as "non-literal, cannot prove non-empty" and fails the
+		// go-lint CI job even though the string itself is non-empty at runtime.
+		Remediation: "Upgrade this organization to the Team plan, or self-host the community edition, which includes audit streaming. The audit log itself, and its NDJSON export, remain fully available on every plan.",
+		Status:      http.StatusPaymentRequired,
 	}
 }
 

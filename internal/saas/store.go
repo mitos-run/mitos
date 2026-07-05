@@ -342,11 +342,22 @@ func (s *MemStore) RevokeApiKey(_ context.Context, id string, at time.Time) erro
 	return nil
 }
 
+// CreateInvitation stores inv, defaulting a zero CreatedAt to now to match
+// PgStore: that backend's created_at column is NOT NULL, so PgStore.
+// CreateInvitation must default a zero CreatedAt rather than insert NULL.
+// Defaulting here too keeps both Store implementations behaving identically
+// for a caller that omits CreatedAt, rather than only one of them minting a
+// timestamp. ExpiresAt is left as given (zero included): unlike created_at,
+// a zero ExpiresAt is meaningful (EffectiveState treats it as "does not
+// expire"), and every real caller sets it explicitly, so it is not defaulted.
 func (s *MemStore) CreateInvitation(_ context.Context, inv Invitation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.invitations[inv.ID]; ok {
 		return ErrConflict
+	}
+	if inv.CreatedAt.IsZero() {
+		inv.CreatedAt = time.Now().UTC()
 	}
 	s.invitations[inv.ID] = inv
 	s.inviteHash[inv.TokenHash] = inv.ID

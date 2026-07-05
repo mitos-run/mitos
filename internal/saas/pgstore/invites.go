@@ -14,7 +14,21 @@ import (
 // CreateInvitation inserts a new invitation row. A duplicate id or token hash
 // violates a unique constraint and surfaces as saas.ErrConflict, matching
 // MemStore.
+//
+// created_at and expires_at are NOT NULL columns (migrations/0014_invitations.sql):
+// unlike MemStore, which happily stores a caller's zero-value time.Time as-is,
+// inserting NULL for either would violate the constraint. A zero CreatedAt or
+// ExpiresAt on the way in is defaulted to time.Now().UTC() here so every
+// caller, real or test, gets a valid row instead of a 23502 error. Real
+// callers (internal/saas/invites.go) always set both fields explicitly, so
+// this only matters for defensively-constructed invitations.
 func (s *PgStore) CreateInvitation(ctx context.Context, inv saas.Invitation) error {
+	if inv.CreatedAt.IsZero() {
+		inv.CreatedAt = time.Now().UTC()
+	}
+	if inv.ExpiresAt.IsZero() {
+		inv.ExpiresAt = time.Now().UTC()
+	}
 	const q = `
         INSERT INTO invitations (id, org_id, email, role, token_hash, state, inviter_id, created_at, expires_at)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
