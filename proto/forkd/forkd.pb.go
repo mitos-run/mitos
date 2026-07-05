@@ -102,7 +102,16 @@ type CreateTemplateRequest struct {
 	// CONTENT changed (issue #475): digest verification proves the on-disk
 	// bytes are intact, not that they still match the requested spec. False
 	// (the default) lets the node reuse a verified on-disk template.
-	ForceRebuild  bool `protobuf:"varint,10,opt,name=force_rebuild,json=forceRebuild,proto3" json:"force_rebuild,omitempty"`
+	ForceRebuild bool `protobuf:"varint,10,opt,name=force_rebuild,json=forceRebuild,proto3" json:"force_rebuild,omitempty"`
+	// warm_kernel, when true, has the node run one trivial run_code cell in the
+	// build VM AFTER init and the workload start and BEFORE the snapshot, so the
+	// code-interpreter kernel is captured live and every fork skips its ~5s lazy
+	// start on the first run_code. The warmup cell draws no randomness (the
+	// kernel's Python PRNGs stay unseeded in the snapshot; each fork seeds fresh
+	// after the per-fork CRNG reseed, see docs/fork-correctness.md) and fails
+	// OPEN: an image without the kernel logs and builds unchanged. False (the
+	// default) keeps the lazy kernel start.
+	WarmKernel    bool `protobuf:"varint,11,opt,name=warm_kernel,json=warmKernel,proto3" json:"warm_kernel,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -203,6 +212,13 @@ func (x *CreateTemplateRequest) GetWorkload() *WorkloadSpec {
 func (x *CreateTemplateRequest) GetForceRebuild() bool {
 	if x != nil {
 		return x.ForceRebuild
+	}
+	return false
+}
+
+func (x *CreateTemplateRequest) GetWarmKernel() bool {
+	if x != nil {
+		return x.WarmKernel
 	}
 	return false
 }
@@ -3177,7 +3193,7 @@ var File_proto_forkd_proto protoreflect.FileDescriptor
 
 const file_proto_forkd_proto_rawDesc = "" +
 	"\n" +
-	"\x11proto/forkd.proto\x12\x05forkd\"\x89\x03\n" +
+	"\x11proto/forkd.proto\x12\x05forkd\"\xaa\x03\n" +
 	"\x15CreateTemplateRequest\x12\x1f\n" +
 	"\vtemplate_id\x18\x01 \x01(\tR\n" +
 	"templateId\x12\x14\n" +
@@ -3191,7 +3207,9 @@ const file_proto_forkd_proto_rawDesc = "" +
 	"\x06kek_id\x18\b \x01(\tR\x05kekId\x12/\n" +
 	"\bworkload\x18\t \x01(\v2\x13.forkd.WorkloadSpecR\bworkload\x12#\n" +
 	"\rforce_rebuild\x18\n" +
-	" \x01(\bR\fforceRebuild\"\xc0\x01\n" +
+	" \x01(\bR\fforceRebuild\x12\x1f\n" +
+	"\vwarm_kernel\x18\v \x01(\bR\n" +
+	"warmKernel\"\xc0\x01\n" +
 	"\fWorkloadSpec\x12\x18\n" +
 	"\acommand\x18\x01 \x03(\tR\acommand\x12.\n" +
 	"\x03env\x18\x02 \x03(\v2\x1c.forkd.WorkloadSpec.EnvEntryR\x03env\x12.\n" +

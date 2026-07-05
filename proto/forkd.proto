@@ -83,6 +83,15 @@ message CreateTemplateRequest {
   // bytes are intact, not that they still match the requested spec. False
   // (the default) lets the node reuse a verified on-disk template.
   bool force_rebuild = 10;
+  // warm_kernel, when true, has the node run one trivial run_code cell in the
+  // build VM AFTER init and the workload start and BEFORE the snapshot, so the
+  // code-interpreter kernel is captured live and every fork skips its ~5s lazy
+  // start on the first run_code. The warmup cell draws no randomness (the
+  // kernel's Python PRNGs stay unseeded in the snapshot; each fork seeds fresh
+  // after the per-fork CRNG reseed, see docs/fork-correctness.md) and fails
+  // OPEN: an image without the kernel logs and builds unchanged. False (the
+  // default) keeps the lazy kernel start.
+  bool warm_kernel = 11;
 }
 
 // WorkloadSpec is the serving workload the controller declares for a template

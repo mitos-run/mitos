@@ -30,7 +30,7 @@ type keyProbeEngine struct {
 	forkKeyErr   error
 }
 
-func (e *keyProbeEngine) CreateTemplate(id, _ string, _ []string, _ []volume.Spec, _ *firecracker.WorkloadSpec, _ *firecracker.VMResources, _ bool) error {
+func (e *keyProbeEngine) CreateTemplate(id, _ string, _ []string, _ []volume.Spec, _ *firecracker.WorkloadSpec, _ *firecracker.VMResources, _ bool, _ bool) error {
 	k, err := e.prov.KeyFor(id)
 	if err != nil {
 		e.createKeyErr = err
