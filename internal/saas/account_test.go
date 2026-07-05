@@ -38,6 +38,71 @@ func TestSignUpCreatesPersonalOrgAndOwnerMembership(t *testing.T) {
 	}
 }
 
+// TestSignUpStampsHomeRegion asserts a new Personal org is stamped with the
+// deployment's placement registry default region (issue #712 phase 0), and
+// that a service built with no WithHomeRegion option leaves it empty
+// (meaning "the deployment's registry default", resolved elsewhere).
+func TestSignUpStampsHomeRegion(t *testing.T) {
+	store := NewMemStore()
+	svc := NewAccountService(store, NewKeyService(store), WithHomeRegion("fra"))
+	_, org, err := svc.SignUp(context.Background(), "region@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	if org.HomeRegion != "fra" {
+		t.Errorf("HomeRegion = %q, want fra", org.HomeRegion)
+	}
+	stored, err := store.GetOrg(context.Background(), org.ID)
+	if err != nil {
+		t.Fatalf("GetOrg: %v", err)
+	}
+	if stored.HomeRegion != "fra" {
+		t.Errorf("stored HomeRegion = %q, want fra", stored.HomeRegion)
+	}
+
+	svcNoRegion, _ := newAccountFixture(t)
+	_, orgNoRegion, err := svcNoRegion.SignUp(context.Background(), "noregion@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	if orgNoRegion.HomeRegion != "" {
+		t.Errorf("HomeRegion with no WithHomeRegion option = %q, want empty", orgNoRegion.HomeRegion)
+	}
+}
+
+// TestOrganizationsForResolvesFromMembershipsAndDedups asserts OrganizationsFor
+// resolves each unique org named by the given memberships (the zero-extra-list
+// path used by the account view), deduplicates repeated org ids, and skips an
+// org that no longer exists rather than failing the whole map.
+func TestOrganizationsForResolvesFromMemberships(t *testing.T) {
+	svc, store := newAccountFixture(t)
+	ctx := context.Background()
+	orgA := Organization{ID: "org-a", Name: "A", HomeRegion: "fra"}
+	orgB := Organization{ID: "org-b", Name: "B", HomeRegion: "iad"}
+	if err := store.PutOrg(ctx, orgA); err != nil {
+		t.Fatalf("PutOrg A: %v", err)
+	}
+	if err := store.PutOrg(ctx, orgB); err != nil {
+		t.Fatalf("PutOrg B: %v", err)
+	}
+	mems := []Membership{
+		{AccountID: "acct-1", OrgID: "org-a", Role: RoleOwner},
+		{AccountID: "acct-1", OrgID: "org-b", Role: RoleMember},
+		{AccountID: "acct-1", OrgID: "org-a", Role: RoleOwner},     // duplicate id
+		{AccountID: "acct-1", OrgID: "org-gone", Role: RoleMember}, // never stored
+	}
+	got := svc.OrganizationsFor(ctx, mems)
+	if len(got) != 2 {
+		t.Fatalf("OrganizationsFor returned %d orgs, want 2: %+v", len(got), got)
+	}
+	if got["org-a"].HomeRegion != "fra" || got["org-b"].HomeRegion != "iad" {
+		t.Errorf("resolved orgs = %+v, want org-a fra and org-b iad", got)
+	}
+	if _, ok := got["org-gone"]; ok {
+		t.Error("a membership to a missing org must be skipped, not surfaced")
+	}
+}
+
 // TestSignUpRejectsDuplicateEmail asserts a second sign-up on the same email
 // fails rather than creating a second account.
 func TestSignUpRejectsDuplicateEmail(t *testing.T) {

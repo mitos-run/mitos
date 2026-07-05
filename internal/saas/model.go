@@ -55,6 +55,13 @@ type Organization struct {
 	CreatedAt time.Time
 	// Personal marks the auto-created default org for a single account.
 	Personal bool
+	// HomeRegion is the org's data-residency anchor (issue #712 phase 0): the
+	// placement.Registry value name stamped at org creation time, immutable
+	// afterward. Empty means "the deployment's registry default", so old rows
+	// and community installs that predate this field keep working without a
+	// backfill. It is read-only after creation; a region move is a future,
+	// explicit copy operation, never an in-place update.
+	HomeRegion string
 }
 
 // Role is a membership role within an organization. The role set is intentionally

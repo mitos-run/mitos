@@ -181,6 +181,44 @@ def test_daytona_style_script_runs_unchanged(monkeypatch, tmp_path):
     assert fake.terminated is True
 
 
+def test_create_maps_config_target_onto_region(monkeypatch):
+    """DaytonaConfig(target=...) (issue #712 phase 0) is no longer a silent
+    no-op: Daytona.create forwards it as mitos.create's region= kwarg, so a
+    Daytona-style script gets placement selection for free by supplying the
+    field it already had reason to set."""
+    fake = _FakeSandbox()
+    captured = {}
+
+    def fake_create_direct(*args, **kwargs):
+        captured.update(kwargs)
+        return fake
+
+    monkeypatch.setattr("mitos.daytona._create_direct", fake_create_direct)
+
+    daytona = Daytona(DaytonaConfig(api_key="dtn_x", api_url="http://localhost:8080", target="fra"))
+    daytona.create(CreateSandboxFromSnapshotParams(language="python"))
+
+    assert captured.get("region") == "fra"
+
+
+def test_create_with_no_target_leaves_region_none(monkeypatch):
+    """A DaytonaConfig with no target requests no region (the org's home
+    region), matching mitos.create's own default."""
+    fake = _FakeSandbox()
+    captured = {}
+
+    def fake_create_direct(*args, **kwargs):
+        captured.update(kwargs)
+        return fake
+
+    monkeypatch.setattr("mitos.daytona._create_direct", fake_create_direct)
+
+    daytona = Daytona(DaytonaConfig(api_key="dtn_x", api_url="http://localhost:8080"))
+    daytona.create(CreateSandboxFromSnapshotParams(language="python"))
+
+    assert captured.get("region") is None
+
+
 def test_exec_folds_cwd_and_env_into_command():
     """DirectSandbox.exec has no cwd / env slot, so the shim folds them into the
     shell command rather than dropping them."""

@@ -120,7 +120,10 @@ func (s *NodeRegistrySource) Collect(ctx context.Context) ([]Sample, error) {
 			s.skipped.Add(1)
 			continue
 		}
-		samples, _ := SamplesFromReport(node.Name, at, report, s.orgs.OrgFor, s.vcpus)
+		// regionOf is nil: the NodeRegistrySource path (forkd-managed engine
+		// nodes) has no placement concept, unlike the husk-pod path
+		// (HuskSource), so every sample here carries an empty Region.
+		samples, _ := SamplesFromReport(node.Name, at, report, s.orgs.OrgFor, s.vcpus, nil)
 		out = append(out, samples...)
 	}
 	return out, nil

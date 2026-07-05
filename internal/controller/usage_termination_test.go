@@ -53,9 +53,10 @@ func TestRecordHuskTerminations(t *testing.T) {
 			Name:      "python-husk-2blsp",
 			Namespace: "mitos-org-acme",
 			Labels: map[string]string{
-				huskLabel:       "true",
-				huskClaimLabel:  "sb-82813f5c",
-				"mitos.run/org": "acme",
+				huskLabel:             "true",
+				huskClaimLabel:        "sb-82813f5c",
+				"mitos.run/org":       "acme",
+				tenant.RegionLabelKey: "fra",
 			},
 		},
 	}
@@ -104,6 +105,9 @@ func TestRecordHuskTerminations(t *testing.T) {
 	}
 	if got.OrgID != "acme" {
 		t.Errorf("OrgID = %q, want acme (from the trusted controller-stamped label)", got.OrgID)
+	}
+	if got.Region != "fra" {
+		t.Errorf("Region = %q, want fra (issue #712 phase 0, best-effort from the trusted pod label)", got.Region)
 	}
 	if !got.StartedAt.Equal(started.Time) {
 		t.Errorf("StartedAt = %v, want the claim's %v", got.StartedAt, started.Time)

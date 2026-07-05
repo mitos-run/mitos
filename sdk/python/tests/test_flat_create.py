@@ -665,6 +665,69 @@ def test_flat_create_auto_generates_idempotency_key(monkeypatch):
     assert captured["fork_key"] == "caller-key"
 
 
+def test_flat_create_sends_region_only_when_set(monkeypatch):
+    """mitos.create(region=...) (issue #712 phase 0) forwards region in the
+    /v1/fork POST body only when set, so a caller who never passes it (the
+    overwhelming majority today) sends the exact same body shape as before
+    this field existed; omitting it means the org's home region."""
+    captured = {}
+
+    class _RecordingTransport(httpx.BaseTransport):
+        def handle_request(self, request):
+            if request.url.path == "/v1/templates":
+                return httpx.Response(200, json={"id": "python", "ready": True})
+            if request.url.path == "/v1/fork":
+                body = json.loads(request.content)
+                captured["body"] = body
+                return httpx.Response(
+                    200,
+                    json={"id": body["id"], "template_id": "python",
+                          "endpoint": "http://localhost", "fork_time_ms": 0.5},
+                )
+            return httpx.Response(404, json={"error": {"code": "not_found"}})
+
+    server = SandboxServer(url="http://testserver", api_key="sk-test")
+    server._http = httpx.Client(transport=_RecordingTransport())
+    server.ensure_template("python")
+
+    server.fork("python", id="region-1", region="fra")
+    assert captured["body"].get("region") == "fra"
+
+    server.fork("python", id="region-2")
+    assert "region" not in captured["body"], "omitted region must not appear in the body at all"
+
+
+def test_flat_create_module_function_threads_region(monkeypatch):
+    """The top-level mitos.create(region=...) reaches DirectSandbox.create and
+    SandboxServer.fork, ending up in the /v1/fork body, exercising the full
+    passthrough chain rather than just SandboxServer.fork in isolation."""
+    captured = {}
+
+    class _RecordingTransport(httpx.BaseTransport):
+        def handle_request(self, request):
+            if request.url.path == "/v1/templates":
+                return httpx.Response(200, json={"id": "python", "ready": True})
+            if request.url.path == "/v1/fork":
+                body = json.loads(request.content)
+                captured["body"] = body
+                return httpx.Response(
+                    200,
+                    json={"id": body["id"], "template_id": "python",
+                          "endpoint": "http://localhost", "fork_time_ms": 0.5},
+                )
+            return httpx.Response(404, json={"error": {"code": "not_found"}})
+
+    def _fake_from_auth(cls, api_key=None, base_url=None):
+        s = SandboxServer(url="http://testserver", api_key=api_key)
+        s._http = httpx.Client(transport=_RecordingTransport())
+        return s
+
+    monkeypatch.setattr(SandboxServer, "from_auth", classmethod(_fake_from_auth))
+
+    mitos.create("python", api_key="sk-test", region="iad")
+    assert captured["body"].get("region") == "iad"
+
+
 # ---------------------------------------------------------------------------
 # Async parity (mitos.aio): the flat handle over an ASGI transport.
 # ---------------------------------------------------------------------------

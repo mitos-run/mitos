@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"mitos.run/mitos/internal/saas/placement"
 )
 
 // getCaps issues an UNAUTHENTICATED GET /console/capabilities. Capabilities are
@@ -60,6 +62,46 @@ func TestCapabilitiesDefaultsToCommunity(t *testing.T) {
 	}
 	if len(caps.Secrets.Providers) != 1 || caps.Secrets.Providers[0] != "kube" {
 		t.Errorf("secrets.providers = %v, want [kube]", caps.Secrets.Providers)
+	}
+	if caps.Placement.Key != "cluster" {
+		t.Errorf("placement.key = %q, want cluster", caps.Placement.Key)
+	}
+	if caps.Placement.Multi() {
+		t.Error("community default placement should be single-value (no picker)")
+	}
+	if !caps.Placement.Valid("default") {
+		t.Errorf("placement.values = %+v, want a valid \"default\" value", caps.Placement.Values)
+	}
+}
+
+// TestCapabilitiesPlacementEchoedVerbatim asserts a deployment-configured
+// placement registry (issue #712 phase 0), as cmd/console's
+// capabilitiesFromEnv builds from MITOS_CONSOLE_PLACEMENT_KEY/VALUES, is
+// returned unchanged: a hosted multi-value registry advertises a picker
+// (Multi() true), and every configured value validates.
+func TestCapabilitiesPlacementEchoedVerbatim(t *testing.T) {
+	want := Capabilities{
+		Edition:   "hosted",
+		Teams:     true,
+		IDP:       "oidc",
+		Proof:     true,
+		Ownership: "hosted",
+		Secrets:   SecretsCapability{Providers: []string{"kube"}},
+		Placement: placement.New("region", "fra:Frankfurt (EU),iad:Ashburn (US)"),
+	}
+	c := New(Deps{Capabilities: want})
+	_, caps := getCaps(t, c)
+	if caps.Placement.Key != "region" {
+		t.Errorf("placement.key = %q, want region", caps.Placement.Key)
+	}
+	if !caps.Placement.Multi() {
+		t.Error("two-value placement registry should advertise Multi() true")
+	}
+	if !caps.Placement.Valid("fra") || !caps.Placement.Valid("iad") {
+		t.Errorf("placement.values = %+v, want fra and iad both valid", caps.Placement.Values)
+	}
+	if caps.Placement.DefaultName() != "fra" {
+		t.Errorf("placement default = %q, want fra", caps.Placement.DefaultName())
 	}
 }
 

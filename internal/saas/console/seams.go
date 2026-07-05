@@ -75,6 +75,14 @@ type SandboxView struct {
 	// unassigned. It is populated by the resource-project store in the list and
 	// inspect handlers; it is never stored in the SandboxControl itself.
 	ProjectID string `json:"project_id"`
+	// Region is the placement value (issue #712 phase 0) this sandbox's tree
+	// root was created in, read back from the tenant.RegionLabelKey label.
+	// Empty means the deployment's registry default (either the sandbox
+	// predates this field, or the request never named a region). A fork
+	// always carries its parent's Region verbatim: a live CoW fork cannot
+	// cross clusters, so region is a property of the tree, not of each
+	// sandbox individually.
+	Region string `json:"region"`
 }
 
 // CreateSandboxRequest is the input to SandboxControl.Create: the template
@@ -91,6 +99,15 @@ type CreateSandboxRequest struct {
 	Template string
 	VCPUs    int32
 	MemGiB   int32
+	// Region is the placement value (issue #712 phase 0) requested for this
+	// sandbox's tree root. Empty means "the org's home region" (which itself
+	// falls back to the deployment's registry default): the console handler
+	// leaves it empty rather than resolving it, so an adapter that never
+	// implements multi-cluster placement (every Phase 0 adapter) can ignore
+	// it entirely. When non-empty the console handler has ALREADY validated
+	// it against the deployment's placement.Registry (Registry.Valid) before
+	// Create is called; an adapter does not need to re-validate it.
+	Region string
 }
 
 // ExecResult is the outcome of SandboxControl.Exec: exactly the shape the

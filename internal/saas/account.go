@@ -18,6 +18,11 @@ type AccountService struct {
 	keys  *KeyService
 	now   func() time.Time
 	idgen func() string
+	// homeRegion is the deployment's placement registry default (issue #712
+	// phase 0), stamped on the Personal org SignUp mints. Empty is a valid
+	// value: it means "the deployment's registry default", resolved wherever
+	// HomeRegion is read, not encoded as a literal here.
+	homeRegion string
 }
 
 // NewAccountService builds an account service over store and the key service.
@@ -28,7 +33,7 @@ func NewAccountService(store Store, keys *KeyService, opts ...KeyServiceOption) 
 	for _, o := range opts {
 		o(cfg)
 	}
-	return &AccountService{store: store, keys: keys, now: cfg.now, idgen: cfg.idgen}
+	return &AccountService{store: store, keys: keys, now: cfg.now, idgen: cfg.idgen, homeRegion: cfg.homeRegion}
 }
 
 // SignUp provisions a new account and its Personal organization, makes the
@@ -44,10 +49,11 @@ func (s *AccountService) SignUp(ctx context.Context, email string) (Account, Org
 	}
 	now := s.now()
 	org := Organization{
-		ID:        s.idgen(),
-		Name:      "Personal",
-		CreatedAt: now,
-		Personal:  true,
+		ID:         s.idgen(),
+		Name:       "Personal",
+		CreatedAt:  now,
+		Personal:   true,
+		HomeRegion: s.homeRegion,
 	}
 	acct := Account{
 		ID:            s.idgen(),
@@ -106,6 +112,25 @@ func (s *AccountService) Organizations(ctx context.Context, accountID string) ([
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
+}
+
+// OrganizationsFor resolves the orgs named by mems, keyed by org id. It is the
+// zero-extra-round-trip variant of Organizations for callers that already hold
+// the account's memberships (from Profile): it skips the membership list and
+// does one GetOrg per unique org. Best-effort, matching Organizations: a
+// failed org lookup is skipped rather than failing the whole map, so a caller
+// joining orgs onto a view degrades to a missing entry rather than an error.
+func (s *AccountService) OrganizationsFor(ctx context.Context, mems []Membership) map[string]Organization {
+	out := make(map[string]Organization, len(mems))
+	for _, m := range mems {
+		if _, ok := out[m.OrgID]; ok {
+			continue
+		}
+		if org, err := s.store.GetOrg(ctx, m.OrgID); err == nil {
+			out[m.OrgID] = org
+		}
+	}
+	return out
 }
 
 // isMember reports whether accountID belongs to orgID. It is the authorization

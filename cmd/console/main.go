@@ -82,16 +82,19 @@ func main() {
 		log.Fatalf("persistence: %v", err)
 	}
 	defer closeStore()
+	// caps is built before the account service so its Placement registry
+	// default (issue #712 phase 0) can be threaded into WithHomeRegion: every
+	// org SignUp mints from here on is stamped with the deployment's
+	// placement default at creation time.
+	caps := capabilitiesFromEnv()
 	keys := saas.NewKeyService(store)
-	accounts := saas.NewAccountService(store, keys)
+	accounts := saas.NewAccountService(store, keys, saas.WithHomeRegion(caps.Placement.DefaultName()))
 	// invitations shares the SAME durable store as accounts/orgs/memberships,
 	// so an accepted invite's membership and the invitation row itself are
 	// both backed by Postgres when configured (in-memory in dev). The email
 	// sender is the same SMTP-or-dev-log seam onboarding uses; SendInvite
 	// fails closed if MITOS_ONBOARDING_INVITE_URL is not set.
 	invitations := saas.NewInvitationService(store, buildEmailSender(logger))
-
-	caps := capabilitiesFromEnv()
 	// One status store is shared by the BFF billing view, the billing webhook,
 	// and the drawdown service, so a provider event (payment failed / canceled)
 	// is reflected in the console. Durable Postgres when configured (a past_due

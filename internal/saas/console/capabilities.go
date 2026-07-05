@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"mitos.run/mitos/internal/saas/billing"
+	"mitos.run/mitos/internal/saas/placement"
 )
 
 // Capabilities is the deployment-level configuration the console advertises at
@@ -74,6 +75,13 @@ type Capabilities struct {
 	// The SPA renders it in the sidebar footer and includes it in feedback
 	// diagnostics so a report always carries what build produced it.
 	Version string `json:"version"`
+	// Placement is the deployment's placement registry (issue #712 phase 0):
+	// the operator-defined key (hosted: "region"; self-host: whatever the
+	// operator names it) and the values it advertises. The console's
+	// NewSandboxModal shows a picker ONLY when Placement.Multi() is true; a
+	// single-value deployment (the Phase 0 default everywhere) applies its
+	// one value silently with no picker at all.
+	Placement placement.Registry `json:"placement"`
 }
 
 // FeedbackCapability tells the SPA where composed feedback goes. There is NO
@@ -115,6 +123,7 @@ func defaultCapabilities() Capabilities {
 		Entitlements:   billing.EntitlementsFor(billing.PlanFree, "community"),
 		Feedback:       FeedbackCapability{Channel: "github", Target: "mitos-run/mitos"},
 		Version:        "dev",
+		Placement:      placement.New("cluster", "default"),
 	}
 }
 

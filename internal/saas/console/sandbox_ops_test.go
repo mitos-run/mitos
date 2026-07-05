@@ -92,6 +92,60 @@ func TestCreateSandboxRejectsOutOfBoundsVCPUsAndMem(t *testing.T) {
 	}
 }
 
+// TestCreateSandboxAcceptsValidRegion asserts a region matching the
+// deployment's placement registry (issue #712 phase 0; newFixture's default
+// Console gets the community default registry, key "cluster" value
+// "default") is accepted and carried onto the created sandbox's view.
+func TestCreateSandboxAcceptsValidRegion(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes", `{"template":"t","vcpus":1,"mem_gib":1,"region":"default"}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var sb SandboxView
+	decode(t, w, &sb)
+	if sb.Region != "default" {
+		t.Errorf("created sandbox Region = %q, want default", sb.Region)
+	}
+}
+
+// TestCreateSandboxRejectsUnknownRegion asserts a region that is not in the
+// deployment's placement registry is refused with a 400 naming the valid
+// values in its remediation (the LLM-legible error rule, issue #28), rather
+// than silently falling through to the adapter.
+func TestCreateSandboxRejectsUnknownRegion(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes", `{"template":"t","vcpus":1,"mem_gib":1,"region":"iad"}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Remediation string `json:"remediation"`
+		} `json:"error"`
+	}
+	decode(t, w, &body)
+	if !strings.Contains(body.Error.Remediation, "default") {
+		t.Errorf("remediation = %q, want it to name the valid value \"default\"", body.Error.Remediation)
+	}
+}
+
+// TestCreateSandboxOmittedRegionLeavesItEmpty asserts a create request with
+// no region field succeeds and leaves SandboxView.Region empty (meaning the
+// org's home region), rather than requiring every caller to specify one.
+func TestCreateSandboxOmittedRegionLeavesItEmpty(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes", `{"template":"t","vcpus":1,"mem_gib":1}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var sb SandboxView
+	decode(t, w, &sb)
+	if sb.Region != "" {
+		t.Errorf("created sandbox Region = %q, want empty", sb.Region)
+	}
+}
+
 func TestCreateSandboxRejectsInvalidJSON(t *testing.T) {
 	f := newFixture(t)
 	w := f.reqBody(t, "POST", "/console/sandboxes", `{not json`, f.aliceAcct, f.aliceOrg)
