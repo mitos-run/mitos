@@ -118,7 +118,7 @@ All eight are required checks on main; main requires branches to be up to date.
 
 Opening a PR is not the end of the job; the PR is yours until it merges:
 
-1. **Conform to the template and policy before pushing.** The pr-policy workflow enforces a conventional-commit title (types: feat, fix, docs, ci, chore, refactor, test; no other types), the required body sections (`## Thinking Path`, `## Verification`, `## Model Used` with real content), no em or en dashes in added lines, and no internal references. Write the PR to pass these on the first run, not after a red check.
+1. **Conform to the template and policy before pushing.** The pr-policy workflow enforces a conventional-commit title (types: feat, fix, docs, ci, chore, refactor, test; no other types), all required body sections from `.github/pull_request_template.md` (the pr-policy workflow hard-fails on missing `## Thinking Path`, `## Verification`, or `## Model Used` with real content; fill the rest of the template honestly too), no em or en dashes in added lines, and no internal references. Write the PR to pass these on the first run, not after a red check.
 2. **Drive CI green yourself.** Watch the checks after every push; investigate and fix every failure. Never leave a PR red, never ask a human to shepherd a check you can fix, and never merge with a failing or skipped required check. Flaky reruns are a last resort after reading the failure, not a first response.
 3. **Resolve ALL CodeRabbit feedback.** Triage every CodeRabbit comment like a human review finding: fix what is right, and reply with a concrete technical rebuttal where it is wrong; never ignore or blanket-dismiss. The PR is not mergeable while CodeRabbit comments sit unaddressed.
 
