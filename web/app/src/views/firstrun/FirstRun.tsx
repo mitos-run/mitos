@@ -281,6 +281,12 @@ const styles = `
   margin: 0 0 var(--space-3);
   display: block;
 }
+.firstrun-troubleshoot-note {
+  font-size: var(--step--1);
+  color: var(--ink-2);
+  margin: 0;
+  line-height: var(--lh-base);
+}
 /* Celebration: Division glyph + fork-tree link, alongside the confetti burst. */
 .firstrun-celebrate-glyph {
   display: flex;

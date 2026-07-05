@@ -2,9 +2,10 @@
 // optional object) for the sentence-style surfaces: the Instruments overview's
 // recent-activity panel and (for the actor/target cells) the Audit table. A
 // per-action template covers every action code the console currently emits;
-// an action this map doesn't recognise (e.g. a future invite.* action) falls
-// back to showing the raw action code as the verb with no object, so the UI
-// never silently drops or garbles an event type it doesn't understand yet.
+// an action this map doesn't recognise (e.g. a future invite.transfer action)
+// falls back to showing the raw action code as the verb with no object, so
+// the UI never silently drops or garbles an event type it doesn't understand
+// yet.
 import type { AuditEvent } from '../api'
 
 export type AuditSentence = {
@@ -36,6 +37,14 @@ const TEMPLATES: Record<string, Template> = {
   'secret.delete': (e) => ({ verb: 'deleted secret', object: targetLabel(e) }),
   'audit.sink.create': (e) => ({ verb: 'added an audit sink', object: targetLabel(e) }),
   'audit.sink.delete': (e) => ({ verb: 'removed an audit sink', object: targetLabel(e) }),
+  'invite.create': (e) => ({ verb: 'invited', object: targetLabel(e) }),
+  'invite.accept': () => ({ verb: 'accepted an invitation', object: '' }),
+  'invite.revoke': (e) => ({ verb: 'revoked the invitation for', object: targetLabel(e) }),
+  'invite.resend': (e) => ({ verb: 'resent the invitation to', object: targetLabel(e) }),
+  'member.remove': (e) => ({ verb: 'removed', object: targetLabel(e) }),
+  'sandbox.create': (e) => ({ verb: 'created sandbox', object: targetLabel(e) }),
+  'sandbox.fork': (e) => ({ verb: 'forked sandbox', object: targetLabel(e) }),
+  'sandbox.exec': (e) => ({ verb: 'ran a command in sandbox', object: targetLabel(e) }),
 }
 
 /** renderAuditSentence renders e as {actor, verb, object} for sentence-style

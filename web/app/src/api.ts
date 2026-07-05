@@ -426,10 +426,7 @@ export const api = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email, role }),
     })
-    if (!r.ok) {
-      const body = await r.json().catch(() => null)
-      throw new Error(body?.error?.cause ?? `create invite: ${r.status}`)
-    }
+    if (!r.ok) throw new Error(await apiErrorMessage(r, 'create invite'))
     return (await r.json()) as InvitationView
   },
   revokeInvite: async (id: string) => {

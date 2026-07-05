@@ -66,9 +66,50 @@ describe('renderAuditSentence', () => {
   })
 
   it('falls back to the raw action code for an unknown action (e.g. a future invite.* action)', () => {
-    const s = renderAuditSentence(ev({ action: 'invite.create', target: 't1', target_name: '' }), 'me')
-    expect(s.verb).toBe('invite.create')
+    const s = renderAuditSentence(ev({ action: 'invite.transfer', target: 't1', target_name: '' }), 'me')
+    expect(s.verb).toBe('invite.transfer')
     expect(s.object).toBe('')
+  })
+
+  it('renders invite.create with the invited email as the object', () => {
+    const s = renderAuditSentence(
+      ev({ actor_id: 'me', actor_name: 'Alice', action: 'invite.create', target: 'inv1', target_name: 'bob@example.com' }),
+      'me',
+    )
+    expect(`${s.actor} ${s.verb} ${s.object}`).toBe('You invited bob@example.com')
+  })
+
+  it('renders invite.accept with no object and correct grammar for "You"', () => {
+    const s = renderAuditSentence(
+      ev({ actor_id: 'me', actor_name: 'Alice', action: 'invite.accept', target: 'inv1', target_name: 'bob@example.com' }),
+      'me',
+    )
+    expect(`${s.actor} ${s.verb}`).toBe('You accepted an invitation')
+    expect(s.object).toBe('')
+  })
+
+  it('renders invite.revoke as "revoked the invitation for <email>"', () => {
+    const s = renderAuditSentence(ev({ action: 'invite.revoke', target: 'inv1', target_name: 'bob@example.com' }), 'me')
+    expect(`${s.verb} ${s.object}`).toBe('revoked the invitation for bob@example.com')
+  })
+
+  it('renders invite.resend as "resent the invitation to <email>"', () => {
+    const s = renderAuditSentence(ev({ action: 'invite.resend', target: 'inv1', target_name: 'bob@example.com' }), 'me')
+    expect(`${s.verb} ${s.object}`).toBe('resent the invitation to bob@example.com')
+  })
+
+  it('renders member.remove as "removed <name>"', () => {
+    const s = renderAuditSentence(ev({ action: 'member.remove', target: 'acct-9', target_name: 'Carol' }), 'me')
+    expect(`${s.verb} ${s.object}`).toBe('removed Carol')
+  })
+
+  it('renders sandbox.create/fork/exec with the sandbox label as object', () => {
+    const create = renderAuditSentence(ev({ action: 'sandbox.create', target: 'sb1', target_name: 'python-3.11' }), 'me')
+    expect(`${create.verb} ${create.object}`).toBe('created sandbox python-3.11')
+    const fork = renderAuditSentence(ev({ action: 'sandbox.fork', target: 'sb1', target_name: '' }), 'me')
+    expect(`${fork.verb} ${fork.object}`).toBe('forked sandbox sb1')
+    const exec = renderAuditSentence(ev({ action: 'sandbox.exec', target: 'sb1', target_name: '' }), 'me')
+    expect(`${exec.verb} ${exec.object}`).toBe('ran a command in sandbox sb1')
   })
 
   it('covers every action the console currently emits with a real template', () => {
@@ -86,6 +127,14 @@ describe('renderAuditSentence', () => {
       'secret.delete',
       'audit.sink.create',
       'audit.sink.delete',
+      'invite.create',
+      'invite.accept',
+      'invite.revoke',
+      'invite.resend',
+      'member.remove',
+      'sandbox.create',
+      'sandbox.fork',
+      'sandbox.exec',
     ]
     for (const action of actions) {
       const s = renderAuditSentence(ev({ action }), 'me')
