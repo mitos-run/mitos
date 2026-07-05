@@ -175,6 +175,9 @@ func TestGatewayMetricsObservesForwardDurationOnFailure(t *testing.T) {
 		if mf.GetName() != "mitos_gateway_request_duration_seconds" {
 			continue
 		}
+		if len(mf.GetMetric()) != 1 {
+			t.Fatalf("duration series = %d, want 1", len(mf.GetMetric()))
+		}
 		metric := mf.GetMetric()[0]
 		labels := map[string]string{}
 		for _, lp := range metric.GetLabel() {
