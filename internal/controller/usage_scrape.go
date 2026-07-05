@@ -159,8 +159,12 @@ func (l *HuskPodScrapeLister) ListHuskPods(ctx context.Context) ([]usage.HuskPod
 			// hosted gateway names the Sandbox sb-<hex> and returns that name as
 			// the id). It is the controller's OWN label, never pod input. The
 			// source falls back to VMID if this is somehow empty.
-			APIID:    p.Labels[huskClaimLabel],
-			OrgID:    org,
+			APIID: p.Labels[huskClaimLabel],
+			OrgID: org,
+			// Region (issue #712 phase 0) is best-effort: absent for any pod not
+			// claimed by a Sandbox carrying a region label (a single-value
+			// deployment, or one predating this field), never a scrape failure.
+			Region:   p.Labels[tenant.RegionLabelKey],
 			Endpoint: fmt.Sprintf("%s:%d", p.Status.PodIP, huskSandboxPort),
 		})
 	}

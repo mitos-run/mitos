@@ -59,6 +59,7 @@ func (r *SandboxReconciler) recordHuskTerminations(claim *v1.Sandbox, pods []cor
 			VMID:      pod.Name,
 			APIID:     pod.Labels[huskClaimLabel],
 			OrgID:     org,
+			Region:    pod.Labels[tenant.RegionLabelKey],
 			StartedAt: started,
 			At:        at,
 		})

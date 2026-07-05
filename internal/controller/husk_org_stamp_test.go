@@ -210,6 +210,116 @@ func TestUnmarkHuskPodClaimedReleasesClaimStampedOrg(t *testing.T) {
 	}
 }
 
+// --- Region (issue #712 phase 0) ---
+
+// TestMarkHuskPodClaimedStampsClaimRegion asserts the claiming Sandbox's
+// mitos.run/region label is copied onto the husk pod at claim time,
+// regardless of tenancy mode: a husk pod has no region of its own before it
+// is claimed, so the claim is always the source, unlike the org label which
+// stays namespace-derived under org tenancy.
+func TestMarkHuskPodClaimedStampsClaimRegion(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "husk-region-1",
+		Namespace: "mitos",
+		Labels:    map[string]string{huskLabel: "true"},
+	}}
+	claim := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+		Name:      "claim-region-1",
+		Namespace: "mitos",
+		Labels:    map[string]string{tenant.OrgLabelKey: "org-x", tenant.RegionLabelKey: "fra"},
+	}}
+	c := fakeclient.NewClientBuilder().WithScheme(orgStampScheme(t)).WithObjects(pod).Build()
+	r := &SandboxReconciler{Client: c}
+	ctx := context.Background()
+
+	var live corev1.Pod
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), &live); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.markHuskPodClaimed(ctx, &live, claim); err != nil {
+		t.Fatalf("markHuskPodClaimed: %v", err)
+	}
+
+	var got corev1.Pod
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Labels[tenant.RegionLabelKey] != "fra" {
+		t.Errorf("pod region label = %q, want fra", got.Labels[tenant.RegionLabelKey])
+	}
+}
+
+// TestMarkHuskPodClaimedNoClaimRegionLeavesPodUnattributed asserts a claim
+// with no region label (a single-value deployment, or a sandbox predating
+// this field) stamps nothing.
+func TestMarkHuskPodClaimedNoClaimRegionLeavesPodUnattributed(t *testing.T) {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "husk-region-2",
+		Namespace: "mitos",
+		Labels:    map[string]string{huskLabel: "true"},
+	}}
+	claim := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "claim-region-2", Namespace: "mitos"}}
+	c := fakeclient.NewClientBuilder().WithScheme(orgStampScheme(t)).WithObjects(pod).Build()
+	r := &SandboxReconciler{Client: c}
+	ctx := context.Background()
+
+	var live corev1.Pod
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), &live); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.markHuskPodClaimed(ctx, &live, claim); err != nil {
+		t.Fatalf("markHuskPodClaimed: %v", err)
+	}
+
+	var got corev1.Pod
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), &got); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := got.Labels[tenant.RegionLabelKey]; ok {
+		t.Errorf("pod region label = %q, want absent", v)
+	}
+}
+
+// TestUnmarkHuskPodClaimedReleasesRegionEvenInOrgNamespace asserts the
+// released region label is ALWAYS cleared, unlike the org label: region is
+// never namespace-derived, so a returned-to-pool pod must not carry a failed
+// claim's region into a later claim, in EITHER tenancy mode.
+func TestUnmarkHuskPodClaimedReleasesRegionEvenInOrgNamespace(t *testing.T) {
+	ns := tenant.NamespaceForOrg("acme")
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "husk-region-3",
+		Namespace: ns,
+		Labels: map[string]string{
+			huskLabel:             "true",
+			huskClaimLabel:        "claim-region-3",
+			tenant.OrgLabelKey:    "acme",
+			tenant.RegionLabelKey: "fra",
+		},
+	}}
+	c := fakeclient.NewClientBuilder().WithScheme(orgStampScheme(t)).WithObjects(pod).Build()
+	r := &SandboxReconciler{Client: c}
+	ctx := context.Background()
+
+	var live corev1.Pod
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), &live); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.unmarkHuskPodClaimed(ctx, &live); err != nil {
+		t.Fatalf("unmarkHuskPodClaimed: %v", err)
+	}
+
+	var got corev1.Pod
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pod), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Labels[tenant.OrgLabelKey] != "acme" {
+		t.Errorf("pod org label = %q, want acme kept (namespace-derived org survives a release)", got.Labels[tenant.OrgLabelKey])
+	}
+	if v, ok := got.Labels[tenant.RegionLabelKey]; ok {
+		t.Errorf("pod region label = %q, want cleared even in an org namespace", v)
+	}
+}
+
 // TestUnmarkHuskPodClaimedKeepsNamespaceDerivedOrg proves the release path in a
 // per-org namespace KEEPS the namespace-derived org label: that label was
 // stamped at pod creation from the trusted namespace and stays valid for the
