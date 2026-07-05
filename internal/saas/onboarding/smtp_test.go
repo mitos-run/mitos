@@ -196,6 +196,63 @@ func TestSMTPSenderInviteComposesSubjectAndLink(t *testing.T) {
 	}
 }
 
+// TestSMTPSenderInviteSanitizesHeaderInjection asserts that a CRLF-carrying
+// inviterName (an attacker-controlled account display name) cannot inject an
+// extra header line (e.g. a Bcc:) into the composed invite email: the CR/LF
+// must be stripped from the Subject line, and no injected header may appear
+// anywhere in the composed message.
+func TestSMTPSenderInviteSanitizesHeaderInjection(t *testing.T) {
+	s, cap := newTestSMTP(t)
+	evilName := "Alice\r\nBcc: evil@attacker.example"
+	if err := s.SendInvite(context.Background(), "invitee@example.com", "Acme", evilName, "tok-invite-1"); err != nil {
+		t.Fatalf("send invite: %v", err)
+	}
+	body := string(cap.msg)
+	if strings.Contains(body, "\r\nBcc:") || strings.Contains(body, "\nBcc:") {
+		t.Fatalf("header injection succeeded, message carries an injected Bcc header: %q", body)
+	}
+	if !strings.Contains(body, "Subject: AliceBcc: evil@attacker.example invited you to Acme on Mitos") {
+		t.Fatalf("expected the CR/LF stripped (not the surrounding text) from the subject, got: %q", body)
+	}
+}
+
+// TestSMTPSenderVerificationSanitizesHeaderInjection asserts the same CR/LF
+// stripping applies on the verification email path (the recipient address
+// is the only attacker-influenced value there).
+func TestSMTPSenderVerificationSanitizesHeaderInjection(t *testing.T) {
+	s, cap := newTestSMTP(t)
+	evilTo := "user@example.com\r\nBcc: evil@attacker.example"
+	if err := s.SendVerification(context.Background(), evilTo, "tok-abc123"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	body := string(cap.msg)
+	if strings.Contains(body, "\r\nBcc:") || strings.Contains(body, "\nBcc:") {
+		t.Fatalf("header injection succeeded, message carries an injected Bcc header: %q", body)
+	}
+	if !strings.Contains(body, "To: user@example.comBcc: evil@attacker.example") {
+		t.Fatalf("expected the CR/LF stripped (not the surrounding text) from the To header, got: %q", body)
+	}
+}
+
+// TestSanitizeHeaderValueStripsBareAndPairedCRLF pins the helper directly
+// against bare CR, bare LF, and CRLF/LFCR pairs, in the middle and at the
+// edges of the value.
+func TestSanitizeHeaderValueStripsBareAndPairedCRLF(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Alice", "Alice"},
+		{"Alice\r\nBcc: evil", "AliceBcc: evil"},
+		{"Alice\nBcc: evil", "AliceBcc: evil"},
+		{"Alice\rBcc: evil", "AliceBcc: evil"},
+		{"Alice\n\rBcc: evil", "AliceBcc: evil"},
+		{"\r\nEvil\r\n", "Evil"},
+	}
+	for _, c := range cases {
+		if got := sanitizeHeaderValue(c.in); got != c.want {
+			t.Errorf("sanitizeHeaderValue(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // TestSMTPSenderInviteRequiresBaseURL asserts a sender with no InviteBaseURL
 // configured refuses to send an invite (fails closed) rather than emitting a
 // broken link, while still working for verification email (unaffected).

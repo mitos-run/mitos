@@ -11,9 +11,20 @@ import (
 	"mitos.run/mitos/internal/saas"
 )
 
+// invitationsPendingUniqueIndex is the partial unique index name from
+// migrations/0016_invitations_pending_unique.sql: ON (org_id, lower(email))
+// WHERE state = 'pending'. A violation of THIS specific index means
+// saas.ErrInvitePending (an invitation is already pending for this
+// address); a violation of any other unique constraint on the table (a
+// duplicate id or token_hash) means a genuine saas.ErrConflict.
+const invitationsPendingUniqueIndex = "invitations_org_email_pending_idx"
+
 // CreateInvitation inserts a new invitation row. A duplicate id or token hash
 // violates a unique constraint and surfaces as saas.ErrConflict, matching
-// MemStore.
+// MemStore. A duplicate still-pending (org_id, lower(email)) violates the
+// partial unique index guarding InvitationService.CreateInvite's
+// check-then-act race (migration 0016) and surfaces as saas.ErrInvitePending,
+// also matching MemStore's atomic in-lock check.
 //
 // created_at and expires_at are NOT NULL columns (migrations/0014_invitations.sql),
 // so inserting NULL for either would violate the constraint. A zero CreatedAt
@@ -39,11 +50,66 @@ func (s *PgStore) CreateInvitation(ctx context.Context, inv saas.Invitation) err
 	_, err := s.pool.Exec(ctx, q,
 		inv.ID, inv.OrgID, inv.Email, string(inv.Role), inv.TokenHash, string(inv.State), inv.InviterID,
 		timePtr(inv.CreatedAt), timePtr(inv.ExpiresAt))
-	if isUniqueViolation(err) {
+	if c := uniqueViolationConstraint(err); c != "" {
+		if c == invitationsPendingUniqueIndex {
+			return saas.ErrInvitePending
+		}
 		return saas.ErrConflict
 	}
 	if err != nil {
 		return fmt.Errorf("create invitation: %w", err)
+	}
+	return nil
+}
+
+// ReplaceInvitation atomically deletes the invitation identified by oldID and
+// inserts fresh in its place, both inside one transaction. ResendInvite uses
+// this instead of a separate Remove-then-Create pair so the replacement
+// invitation never has to coexist, even momentarily, with the original row
+// it supersedes: the partial unique index on (org_id, lower(email)) WHERE
+// state = 'pending' (migration 0016) would otherwise reject the insert while
+// the original is still pending. A failure rolls back the whole transaction,
+// so oldID's row is left exactly as it was, never lost and never duplicated.
+// Returns saas.ErrNotFound if oldID does not exist.
+func (s *PgStore) ReplaceInvitation(ctx context.Context, oldID string, fresh saas.Invitation) error {
+	if fresh.CreatedAt.IsZero() {
+		fresh.CreatedAt = time.Now().UTC()
+	}
+	if fresh.ExpiresAt.IsZero() {
+		fresh.ExpiresAt = fresh.CreatedAt.Add(saas.InvitationTTL)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin replace invitation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `DELETE FROM invitations WHERE id = $1`, oldID)
+	if err != nil {
+		return fmt.Errorf("replace invitation: delete old: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return saas.ErrNotFound
+	}
+
+	const insertQ = `
+        INSERT INTO invitations (id, org_id, email, role, token_hash, state, inviter_id, created_at, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+	_, err = tx.Exec(ctx, insertQ,
+		fresh.ID, fresh.OrgID, fresh.Email, string(fresh.Role), fresh.TokenHash, string(fresh.State), fresh.InviterID,
+		timePtr(fresh.CreatedAt), timePtr(fresh.ExpiresAt))
+	if c := uniqueViolationConstraint(err); c != "" {
+		if c == invitationsPendingUniqueIndex {
+			return saas.ErrInvitePending
+		}
+		return saas.ErrConflict
+	}
+	if err != nil {
+		return fmt.Errorf("replace invitation: insert fresh: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit replace invitation: %w", err)
 	}
 	return nil
 }

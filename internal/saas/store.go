@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,6 +27,13 @@ var ErrForbidden = errors.New("saas: forbidden")
 // owner of an organization, which is not allowed: every org must retain at
 // least one owner at all times.
 var ErrLastOwner = errors.New("saas: cannot demote or remove the last owner of an organization")
+
+// ErrRoleNotGrantable is returned by SetMemberRole and CreateInvite when the
+// actor's role does not permit granting the requested role, per
+// canGrantRole: only an owner may grant the owner role. This is distinct
+// from ErrForbidden (which means the actor cannot manage members at all);
+// here the actor DOES have members.manage, it just may not mint an owner.
+var ErrRoleNotGrantable = errors.New("saas: the caller cannot grant this role")
 
 // Store is the pluggable persistence seam for the SaaS front door. The in-memory
 // implementation (MemStore) is the tested default; a Postgres implementation is
@@ -88,9 +96,15 @@ type Store interface {
 	// second revoke is a no-op. Returns ErrNotFound for an unknown id.
 	RevokeApiKey(ctx context.Context, id string, at time.Time) error
 
-	// CreateInvitation stores a new org invitation. It performs no email-based
-	// dedup itself (InvitationService decides whether a still-pending
-	// invitation already covers this email before calling this method).
+	// CreateInvitation stores a new org invitation. InvitationService already
+	// prechecks (via ListInvitations) that no still-pending invitation covers
+	// this email before calling this method, but that precheck is a
+	// non-atomic check-then-act; CreateInvitation is the real backstop and
+	// MUST itself atomically refuse (ErrInvitePending) a second still-pending
+	// invitation for the same (org, lower(email)) under its own durability
+	// boundary (one lock acquisition for MemStore, the partial unique index
+	// from migration 0016 for PgStore), so two concurrent CreateInvite calls
+	// for the same address can never both persist a live row.
 	CreateInvitation(ctx context.Context, inv Invitation) error
 	// ListInvitations returns every invitation ever created for orgID, in any
 	// state, most-recently-created first. It never returns another org's
@@ -110,9 +124,18 @@ type Store interface {
 	UpdateInvitationState(ctx context.Context, id string, state InvitationState) error
 	// RemoveInvitation permanently deletes the invitation identified by id. It
 	// returns ErrNotFound for an unknown id. Used by revoke (the row is
-	// deleted rather than soft-marked) and by resend (the old row is removed
-	// and a fresh one with a new token takes its place).
+	// deleted rather than soft-marked).
 	RemoveInvitation(ctx context.Context, id string) error
+	// ReplaceInvitation atomically deletes the invitation identified by oldID
+	// and inserts fresh in its place, both within one durability boundary (a
+	// single transaction for PgStore, one lock acquisition for MemStore).
+	// ResendInvite uses this instead of a separate Remove-then-Create pair so
+	// the replacement invitation never has to coexist, even momentarily,
+	// with the original row it supersedes, which would otherwise trip the
+	// same (org, lower(email)) WHERE pending uniqueness CreateInvitation
+	// enforces. A failure leaves oldID's row untouched: never lost, never
+	// duplicated. Returns ErrNotFound if oldID does not exist.
+	ReplaceInvitation(ctx context.Context, oldID string, fresh Invitation) error
 
 	// DeleteMembership removes accountID's membership in orgID. It returns
 	// ErrNotFound if no such membership exists, and ErrLastOwner if removing
@@ -353,10 +376,23 @@ func (s *MemStore) RevokeApiKey(_ context.Context, id string, at time.Time) erro
 // defensively-constructed invitations. The defaulting happens at CREATE
 // time: a stored zero ExpiresAt can no longer occur, so EffectiveState's
 // zero-means-no-expiry reading applies only to unstored, in-flight values.
+//
+// It also refuses ErrConflict for a duplicate id OR a duplicate token hash
+// (a second invitation must never be allowed to silently steal or hide
+// another's hash-indexed lookup), and ErrInvitePending when another
+// invitation for the same (org, lower(email)) is already effectively
+// pending, all checked under the SAME lock acquisition as the insert. This
+// closes the check-then-act race InvitationService.CreateInvite's own
+// ListInvitations-then-check precheck cannot close by itself (a separate
+// RLock read followed by a separate Lock write), mirroring the partial
+// unique index PgStore.CreateInvitation enforces (migration 0016).
 func (s *MemStore) CreateInvitation(_ context.Context, inv Invitation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.invitations[inv.ID]; ok {
+		return ErrConflict
+	}
+	if _, ok := s.inviteHash[inv.TokenHash]; ok {
 		return ErrConflict
 	}
 	if inv.CreatedAt.IsZero() {
@@ -365,8 +401,59 @@ func (s *MemStore) CreateInvitation(_ context.Context, inv Invitation) error {
 	if inv.ExpiresAt.IsZero() {
 		inv.ExpiresAt = inv.CreatedAt.Add(InvitationTTL)
 	}
+	if s.hasPendingInvitationLocked(inv.OrgID, inv.Email, inv.CreatedAt) {
+		return ErrInvitePending
+	}
 	s.invitations[inv.ID] = inv
 	s.inviteHash[inv.TokenHash] = inv.ID
+	return nil
+}
+
+// hasPendingInvitationLocked reports whether an EXISTING invitation for
+// orgID and email (case-insensitive) is effectively pending as of now. The
+// caller must hold s.mu.
+func (s *MemStore) hasPendingInvitationLocked(orgID, email string, now time.Time) bool {
+	for _, existing := range s.invitations {
+		if existing.OrgID == orgID && strings.EqualFold(existing.Email, email) && existing.EffectiveState(now) == InvitationPending {
+			return true
+		}
+	}
+	return false
+}
+
+// ReplaceInvitation atomically deletes the invitation identified by oldID and
+// inserts fresh in its place under one lock acquisition. ResendInvite uses
+// this instead of a separate RemoveInvitation-then-CreateInvitation pair so
+// the replacement never has to coexist, even momentarily, with the original
+// row it supersedes, which would otherwise trip the pending-uniqueness check
+// CreateInvitation enforces. Returns ErrNotFound if oldID does not exist,
+// ErrConflict if fresh's id or token hash collides with a DIFFERENT existing
+// invitation.
+func (s *MemStore) ReplaceInvitation(_ context.Context, oldID string, fresh Invitation) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old, ok := s.invitations[oldID]
+	if !ok {
+		return ErrNotFound
+	}
+	if fresh.ID != oldID {
+		if _, ok := s.invitations[fresh.ID]; ok {
+			return ErrConflict
+		}
+	}
+	if existingID, ok := s.inviteHash[fresh.TokenHash]; ok && existingID != oldID {
+		return ErrConflict
+	}
+	if fresh.CreatedAt.IsZero() {
+		fresh.CreatedAt = time.Now().UTC()
+	}
+	if fresh.ExpiresAt.IsZero() {
+		fresh.ExpiresAt = fresh.CreatedAt.Add(InvitationTTL)
+	}
+	delete(s.invitations, oldID)
+	delete(s.inviteHash, old.TokenHash)
+	s.invitations[fresh.ID] = fresh
+	s.inviteHash[fresh.TokenHash] = fresh.ID
 	return nil
 }
 

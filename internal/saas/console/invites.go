@@ -30,46 +30,77 @@ type inviteRateLimiter struct {
 	limit  int
 	window time.Duration
 	mu     sync.Mutex
-	hits   map[string][]time.Time
+	hits   map[string][]rateHit
+	nextID uint64
+}
+
+// rateHit is one recorded hit against a key, tagged with a unique id so
+// Release can undo EXACTLY the reservation it is passed, never a
+// differently-timed hit a concurrent Reserve happened to record for the
+// same key in the meantime.
+type rateHit struct {
+	at time.Time
+	id uint64
 }
 
 func newInviteRateLimiter(limit int, window time.Duration) *inviteRateLimiter {
-	return &inviteRateLimiter{limit: limit, window: window, hits: map[string][]time.Time{}}
+	return &inviteRateLimiter{limit: limit, window: window, hits: map[string][]rateHit{}}
 }
 
-// Allow reports whether key is within the cap at now, pruning stale hits as
-// it goes. It does NOT itself record a new hit: the caller must call Record
-// once the create/resend it is guarding actually succeeds, so a rejected
-// attempt (an already-pending duplicate, an unknown resend id) never burns
-// quota. A nil receiver or a non-positive limit always allows (disabled).
-func (l *inviteRateLimiter) Allow(key string, now time.Time) bool {
+// Reserve atomically checks key against the cap and, if it is not already at
+// the limit, records a hit for key at now in the SAME locked section as the
+// check, closing the check-then-act race a separate Allow-then-Record pair
+// has under concurrency (multiple requests for the same org could all pass
+// Allow before any of them called Record, letting the org exceed the cap).
+// It reports false (nothing recorded) when the cap would be exceeded.
+// A nil receiver or a non-positive limit always allows (disabled) and
+// returns a zero id, which Release treats as a no-op.
+func (l *inviteRateLimiter) Reserve(key string, now time.Time) (id uint64, ok bool) {
 	if l == nil || l.limit <= 0 {
-		return true
+		return 0, true
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(l.prune(key, now)) < l.limit
+	fresh := l.prune(key, now)
+	if len(fresh) >= l.limit {
+		return 0, false
+	}
+	l.nextID++
+	id = l.nextID
+	l.hits[key] = append(fresh, rateHit{at: now, id: id})
+	return id, true
 }
 
-// Record adds a hit for key at now. Call only after the operation it guards
-// has actually succeeded; a nil receiver or non-positive limit is a no-op.
-func (l *inviteRateLimiter) Record(key string, now time.Time) {
-	if l == nil || l.limit <= 0 {
+// Release undoes the reservation identified by id: it removes exactly that
+// hit from key's history, so a Reserve that turned out to guard a rejected
+// or failed operation (an already-pending duplicate, an unknown resend id,
+// a store error) does not permanently burn a slot of the org's quota. Call
+// at most once per successful Reserve, on every failure path after it. A
+// nil receiver, a non-positive limit, or the zero id (meaning Reserve never
+// recorded anything to release) is a no-op.
+func (l *inviteRateLimiter) Release(key string, id uint64) {
+	if l == nil || l.limit <= 0 || id == 0 {
 		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.hits[key] = append(l.prune(key, now), now)
+	hits := l.hits[key]
+	for i, h := range hits {
+		if h.id == id {
+			l.hits[key] = append(hits[:i:i], hits[i+1:]...)
+			return
+		}
+	}
 }
 
 // prune drops hits for key older than the window, stores the surviving
 // slice back, and returns it. The caller must hold l.mu.
-func (l *inviteRateLimiter) prune(key string, now time.Time) []time.Time {
+func (l *inviteRateLimiter) prune(key string, now time.Time) []rateHit {
 	cutoff := now.Add(-l.window)
-	var fresh []time.Time
-	for _, t := range l.hits[key] {
-		if t.After(cutoff) {
-			fresh = append(fresh, t)
+	var fresh []rateHit
+	for _, h := range l.hits[key] {
+		if h.at.After(cutoff) {
+			fresh = append(fresh, h)
 		}
 	}
 	l.hits[key] = fresh
@@ -172,22 +203,27 @@ func (c *Console) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
 		apierr.Encode(w, apierr.Get(apierr.CodeInvalidInput).WithCause("an email address is required"))
 		return
 	}
-	if !c.inviteRateLimit.Allow(orgID, c.deps.Now()) {
+	reserveID, ok := c.inviteRateLimit.Reserve(orgID, c.deps.Now())
+	if !ok {
 		apierr.Encode(w, apierr.Get(apierr.CodeRateLimited).
 			WithCause("too many invitations created for this organization in the last 24 hours"))
 		return
 	}
 	inv, err := c.deps.Invitations.CreateInvite(r.Context(), orgID, accountID, req.Email, req.Role)
 	if err != nil {
-		if errors.Is(err, saas.ErrInvitePending) {
+		c.inviteRateLimit.Release(orgID, reserveID)
+		switch {
+		case errors.Is(err, saas.ErrInvitePending):
 			apierr.Encode(w, apierr.Get(apierr.CodeInvalidInput).
 				WithCause("an invitation is already pending for this email"))
-			return
+		case errors.Is(err, saas.ErrRoleNotGrantable):
+			apierr.Encode(w, apierr.Get(apierr.CodeForbidden).
+				WithCause("only an owner can invite someone as owner"))
+		default:
+			apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the invitation could not be created"))
 		}
-		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the invitation could not be created"))
 		return
 	}
-	c.inviteRateLimit.Record(orgID, c.deps.Now())
 	c.audit(r.Context(), AuditEvent{
 		OrgID: orgID, ActorID: accountID,
 		Action: "invite.create", Target: inv.ID, TargetType: "invite", TargetName: inv.Email,
@@ -242,13 +278,15 @@ func (c *Console) handleResendInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if !c.inviteRateLimit.Allow(orgID, c.deps.Now()) {
+	reserveID, ok := c.inviteRateLimit.Reserve(orgID, c.deps.Now())
+	if !ok {
 		apierr.Encode(w, apierr.Get(apierr.CodeRateLimited).
 			WithCause("too many invitations created for this organization in the last 24 hours"))
 		return
 	}
 	inv, err := c.deps.Invitations.ResendInvite(r.Context(), orgID, id)
 	if err != nil {
+		c.inviteRateLimit.Release(orgID, reserveID)
 		switch {
 		case errors.Is(err, saas.ErrNotFound):
 			apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
@@ -261,7 +299,6 @@ func (c *Console) handleResendInvite(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	c.inviteRateLimit.Record(orgID, c.deps.Now())
 	c.audit(r.Context(), AuditEvent{
 		OrgID: orgID, ActorID: accountID,
 		Action: "invite.resend", Target: inv.ID, TargetType: "invite", TargetName: inv.Email,

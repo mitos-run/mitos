@@ -160,6 +160,32 @@ func TestInvitationRevokeDeletesRow(t *testing.T) {
 	}
 }
 
+// TestInvitationCreateAdminCannotGrantOwner verifies the role-grant ceiling
+// enforced server-side at invite creation: an inviter who only holds admin
+// (PermManageMembers, but not owner) cannot mint an owner invite; the owner
+// can. This closes the escalation path where AcceptInvite would otherwise
+// hand out the owner role to whoever accepts an admin-minted owner invite.
+func TestInvitationCreateAdminCannotGrantOwner(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store, orgID, ownerID := seedOrg(t)
+	adminID := "acct-admin"
+	if err := store.PutMembership(context.Background(), saas.Membership{
+		AccountID: adminID, OrgID: orgID, Role: saas.RoleAdmin, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed admin membership: %v", err)
+	}
+	sender := saas.NewFakeInviteEmailSender()
+	svc := saas.NewInvitationService(store, sender, saas.WithInvitationClock(fixedClock(now)))
+	ctx := context.Background()
+
+	if _, err := svc.CreateInvite(ctx, orgID, adminID, "wannabe-owner@example.com", saas.RoleOwner); !errors.Is(err, saas.ErrRoleNotGrantable) {
+		t.Fatalf("admin CreateInvite role owner: got %v, want ErrRoleNotGrantable", err)
+	}
+	if _, err := svc.CreateInvite(ctx, orgID, ownerID, "new-owner@example.com", saas.RoleOwner); err != nil {
+		t.Fatalf("owner CreateInvite role owner: got %v, want nil", err)
+	}
+}
+
 func TestInvitationResendMintsFreshTokenAndKeepsPending(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	store, orgID, ownerID := seedOrg(t)

@@ -268,9 +268,14 @@ func displayNameOrEmailSaas(a Account) string {
 // CreateInvite invites email to join orgID at role, recorded as sent by
 // inviterID. It refuses (ErrInvitePending) when a still-pending invitation
 // already covers this (org, email) pair, so re-inviting the same address
-// twice does not silently fork two live tokens for one person. The invite
-// email is sent before this method returns; the raw token is NEVER returned
-// to the caller, only delivered in that one email.
+// twice does not silently fork two live tokens for one person. It refuses
+// (ErrRoleNotGrantable) when inviterID's own role does not permit granting
+// role, per canGrantRole: only an owner may mint an owner invite, closing
+// the privilege-escalation path where a member.manage holder (e.g. an
+// admin) invites someone straight in as owner, who then becomes owner the
+// moment they accept. The invite email is sent before this method returns;
+// the raw token is NEVER returned to the caller, only delivered in that one
+// email.
 func (s *InvitationService) CreateInvite(ctx context.Context, orgID, inviterID, email string, role Role) (Invitation, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
@@ -278,6 +283,13 @@ func (s *InvitationService) CreateInvite(ctx context.Context, orgID, inviterID, 
 	}
 	if role == "" {
 		role = RoleMember
+	}
+	inviterRole, err := s.memberRoleIn(ctx, orgID, inviterID)
+	if err != nil {
+		return Invitation{}, fmt.Errorf("create invite: resolve inviter role: %w", err)
+	}
+	if !canGrantRole(inviterRole, role) {
+		return Invitation{}, ErrRoleNotGrantable
 	}
 	now := s.now()
 
@@ -351,6 +363,23 @@ func (s *InvitationService) ListInvites(ctx context.Context, orgID string) ([]In
 	return invs, nil
 }
 
+// memberRoleIn returns inviterID's role within orgID, or ErrNotFound if the
+// account is not a member. It is looked up fresh from the store (never
+// trusted from the caller) so CreateInvite's role-grant ceiling is enforced
+// against the actual membership record, mirroring AccountService.memberRole.
+func (s *InvitationService) memberRoleIn(ctx context.Context, orgID, accountID string) (Role, error) {
+	memberships, err := s.store.ListMemberships(ctx, accountID)
+	if err != nil {
+		return "", fmt.Errorf("list memberships: %w", err)
+	}
+	for _, m := range memberships {
+		if m.OrgID == orgID {
+			return m.Role, nil
+		}
+	}
+	return "", ErrNotFound
+}
+
 // findInOrg returns the invitation with id inside orgID, or ErrNotFound if it
 // does not exist or belongs to a different org (the two are indistinguishable
 // to the caller, the cross-org isolation backstop).
@@ -383,13 +412,19 @@ func (s *InvitationService) RevokeInvite(ctx context.Context, orgID, id string) 
 
 // ResendInvite re-sends the invite with a FRESH token and a renewed expiry.
 // The raw token is never persisted, so a resend cannot recover the original
-// one; it mints a new one instead. The replacement row (new id) carrying the
-// same org, email, role, and inviter is created and SENT before the old row
-// is removed: only once delivery succeeds is the old invitation deleted, so
-// a delivery failure leaves the original, still-valid invite intact rather
-// than destroying it in exchange for an undelivered replacement. Only a
-// pending (including lazily-expired) invitation may be resent; an
-// already-accepted invitation returns ErrInviteNotPending.
+// one; it mints a new one instead. The replacement is SENT first: sendInvite
+// only reads fresh's org/email/inviter fields, so nothing needs to be
+// persisted before delivery. A delivery failure therefore leaves the
+// original, still-valid invite completely untouched, with no orphaned row
+// and no cleanup step. Once delivery succeeds, the original is replaced by
+// the fresh invitation ATOMICALLY (store.ReplaceInvitation, one durability
+// boundary) rather than via a separate remove-then-create pair: a plain
+// remove-then-create would momentarily need both rows pending for the same
+// (org, email), which the pending-uniqueness guard CreateInvitation enforces
+// (in-lock for MemStore, the migration 0016 partial unique index for
+// PgStore) would reject. Only a pending (including lazily-expired)
+// invitation may be resent; an already-accepted invitation returns
+// ErrInviteNotPending.
 func (s *InvitationService) ResendInvite(ctx context.Context, orgID, id string) (Invitation, error) {
 	inv, err := s.findInOrg(ctx, orgID, id)
 	if err != nil {
@@ -417,18 +452,11 @@ func (s *InvitationService) ResendInvite(ctx context.Context, orgID, id string) 
 		CreatedAt: now,
 		ExpiresAt: now.Add(s.tokenTTL),
 	}
-	if err := s.store.CreateInvitation(ctx, fresh); err != nil {
-		return Invitation{}, fmt.Errorf("resend invite: store: %w", err)
-	}
 	if err := s.sendInvite(ctx, fresh, rawToken); err != nil {
-		// Best-effort cleanup of the undelivered replacement; the ORIGINAL
-		// invitation (still removed below only on success) is left intact so
-		// the recipient's existing link keeps working.
-		_ = s.store.RemoveInvitation(ctx, fresh.ID)
 		return Invitation{}, fmt.Errorf("resend invite: send email: %w", err)
 	}
-	if err := s.store.RemoveInvitation(ctx, inv.ID); err != nil {
-		return Invitation{}, fmt.Errorf("resend invite: remove old: %w", err)
+	if err := s.store.ReplaceInvitation(ctx, inv.ID, fresh); err != nil {
+		return Invitation{}, fmt.Errorf("resend invite: replace: %w", err)
 	}
 	return fresh, nil
 }

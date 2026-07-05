@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,7 +44,10 @@ type inviteFixture struct {
 	// invitation by id (cross-org isolation, as opposed to the RBAC gate).
 	bobID    string
 	bobOrgID string
-	now      time.Time
+	// erinID is an admin (PermManageMembers, but not owner) in aliceOrg, used
+	// to assert the role-grant ceiling: an admin cannot mint an owner invite.
+	erinID string
+	now    time.Time
 }
 
 func newInviteFixture(t *testing.T) *inviteFixture {
@@ -68,6 +72,13 @@ func newInviteFixture(t *testing.T) *inviteFixture {
 	if err != nil {
 		t.Fatalf("SignUp bob: %v", err)
 	}
+	erin, _, err := accounts.SignUp(ctx, "erin-invites@example.com")
+	if err != nil {
+		t.Fatalf("SignUp erin: %v", err)
+	}
+	if err := store.PutMembership(ctx, saas.Membership{AccountID: erin.ID, OrgID: org.ID, Role: saas.RoleAdmin}); err != nil {
+		t.Fatalf("seed erin membership: %v", err)
+	}
 
 	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	sender := saas.NewFakeInviteEmailSender()
@@ -82,7 +93,7 @@ func newInviteFixture(t *testing.T) *inviteFixture {
 	return &inviteFixture{
 		con: con, store: store, sender: sender,
 		aliceID: alice.ID, carolID: carol.ID, orgID: org.ID,
-		bobID: bob.ID, bobOrgID: bobOrg.ID, now: now,
+		bobID: bob.ID, bobOrgID: bobOrg.ID, erinID: erin.ID, now: now,
 	}
 }
 
@@ -96,6 +107,22 @@ func TestCreateInviteRequiresManageMembers(t *testing.T) {
 	w := f.req(t, "POST", "/console/invites", `{"email":"new@example.com","role":"member"}`, f.carolID, f.orgID)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("status = %d body=%s, want 403", w.Code, w.Body.String())
+	}
+}
+
+// TestCreateInviteAdminCannotGrantOwner verifies the role-grant ceiling at the
+// HTTP layer: erin (admin, holds members.manage) gets 403 trying to invite
+// someone as owner; alice (the actual owner) succeeds at the same request.
+func TestCreateInviteAdminCannotGrantOwner(t *testing.T) {
+	f := newInviteFixture(t)
+	w := f.req(t, "POST", "/console/invites", `{"email":"wannabe-owner@example.com","role":"owner"}`, f.erinID, f.orgID)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("admin invite-as-owner status = %d, want 403: %s", w.Code, w.Body.String())
+	}
+
+	w = f.req(t, "POST", "/console/invites", `{"email":"new-owner@example.com","role":"owner"}`, f.aliceID, f.orgID)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("owner invite-as-owner status = %d, want 201: %s", w.Code, w.Body.String())
 	}
 }
 
@@ -205,6 +232,65 @@ func TestResendInviteNotFoundDoesNotConsumeQuota(t *testing.T) {
 	if w := f.req(t, "POST", "/console/invites", `{"email":"after-notfound@example.com"}`, f.aliceID, f.orgID); w.Code != http.StatusCreated {
 		t.Fatalf("create after not-found resend: %d %s, want 201 (not-found resend must not consume quota)", w.Code, w.Body.String())
 	}
+}
+
+// TestInviteRateLimiterReserveConcurrent races many goroutines calling
+// Reserve for the same key against a small limit and asserts the number of
+// successful reservations never exceeds the limit: this is exactly the
+// TOCTOU race a separate Allow-then-Record pair was vulnerable to (many
+// callers could all pass Allow before any of them recorded a hit), and which
+// Reserve closes by checking and recording under the SAME lock acquisition.
+func TestInviteRateLimiterReserveConcurrent(t *testing.T) {
+	const limit = 10
+	const attempts = 200
+	l := newInviteRateLimiter(limit, 24*time.Hour)
+	now := time.Now()
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	successes := 0
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, ok := l.Reserve("org-race", now); ok {
+				mu.Lock()
+				successes++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if successes != limit {
+		t.Fatalf("successful reservations = %d, want exactly %d (limit)", successes, limit)
+	}
+}
+
+// TestInviteRateLimiterRelease asserts Release gives back exactly the slot
+// Reserve took, so a Reserve guarding a failed operation does not
+// permanently burn the org's quota, and that releasing an already-released
+// (or unknown) id is a harmless no-op.
+func TestInviteRateLimiterRelease(t *testing.T) {
+	l := newInviteRateLimiter(1, 24*time.Hour)
+	now := time.Now()
+
+	id, ok := l.Reserve("org-a", now)
+	if !ok {
+		t.Fatal("first reserve should succeed")
+	}
+	if _, ok := l.Reserve("org-a", now); ok {
+		t.Fatal("second reserve should fail: at limit")
+	}
+	l.Release("org-a", id)
+	if _, ok := l.Reserve("org-a", now); !ok {
+		t.Fatal("reserve after release should succeed: slot was given back")
+	}
+
+	// Releasing again (already released) or an unknown id is a no-op, not a
+	// panic or a double-free of someone else's slot.
+	l.Release("org-a", id)
+	l.Release("org-a", 999999)
 }
 
 func TestRevokeInviteAndCrossOrgIsolation(t *testing.T) {

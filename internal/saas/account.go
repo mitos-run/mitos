@@ -146,9 +146,12 @@ func (s *AccountService) MemberRole(ctx context.Context, accountID, orgID string
 
 // SetMemberRole changes targetAccountID's role within orgID. The actor must
 // hold a role that can manage members (Owner or Admin); otherwise ErrForbidden
-// is returned. The target must already be a member; otherwise ErrNotFound is
-// returned. The last owner of an org cannot be demoted; ErrLastOwner is
-// returned in that case.
+// is returned. Even a PermManageMembers holder cannot grant the owner role
+// unless the actor is ALREADY an owner (canGrantRole); an admin attempting to
+// promote someone to owner gets ErrRoleNotGrantable, closing the privilege-
+// escalation path where an admin mints a new owner. The target must already
+// be a member; otherwise ErrNotFound is returned. The last owner of an org
+// cannot be demoted; ErrLastOwner is returned in that case.
 func (s *AccountService) SetMemberRole(ctx context.Context, actorID, orgID, targetAccountID string, role Role) error {
 	actorRole, err := s.memberRole(ctx, actorID, orgID)
 	if err != nil {
@@ -156,6 +159,9 @@ func (s *AccountService) SetMemberRole(ctx context.Context, actorID, orgID, targ
 	}
 	if !actorRole.Can(PermManageMembers) {
 		return ErrForbidden
+	}
+	if !canGrantRole(actorRole, role) {
+		return ErrRoleNotGrantable
 	}
 	return s.store.SetMembershipRole(ctx, orgID, targetAccountID, role)
 }

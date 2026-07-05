@@ -123,10 +123,31 @@ func (s *SMTPEmailSender) SendInvite(ctx context.Context, email, orgName, invite
 	return nil
 }
 
+// sanitizeHeaderValue strips CR and LF (in either order, alone or in a
+// CRLF/LFCR pair) from v so it can never be used to inject an additional raw
+// SMTP header line, or terminate the header block early into the body, when
+// v is attacker-influenced input composed straight into a From:/To:/Subject:
+// line (an invited email address, an org display name, an account display
+// name). Every value interpolated into a header line in this file passes
+// through this first. It is safe to apply broadly: none of these values are
+// ever intentionally multi-line.
+func sanitizeHeaderValue(v string) string {
+	v = strings.ReplaceAll(v, "\r", "")
+	v = strings.ReplaceAll(v, "\n", "")
+	return v
+}
+
 // buildInviteMessage composes a minimal RFC 5322 plain-text invite email.
 // The subject line is the exact product copy the console spec calls for. No
-// em or en dashes; plain, on-brand voice.
+// em or en dashes; plain, on-brand voice. from, to, orgName, and inviterName
+// are all sanitized against header injection before composing: orgName and
+// inviterName in particular are user-controlled display names that flow
+// straight into the Subject line.
 func buildInviteMessage(from, to, orgName, inviterName, link string) []byte {
+	from = sanitizeHeaderValue(from)
+	to = sanitizeHeaderValue(to)
+	orgName = sanitizeHeaderValue(orgName)
+	inviterName = sanitizeHeaderValue(inviterName)
 	var b strings.Builder
 	b.WriteString("From: " + from + "\r\n")
 	b.WriteString("To: " + to + "\r\n")
@@ -168,8 +189,11 @@ func consoleOrigin(rawURL string) string {
 
 // buildApprovedMessage composes a minimal RFC 5322 plain-text approval email.
 // The message carries no secret. Voice: plain, accessible, confident, peer of
-// the best labs. No em or en dashes.
+// the best labs. No em or en dashes. from and to are sanitized against
+// header injection before composing.
 func buildApprovedMessage(from, to, signupURL string) []byte {
+	from = sanitizeHeaderValue(from)
+	to = sanitizeHeaderValue(to)
 	var b strings.Builder
 	b.WriteString("From: " + from + "\r\n")
 	b.WriteString("To: " + to + "\r\n")
@@ -203,8 +227,11 @@ func verifyLink(base, token string) (string, error) {
 }
 
 // buildVerificationMessage composes a minimal RFC 5322 plain-text message. The
-// only sensitive content is the one-time verify link in the body.
+// only sensitive content is the one-time verify link in the body. from and to
+// are sanitized against header injection before composing.
 func buildVerificationMessage(from, to, link string) []byte {
+	from = sanitizeHeaderValue(from)
+	to = sanitizeHeaderValue(to)
 	var b strings.Builder
 	b.WriteString("From: " + from + "\r\n")
 	b.WriteString("To: " + to + "\r\n")

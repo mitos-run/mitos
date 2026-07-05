@@ -977,6 +977,9 @@ func (c *Console) handleSetMemberRole(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, saas.ErrForbidden):
 			apierr.Encode(w, apierr.Get(apierr.CodeForbidden).
 				WithCause("the caller does not have permission to change member roles"))
+		case errors.Is(err, saas.ErrRoleNotGrantable):
+			apierr.Encode(w, apierr.Get(apierr.CodeForbidden).
+				WithCause("only an owner can grant the owner role"))
 		case errors.Is(err, saas.ErrNotFound):
 			apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
 				WithCause("the target account is not a member of this organization"))

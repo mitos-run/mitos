@@ -499,6 +499,95 @@ func RunContract(t *testing.T, factory func(t *testing.T) saas.Store) {
 		}
 	})
 
+	t.Run("InvitationDuplicatePendingRejected", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		created := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+		first := saas.Invitation{
+			ID: "inv-dup-1", OrgID: "org-1", Email: "dup@example.com", Role: saas.RoleMember,
+			TokenHash: "hash-dup-1", State: saas.InvitationPending, InviterID: "acc-owner",
+			CreatedAt: created, ExpiresAt: created.Add(saas.InvitationTTL),
+		}
+		must(t, s.CreateInvitation(ctx, first))
+
+		// A second CreateInvitation for the SAME (org, email) while the first
+		// is still pending must be rejected atomically, case-insensitively.
+		second := first
+		second.ID = "inv-dup-2"
+		second.TokenHash = "hash-dup-2"
+		second.Email = "DUP@example.com"
+		if err := s.CreateInvitation(ctx, second); !errors.Is(err, saas.ErrInvitePending) {
+			t.Fatalf("second create for same (org, email): got %v, want ErrInvitePending", err)
+		}
+
+		// A DIFFERENT org may still invite the same address.
+		third := first
+		third.ID = "inv-dup-3"
+		third.OrgID = "org-2"
+		third.TokenHash = "hash-dup-3"
+		if err := s.CreateInvitation(ctx, third); err != nil {
+			t.Fatalf("create for a different org with the same email: got %v, want nil", err)
+		}
+
+		// Once the original is no longer pending (accepted), the address is
+		// free again for a fresh invitation.
+		must(t, s.UpdateInvitationState(ctx, first.ID, saas.InvitationAccepted))
+		fourth := first
+		fourth.ID = "inv-dup-4"
+		fourth.TokenHash = "hash-dup-4"
+		if err := s.CreateInvitation(ctx, fourth); err != nil {
+			t.Fatalf("create after original accepted: got %v, want nil", err)
+		}
+	})
+
+	t.Run("ReplaceInvitationAtomicSwap", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		created := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+		original := saas.Invitation{
+			ID: "inv-replace-old", OrgID: "org-1", Email: "resend@example.com", Role: saas.RoleMember,
+			TokenHash: "hash-replace-old", State: saas.InvitationPending, InviterID: "acc-owner",
+			CreatedAt: created, ExpiresAt: created.Add(saas.InvitationTTL),
+		}
+		must(t, s.CreateInvitation(ctx, original))
+
+		fresh := original
+		fresh.ID = "inv-replace-new"
+		fresh.TokenHash = "hash-replace-new"
+		fresh.CreatedAt = created.Add(time.Hour)
+		fresh.ExpiresAt = fresh.CreatedAt.Add(saas.InvitationTTL)
+		if err := s.ReplaceInvitation(ctx, original.ID, fresh); err != nil {
+			t.Fatalf("ReplaceInvitation: %v", err)
+		}
+
+		// The old row is gone.
+		if _, err := s.GetInvitationByTokenHash(ctx, original.TokenHash); !errors.Is(err, saas.ErrNotFound) {
+			t.Errorf("old invitation still resolvable by hash after replace: got %v, want ErrNotFound", err)
+		}
+		// The fresh row is present, at the SAME (org, email) as the one it
+		// replaced, proving the swap never trips the pending-uniqueness guard
+		// a plain create would hit while the original still existed.
+		got, err := s.GetInvitationByTokenHash(ctx, fresh.TokenHash)
+		if err != nil {
+			t.Fatalf("GetInvitationByTokenHash for fresh: %v", err)
+		}
+		if got != fresh {
+			t.Errorf("replaced invitation mismatch:\n got %+v\nwant %+v", got, fresh)
+		}
+		list, err := s.ListInvitations(ctx, "org-1")
+		if err != nil {
+			t.Fatalf("ListInvitations: %v", err)
+		}
+		if len(list) != 1 {
+			t.Fatalf("ListInvitations after replace: got %d rows, want 1 (old gone, fresh present)", len(list))
+		}
+
+		// Replacing an unknown old id is ErrNotFound.
+		if err := s.ReplaceInvitation(ctx, "ghost", fresh); !errors.Is(err, saas.ErrNotFound) {
+			t.Errorf("ReplaceInvitation unknown old id: got %v, want ErrNotFound", err)
+		}
+	})
+
 	t.Run("InvitationUpdateStateAndRemove", func(t *testing.T) {
 		s := factory(t)
 		ctx := context.Background()
