@@ -196,13 +196,15 @@ func (c *Console) handlePatchAccount(w http.ResponseWriter, r *http.Request) {
 		c.failAccount(w, err, "the account profile could not be read after update")
 		return
 	}
+	// Target is deliberately empty: the actor IS the subject of a profile
+	// update, so a Target duplicating ActorID adds nothing.
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "profile.update",
-		Target:  accountID,
-		Detail:  "updated account profile",
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "profile.update",
+		TargetType: "profile",
+		Detail:     "updated account profile",
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, accountView(updated, mems))
 }
@@ -238,6 +240,15 @@ func (c *Console) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.PathValue("id")
+	// Resolve the session's own label before revoking it, best-effort, so the
+	// audit event's TargetName is more legible than the bare session id.
+	var targetName string
+	for _, s := range c.deps.Sessions.ListByAccount(accountID) {
+		if s.ID == sessionID {
+			targetName = s.Label
+			break
+		}
+	}
 	if err := c.deps.Sessions.Revoke(accountID, sessionID); err != nil {
 		if errors.Is(err, saas.ErrNotFound) {
 			apierr.Encode(w, apierr.Get(apierr.CodeNotFound).
@@ -249,12 +260,14 @@ func (c *Console) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "session.revoke",
-		Target:  sessionID,
-		Detail:  "revoked session " + sessionID,
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "session.revoke",
+		Target:     sessionID,
+		TargetType: "session",
+		TargetName: targetName,
+		Detail:     "revoked session " + sessionID,
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"revoked": sessionID})
 }
@@ -268,13 +281,15 @@ func (c *Console) handleRevokeAllSessions(w http.ResponseWriter, r *http.Request
 		return
 	}
 	c.deps.Sessions.RevokeAll(accountID)
+	// Target is deliberately empty: this is a bulk action on the caller's own
+	// sessions, so there is no single target id to duplicate against ActorID.
 	c.audit(r.Context(), AuditEvent{
-		OrgID:   orgID,
-		ActorID: accountID,
-		Action:  "session.revoke_all",
-		Target:  accountID,
-		Detail:  "revoked all sessions",
-		At:      c.deps.Now(),
+		OrgID:      orgID,
+		ActorID:    accountID,
+		Action:     "session.revoke_all",
+		TargetType: "session",
+		Detail:     "revoked all sessions",
+		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"revoked_all": true})
 }

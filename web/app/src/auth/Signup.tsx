@@ -81,6 +81,16 @@ export function Signup({ next, initialEmail }: SignupProps) {
       ? (new URLSearchParams(window.location.search).get('uc') ?? '')
       : ''
 
+  // Resolve ?invite_token= carried from the pre-auth invite-accept page's
+  // "create account" CTA. Forwarding it lets the server auto-join the
+  // invited org on verification, in addition to the fresh Personal org,
+  // without a second round trip after signup (see
+  // Service.autoJoinPendingInvite server-side).
+  const inviteToken =
+    typeof window !== 'undefined'
+      ? (new URLSearchParams(window.location.search).get('invite_token') ?? '')
+      : ''
+
   const [email, setEmail] = useState(emailDefault)
   const [signupState, setSignupState] = useState<SignupState>('idle')
   const [submittedEmail, setSubmittedEmail] = useState('')
@@ -91,7 +101,11 @@ export function Signup({ next, initialEmail }: SignupProps) {
     if (!trimmed) return
     setSignupState('loading')
     try {
-      await post<null>('/onboarding/signup', { email: trimmed, ...(uc ? { uc } : {}) })
+      await post<null>('/onboarding/signup', {
+        email: trimmed,
+        ...(uc ? { uc } : {}),
+        ...(inviteToken ? { invite_token: inviteToken } : {}),
+      })
       setSubmittedEmail(trimmed)
       setSignupState('success')
     } catch {

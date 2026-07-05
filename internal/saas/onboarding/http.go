@@ -148,6 +148,12 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 		Email   string `json:"email"`
 		UC      string `json:"uc"`
 		Captcha string `json:"captcha"`
+		// InviteToken is the RAW token from an invite-accept link, carried
+		// through by the console SPA when a visitor without an existing
+		// account chooses "create account" from the pre-auth accept page. It
+		// is optional; only its hash is ever persisted (see
+		// PendingSignup.InviteTokenHash), and it is never logged.
+		InviteToken string `json:"invite_token"`
 	}
 	if err := decodeJSON(w, r, &req); err != nil {
 		return // decodeJSON already wrote the error
@@ -194,7 +200,7 @@ func (h *Handler) signUp(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	_, err := h.svc.SignUp(r.Context(), email, req.UC)
+	_, err := h.svc.SignUpWithInvite(r.Context(), email, req.UC, req.InviteToken)
 	// Account enumeration guard: a duplicate email (ErrConflict) returns the SAME
 	// accepted response as a fresh signup. Any OTHER error is a genuine server
 	// fault and is surfaced (without the email) so it is not silently swallowed.

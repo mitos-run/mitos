@@ -1,8 +1,11 @@
 // Live sandboxes list: polls every 10 s via useSandboxes, renders one row per
 // sandbox with an optimistic terminate action (the row disappears instantly and
 // rolls back if the server rejects). Each sandbox id links to its detail view.
+// The "New sandbox" primary action opens NewSandboxModal; the empty state
+// offers the same action so a fresh org is never a dead end.
+import { useState } from 'react'
 import { Link } from '@tanstack/react-router'
-import { StatusDot, Entity } from '@mitos/brand'
+import { Button, StatusDot, Entity } from '@mitos/brand'
 import { useSandboxes, useTerminateSandbox } from '../../data/sandboxes'
 import { fmtBytes } from '../../api'
 import { Skeleton } from '../../ui/Skeleton'
@@ -10,6 +13,7 @@ import { EmptyState } from '../../ui/EmptyState'
 import { useToast } from '../../ui/Toast'
 import { PageHeader } from '../../ui/PageHeader'
 import { TableToolbar, useTableFilter } from '../../ui/TableToolbar'
+import { NewSandboxModal } from './NewSandboxModal'
 
 function phaseEntity(phase: string): Entity {
   if (phase === 'Running') return 'ready'
@@ -22,6 +26,7 @@ export function SandboxList() {
   const terminate = useTerminateSandbox()
   const { notify } = useToast()
   const { query, setQuery, filtered } = useTableFilter(rows, (s) => `${s.id} ${s.template} ${s.node} ${s.phase}`)
+  const [showNew, setShowNew] = useState(false)
 
   function onTerminate(id: string) {
     terminate.mutate(id, {
@@ -29,6 +34,12 @@ export function SandboxList() {
       onError: () => notify(`Failed to terminate ${id}`, 'error'),
     })
   }
+
+  function onCreated(id: string) {
+    notify(`Created ${id}`, 'ok')
+  }
+
+  const newSandboxModal = showNew && <NewSandboxModal onClose={() => setShowNew(false)} onCreated={onCreated} />
 
   if (isError) {
     return (
@@ -52,14 +63,19 @@ export function SandboxList() {
     return (
       <section>
         <PageHeader title="Sandboxes" lede="Live sandboxes for this org. You see the sandboxes you can access." />
-        <EmptyState title="No live sandboxes" body="Fork your first sandbox to see it here." />
+        <EmptyState title="No live sandboxes" body="Start your first sandbox to see it here." action={{ label: 'New sandbox', onClick: () => setShowNew(true) }} />
+        {newSandboxModal}
       </section>
     )
   }
 
   return (
     <section>
-      <PageHeader title="Sandboxes" lede="Live sandboxes for this org. You see the sandboxes you can access." />
+      <PageHeader
+        title="Sandboxes"
+        lede="Live sandboxes for this org. You see the sandboxes you can access."
+        actions={<Button variant="primary" onClick={() => setShowNew(true)}>New sandbox</Button>}
+      />
       <div style={{ overflowX: 'auto' }}>
         <TableToolbar query={query} onQueryChange={setQuery} count={filtered.length} noun="sandboxes" />
         <table className="tbl" aria-label="Live sandboxes">
@@ -104,6 +120,7 @@ export function SandboxList() {
           </tbody>
         </table>
       </div>
+      {newSandboxModal}
     </section>
   )
 }

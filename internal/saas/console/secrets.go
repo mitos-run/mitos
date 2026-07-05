@@ -107,9 +107,10 @@ func (c *Console) handleCreateSecret(w http.ResponseWriter, r *http.Request) {
 		action = "secret.rotate"
 	}
 	// The audit detail carries only the non-secret name; never the value.
-	_ = c.deps.Audit.Record(r.Context(), AuditEvent{
+	c.audit(r.Context(), AuditEvent{
 		OrgID: orgID, ActorID: actorID, Action: action,
-		Target: view.Name, Detail: "secret " + view.Name, At: c.deps.Now(),
+		Target: view.Name, TargetType: "secret", TargetName: view.Name,
+		Detail: "secret " + view.Name, At: c.deps.Now(),
 	})
 	writeJSON(w, http.StatusCreated, view)
 }
@@ -131,9 +132,10 @@ func (c *Console) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the secret could not be deleted"))
 		return
 	}
-	_ = c.deps.Audit.Record(r.Context(), AuditEvent{
+	c.audit(r.Context(), AuditEvent{
 		OrgID: orgID, ActorID: actorID, Action: "secret.delete",
-		Target: name, Detail: "secret " + name, At: c.deps.Now(),
+		Target: name, TargetType: "secret", TargetName: name,
+		Detail: "secret " + name, At: c.deps.Now(),
 	})
 	w.WriteHeader(http.StatusNoContent)
 }

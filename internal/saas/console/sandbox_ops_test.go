@@ -1,0 +1,372 @@
+// Handler-level tests for the operate verbs (create, fork, exec, live logs)
+// added in sandbox_ops.go: org-scoping (a cross-org sandbox id is refused),
+// server-side bounds enforcement (vcpus/mem/count/timeout), audit events (and
+// that exec's audit detail never carries more than a preview of the command),
+// and the SSE log-stream handler's flush/heartbeat/ctx-cancel behavior.
+package console
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+	"unicode/utf8"
+)
+
+func (f *fixture) reqBody(t *testing.T, method, target, body, acct, org string) *httptest.ResponseRecorder {
+	t.Helper()
+	return f.req(t, method, target, body, acct, org)
+}
+
+// --- Create ---
+
+func TestCreateSandboxSucceedsAndAudits(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes", `{"template":"alice-tmpl","vcpus":2,"mem_gib":4}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var sb SandboxView
+	decode(t, w, &sb)
+	if sb.OrgID != f.aliceOrg || sb.Template != "alice-tmpl" || sb.VCPUs != 2 {
+		t.Fatalf("created sandbox = %+v, want org/template/vcpus to match request", sb)
+	}
+	if sb.ID == "" {
+		t.Fatal("created sandbox has no id")
+	}
+	// The new sandbox must be listable afterward, not just returned once.
+	if _, err := f.sandboxes.Get(context.Background(), f.aliceOrg, sb.ID); err != nil {
+		t.Fatalf("created sandbox is not gettable: %v", err)
+	}
+	events, _ := f.audit.List(context.Background(), f.aliceOrg, 0)
+	if len(events) == 0 || events[0].Action != "sandbox.create" || events[0].Target != sb.ID {
+		t.Fatalf("expected a sandbox.create audit event for %s, got %+v", sb.ID, events)
+	}
+}
+
+func TestCreateSandboxRejectsMissingTemplate(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes", `{"vcpus":1,"mem_gib":1}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestCreateSandboxRejectsOutOfBoundsVCPUsAndMem(t *testing.T) {
+	f := newFixture(t)
+	cases := []string{
+		`{"template":"t","vcpus":3,"mem_gib":1}`,  // 3 is not an allowed vcpu option
+		`{"template":"t","vcpus":1,"mem_gib":16}`, // 16 exceeds the mem_gib option set
+		`{"template":"t","vcpus":0,"mem_gib":1}`,
+	}
+	for _, body := range cases {
+		w := f.reqBody(t, "POST", "/console/sandboxes", body, f.aliceAcct, f.aliceOrg)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("body %s: status = %d, want 400; resp=%s", body, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestCreateSandboxRejectsInvalidJSON(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes", `{not json`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestCreateSandboxWithProjectRequiresProjectAccess is the load-bearing
+// permission-escalation test: a caller with org-wide PermUseResources but no
+// PermManageProjects and no membership in the target project must NOT be able
+// to use create-with-project_id to plant a sandbox into a project they cannot
+// otherwise touch (that would route around the stricter PermManageProjects
+// gate on PUT .../project). A caller who IS a member of that project (even
+// with a lesser org-wide role) succeeds.
+func TestCreateSandboxWithProjectRequiresProjectAccess(t *testing.T) {
+	pf := newProjectAccessFixture(t)
+
+	// MEMBER: org-wide PermUseResources, no project P membership -> forbidden.
+	body := `{"template":"t","vcpus":1,"mem_gib":1,"project_id":"` + pf.projectP + `"}`
+	r := httptest.NewRequest("POST", "/console/sandboxes", strings.NewReader(body))
+	r = r.WithContext(WithCaller(r.Context(), pf.memberAcct, pf.orgID))
+	w := httptest.NewRecorder()
+	pf.con.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("member create-into-project status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+
+	// PVIEWER: org-wide Viewer (read-only) but project P Admin -> allowed.
+	r2 := httptest.NewRequest("POST", "/console/sandboxes", strings.NewReader(body))
+	r2 = r2.WithContext(WithCaller(r2.Context(), pf.pviewerAcct, pf.orgID))
+	w2 := httptest.NewRecorder()
+	pf.con.ServeHTTP(w2, r2)
+	if w2.Code != http.StatusCreated {
+		t.Fatalf("pviewer create-into-project status = %d, want 201; body=%s", w2.Code, w2.Body.String())
+	}
+	var sb SandboxView
+	if err := json.Unmarshal(w2.Body.Bytes(), &sb); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if sb.ProjectID != pf.projectP {
+		t.Fatalf("created sandbox project_id = %q, want %q", sb.ProjectID, pf.projectP)
+	}
+}
+
+// --- Fork ---
+
+func TestForkSandboxRefusesCrossOrg(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-bob-1/fork", `{"count":2}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("cross-org fork status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestForkSandboxRejectsOutOfBoundsCount(t *testing.T) {
+	f := newFixture(t)
+	for _, body := range []string{`{"count":0}`, `{"count":17}`, `{"count":-1}`} {
+		w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/fork", body, f.aliceAcct, f.aliceOrg)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("body %s: status = %d, want 400; resp=%s", body, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestForkSandboxSucceedsReturnsIDsAndAudits(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/fork", `{"count":3}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Source string   `json:"source"`
+		IDs    []string `json:"ids"`
+	}
+	decode(t, w, &resp)
+	if resp.Source != "sb-alice-1" || len(resp.IDs) != 3 {
+		t.Fatalf("fork response = %+v, want source sb-alice-1 and 3 ids", resp)
+	}
+	for _, id := range resp.IDs {
+		if _, err := f.sandboxes.Get(context.Background(), f.aliceOrg, id); err != nil {
+			t.Errorf("forked sandbox %s not gettable in aliceOrg: %v", id, err)
+		}
+	}
+	events, _ := f.audit.List(context.Background(), f.aliceOrg, 0)
+	if len(events) == 0 || events[0].Action != "sandbox.fork" || events[0].Target != "sb-alice-1" {
+		t.Fatalf("expected a sandbox.fork audit event, got %+v", events)
+	}
+}
+
+// --- Exec ---
+
+func TestExecSandboxRefusesCrossOrg(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-bob-1/exec", `{"cmd":"echo hi"}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("cross-org exec status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestExecSandboxRejectsEmptyCmdAndBadTimeout(t *testing.T) {
+	f := newFixture(t)
+	for _, body := range []string{`{"cmd":""}`, `{"cmd":"echo hi","timeout_s":61}`, `{"cmd":"echo hi","timeout_s":-1}`} {
+		w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", body, f.aliceAcct, f.aliceOrg)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("body %s: status = %d, want 400; resp=%s", body, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestExecSandboxSucceedsAndAuditsTruncatedCommandOnly(t *testing.T) {
+	f := newFixture(t)
+	f.sandboxes.SetExecResult("sb-alice-1", ExecResult{Stdout: "hi\n", ExitCode: 0})
+	longCmd := "echo " + strings.Repeat("x", 200) + " && export SECRET=do-not-log-me"
+	body := `{"cmd":` + jsonString(longCmd) + `,"timeout_s":5}`
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", body, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp execSandboxResponse
+	decode(t, w, &resp)
+	if resp.Stdout != "hi\n" || resp.ExitCode != 0 {
+		t.Fatalf("exec response = %+v, want the scripted result", resp)
+	}
+	events, _ := f.audit.List(context.Background(), f.aliceOrg, 0)
+	if len(events) == 0 || events[0].Action != "sandbox.exec" {
+		t.Fatalf("expected a sandbox.exec audit event, got %+v", events)
+	}
+	detail := events[0].Detail
+	if strings.Contains(detail, "SECRET") || strings.Contains(detail, "do-not-log-me") {
+		t.Fatalf("audit detail leaked past the command preview: %q", detail)
+	}
+	if len(detail) > len("executed: ")+auditCmdPreviewLen {
+		t.Fatalf("audit detail longer than the 80-char preview budget: %q", detail)
+	}
+}
+
+// TestExecSandboxZeroTimeoutDefaultsToThirty asserts the handler applies a
+// default 30s timeout before calling the SandboxControl seam when the
+// caller's timeout_s is 0, instead of forwarding 0 (which would mean
+// "unbounded" against a real backend and could let a single command run
+// forever holding shared BFF resources).
+func TestExecSandboxZeroTimeoutDefaultsToThirty(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", `{"cmd":"echo hi","timeout_s":0}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if got := f.sandboxes.LastTimeoutSec("sb-alice-1"); got != 30 {
+		t.Fatalf("backend received timeout_s = %d, want the 30s default", got)
+	}
+}
+
+// TestExecSandboxNonZeroTimeoutPassesThrough asserts an explicit, in-bounds
+// timeout_s is forwarded unchanged (the default only kicks in for 0).
+func TestExecSandboxNonZeroTimeoutPassesThrough(t *testing.T) {
+	f := newFixture(t)
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", `{"cmd":"echo hi","timeout_s":5}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if got := f.sandboxes.LastTimeoutSec("sb-alice-1"); got != 5 {
+		t.Fatalf("backend received timeout_s = %d, want the caller's explicit 5", got)
+	}
+}
+
+// TestExecSandboxTruncatesLargeOutputWithMarker is the load-bearing
+// unbounded-output test: a backend that returns more than 256 KiB of stdout
+// or stderr must have its response truncated with a trailing marker line, so
+// a high-output command cannot exhaust the shared BFF's memory when it is
+// serialized and held in the response body.
+func TestExecSandboxTruncatesLargeOutputWithMarker(t *testing.T) {
+	f := newFixture(t)
+	big := strings.Repeat("x", maxExecOutputBytes+100)
+	f.sandboxes.SetExecResult("sb-alice-1", ExecResult{Stdout: big, Stderr: big, ExitCode: 0})
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", `{"cmd":"echo hi"}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	var resp execSandboxResponse
+	decode(t, w, &resp)
+	if len(resp.Stdout) > maxExecOutputBytes+len(truncatedOutputMarker) {
+		t.Fatalf("stdout not truncated: got %d bytes", len(resp.Stdout))
+	}
+	if !strings.HasSuffix(resp.Stdout, truncatedOutputMarker) {
+		t.Fatalf("stdout missing the truncation marker: tail=%q", resp.Stdout[max(0, len(resp.Stdout)-60):])
+	}
+	if len(resp.Stderr) > maxExecOutputBytes+len(truncatedOutputMarker) {
+		t.Fatalf("stderr not truncated: got %d bytes", len(resp.Stderr))
+	}
+	if !strings.HasSuffix(resp.Stderr, truncatedOutputMarker) {
+		t.Fatalf("stderr missing the truncation marker: tail=%q", resp.Stderr[max(0, len(resp.Stderr)-60):])
+	}
+}
+
+// TestExecSandboxOutputUnderLimitIsUnchanged asserts short output is
+// returned verbatim, with no marker appended.
+func TestExecSandboxOutputUnderLimitIsUnchanged(t *testing.T) {
+	f := newFixture(t)
+	f.sandboxes.SetExecResult("sb-alice-1", ExecResult{Stdout: "hi\n", Stderr: "", ExitCode: 0})
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", `{"cmd":"echo hi"}`, f.aliceAcct, f.aliceOrg)
+	var resp execSandboxResponse
+	decode(t, w, &resp)
+	if resp.Stdout != "hi\n" || resp.Stderr != "" {
+		t.Fatalf("small output was mutated: %+v", resp)
+	}
+}
+
+// TestExecSandboxTruncationIsRuneSafe asserts the truncation never splits a
+// multi-byte UTF-8 rune, even when the byte cutoff lands in the middle of
+// one.
+func TestExecSandboxTruncationIsRuneSafe(t *testing.T) {
+	f := newFixture(t)
+	// Filler puts the maxExecOutputBytes-th byte in the middle of a run of
+	// 2-byte runes, which a byte-naive truncation would split.
+	filler := strings.Repeat("a", maxExecOutputBytes-1)
+	big := filler + strings.Repeat("é", 8) // e-acute, 2 bytes each in UTF-8
+	f.sandboxes.SetExecResult("sb-alice-1", ExecResult{Stdout: big, ExitCode: 0})
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", `{"cmd":"echo hi"}`, f.aliceAcct, f.aliceOrg)
+	var resp execSandboxResponse
+	decode(t, w, &resp)
+	trimmed := strings.TrimSuffix(resp.Stdout, truncatedOutputMarker)
+	if !utf8.ValidString(trimmed) {
+		t.Fatalf("truncated stdout is not valid UTF-8: a multi-byte rune was split")
+	}
+}
+
+func TestExecSandboxUnsupportedMapsTo501(t *testing.T) {
+	f := newFixture(t)
+	f.sandboxes.SetExecErr("sb-alice-1", ErrUnsupported)
+	w := f.reqBody(t, "POST", "/console/sandboxes/sb-alice-1/exec", `{"cmd":"echo hi"}`, f.aliceAcct, f.aliceOrg)
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// --- SSE log stream ---
+
+func TestSandboxLogsStreamRefusesCrossOrg(t *testing.T) {
+	f := newFixture(t)
+	w := f.req(t, "GET", "/console/sandboxes/sb-alice-1/logs/stream", "", f.bobAcct, f.bobOrg)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("cross-org stream status = %d, want 404; body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "alice-log") {
+		t.Fatalf("cross-org stream leaked alice's log content: %s", w.Body.String())
+	}
+}
+
+// TestSandboxLogsStreamSendsSSEAndClosesOnCtxCancel is the load-bearing SSE
+// test: it asserts the response is text/event-stream, the seeded lines arrive
+// as "data:" events, at least one heartbeat comment is sent while the
+// connection is held open, and the handler actually returns (does not hang
+// forever) once the request context is canceled.
+func TestSandboxLogsStreamSendsSSEAndClosesOnCtxCancel(t *testing.T) {
+	f := newFixture(t)
+	origInterval := sseHeartbeatInterval
+	sseHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { sseHeartbeatInterval = origInterval })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("GET", "/console/sandboxes/sb-alice-1/logs/stream", nil)
+	r = r.WithContext(WithCaller(ctx, f.aliceAcct, f.aliceOrg))
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		f.con.ServeHTTP(w, r)
+		close(done)
+	}()
+
+	// Give the heartbeat ticker time to fire at least once before we cancel.
+	time.Sleep(40 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after context cancellation; SSE loop leaked")
+	}
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("content-type = %q, want text/event-stream", ct)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "data: alice-log-line-1") {
+		t.Fatalf("missing seeded log line as an SSE data event: %q", body)
+	}
+	if !strings.Contains(body, ": heartbeat") {
+		t.Fatalf("missing heartbeat comment: %q", body)
+	}
+}

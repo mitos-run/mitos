@@ -43,6 +43,25 @@ func (a *AuthorizingLogStreamer) StreamLogs(ctx context.Context, orgID, sandboxI
 	return a.raw.StreamRaw(ctx, sandboxID, sink)
 }
 
+// UnsupportedRawLogStreamer is the RawLogStreamer wired in a real cluster
+// deployment today: there is currently no forkd/guest RPC that exposes a
+// sandbox's stdout/stderr (unlike exec/fork/create, which map onto existing
+// CRD or HTTP operations, live log streaming has no real transport yet, a
+// documented control-plane gap). StreamRaw always reports ErrUnsupported,
+// which the console maps to HTTP 501, so GET .../logs/stream shows an honest
+// "not available yet" state instead of a permanently-empty stream that looks
+// like a successful, quiet sandbox.
+type UnsupportedRawLogStreamer struct{}
+
+// NewUnsupportedRawLogStreamer returns the always-ErrUnsupported raw log
+// streamer.
+func NewUnsupportedRawLogStreamer() UnsupportedRawLogStreamer { return UnsupportedRawLogStreamer{} }
+
+// StreamRaw always returns ErrUnsupported.
+func (UnsupportedRawLogStreamer) StreamRaw(context.Context, string, LogSink) error {
+	return ErrUnsupported
+}
+
 // MemRawLogStreamer is the in-memory RawLogStreamer tested default: a fixed
 // sandboxID -> lines map. Safe for concurrent use.
 type MemRawLogStreamer struct {

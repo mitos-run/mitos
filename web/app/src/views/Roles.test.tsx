@@ -129,6 +129,17 @@ describe('Roles view', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /delete deployer/i })).toBeInTheDocument())
   })
 
+  // Mobile: the custom-roles table needs its own horizontal-scroll wrapper
+  // (like the permission matrix above it), or a name+permissions-heavy table
+  // can force the page body itself to scroll horizontally on a narrow phone.
+  it('wraps the custom roles table in a horizontal-scroll container', async () => {
+    await renderAt('/roles', caps)
+    const table = await screen.findByRole('table', { name: /custom roles/i })
+    const wrapper = table.parentElement
+    expect(wrapper).not.toBeNull()
+    expect((wrapper as HTMLElement).style.overflowX).toBe('auto')
+  })
+
   it('shows an honest note about API enforcement and owner/admin restriction', async () => {
     await renderAt('/roles', caps)
     await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: /roles/i })).toBeInTheDocument())

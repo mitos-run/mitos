@@ -26,6 +26,11 @@ const (
 	KindUsageDrawdown EntryKind = "usage_drawdown"
 	// KindAdjustment is a manual operator credit or debit (refund, comp, clawback).
 	KindAdjustment EntryKind = "adjustment"
+	// KindBoxGrant is the monthly usage credit granted for a reserved Box
+	// capacity purchase (see reservation.go's ApplyMonthlyGrant). A positive
+	// entry, keyed per (org, month, box) so re-running the monthly grant job
+	// never double-credits the same org's same box in the same month.
+	KindBoxGrant EntryKind = "box_grant"
 )
 
 // LedgerEntry is one immutable line in an org's credit ledger. Amount is signed:

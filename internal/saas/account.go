@@ -146,9 +146,12 @@ func (s *AccountService) MemberRole(ctx context.Context, accountID, orgID string
 
 // SetMemberRole changes targetAccountID's role within orgID. The actor must
 // hold a role that can manage members (Owner or Admin); otherwise ErrForbidden
-// is returned. The target must already be a member; otherwise ErrNotFound is
-// returned. The last owner of an org cannot be demoted; ErrLastOwner is
-// returned in that case.
+// is returned. Even a PermManageMembers holder cannot grant the owner role
+// unless the actor is ALREADY an owner (canGrantRole); an admin attempting to
+// promote someone to owner gets ErrRoleNotGrantable, closing the privilege-
+// escalation path where an admin mints a new owner. The target must already
+// be a member; otherwise ErrNotFound is returned. The last owner of an org
+// cannot be demoted; ErrLastOwner is returned in that case.
 func (s *AccountService) SetMemberRole(ctx context.Context, actorID, orgID, targetAccountID string, role Role) error {
 	actorRole, err := s.memberRole(ctx, actorID, orgID)
 	if err != nil {
@@ -157,7 +160,28 @@ func (s *AccountService) SetMemberRole(ctx context.Context, actorID, orgID, targ
 	if !actorRole.Can(PermManageMembers) {
 		return ErrForbidden
 	}
+	if !canGrantRole(actorRole, role) {
+		return ErrRoleNotGrantable
+	}
 	return s.store.SetMembershipRole(ctx, orgID, targetAccountID, role)
+}
+
+// RemoveMember removes targetAccountID's membership from orgID on behalf of
+// actorID. Removing ONESELF is always allowed (leaving an org needs no
+// special permission); removing someone else requires the actor's role to
+// grant PermManageMembers, otherwise ErrForbidden. In either case the
+// store's last-owner protection applies: removing the sole remaining owner
+// returns ErrLastOwner. The target must already be a member (ErrNotFound
+// otherwise).
+func (s *AccountService) RemoveMember(ctx context.Context, actorID, orgID, targetAccountID string) error {
+	actorRole, err := s.memberRole(ctx, actorID, orgID)
+	if err != nil {
+		return err
+	}
+	if actorID != targetAccountID && !actorRole.Can(PermManageMembers) {
+		return ErrForbidden
+	}
+	return s.store.DeleteMembership(ctx, orgID, targetAccountID)
 }
 
 // CreateKey mints a scoped key for an org on behalf of accountID, enforcing that
@@ -208,6 +232,15 @@ type ProfileUpdate struct {
 	DisplayName string
 	Timezone    string
 	Locale      string
+}
+
+// GetAccount returns the account by id with no membership check: a plain,
+// read-only lookup. It is used for best-effort display-name resolution (the
+// console audit log's actor and target names) where the caller is not
+// necessarily the account itself, so the membership-guarded Profile is not
+// the right seam.
+func (s *AccountService) GetAccount(ctx context.Context, id string) (Account, error) {
+	return s.store.GetAccount(ctx, id)
 }
 
 // Profile returns the account and its memberships for accountID. It is the

@@ -2,13 +2,16 @@
 // Description, Updated. Empty state when none exist. Consumes the live BFF
 // via useTemplates().
 import { useTemplates } from '../data/account'
+import { useAccount } from '../data/account-settings'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
+import { fmtAbsolute } from '../lib/dates'
 import { PageHeader } from '../ui/PageHeader'
 import { TableToolbar, useTableFilter } from '../ui/TableToolbar'
 
 export function Templates() {
   const { data: templates = [], isLoading } = useTemplates()
+  const { data: account } = useAccount()
   const { query, setQuery, filtered } = useTableFilter(templates, (t) => `${t.name} ${t.description}`)
 
   return (
@@ -40,7 +43,7 @@ export function Templates() {
                   <td className="mono">{t.name}</td>
                   <td className="mono t-dim">{t.image}</td>
                   <td>{t.description}</td>
-                  <td className="t-dim">{new Date(t.updated_at).toLocaleDateString()}</td>
+                  <td className="t-dim">{fmtAbsolute(t.updated_at, account?.locale, account?.timezone)}</td>
                 </tr>
               ))}
             </tbody>

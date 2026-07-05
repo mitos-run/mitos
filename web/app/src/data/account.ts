@@ -1,14 +1,15 @@
 // Account-scoped data: api keys (with the create-once flow), usage, audit,
-// templates, billing, and spend cap. Mutations invalidate their list; revoke
-// is optimistic.
+// templates, billing, spend cap, and the Box catalog. Mutations invalidate
+// their list; revoke is optimistic.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type KeyView, type AuditEvent, type TemplateView, type UsageResponse, type BillingView } from '../api'
+import { api, type KeyView, type AuditEvent, type TemplateView, type UsageResponse, type BillingView, type BoxView } from '../api'
 
 export function useKeys() { return useQuery<KeyView[]>({ queryKey: ['keys'], queryFn: () => api.keys() }) }
 export function useUsage() { return useQuery<UsageResponse>({ queryKey: ['usage'], queryFn: () => api.usage() }) }
 export function useAudit() { return useQuery<AuditEvent[]>({ queryKey: ['audit'], queryFn: () => api.audit() }) }
 export function useTemplates() { return useQuery<TemplateView[]>({ queryKey: ['templates'], queryFn: () => api.templates() }) }
 export function useBilling() { return useQuery<BillingView>({ queryKey: ['billing'], queryFn: () => api.billing() }) }
+export function useBoxes() { return useQuery<BoxView[]>({ queryKey: ['boxes'], queryFn: () => api.boxes() }) }
 
 export function useSetSpendCap() {
   const qc = useQueryClient()

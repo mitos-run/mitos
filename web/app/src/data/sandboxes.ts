@@ -2,7 +2,7 @@
 // Terminate removes the row from the list cache immediately and rolls back if the
 // BFF rejects, so the UI feels instant but stays honest.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type SandboxView } from '../api'
+import { api, type CreateSandboxRequest, type SandboxView } from '../api'
 
 export function useSandboxes() {
   return useQuery<SandboxView[]>({ queryKey: ['sandboxes'], queryFn: () => api.sandboxes(), refetchInterval: 10_000 })
@@ -24,6 +24,43 @@ export function useSetSandboxProject() {
       void qc.invalidateQueries({ queryKey: ['sandboxes'] })
       void qc.invalidateQueries({ queryKey: ['sandbox', v.id] })
     },
+  })
+}
+
+// useCreateSandbox posts a new sandbox and, on success, inserts it into the
+// cached list immediately (an optimistic-feeling insert without guessing the
+// server-assigned id: it invalidates right after so the next poll reconciles
+// with the real record).
+export function useCreateSandbox() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (req: CreateSandboxRequest) => api.createSandbox(req),
+    onSuccess: (created) => {
+      qc.setQueryData<SandboxView[]>(['sandboxes'], (cur) => [...(cur ?? []), created])
+      void qc.invalidateQueries({ queryKey: ['sandboxes'] })
+    },
+  })
+}
+
+// useForkSandbox creates count copies of a sandbox. The list and fork-tree
+// queries are invalidated on success so the new nodes show up without waiting
+// for the next poll.
+export function useForkSandbox() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { id: string; count: number }) => api.forkSandbox(v.id, v.count),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['sandboxes'] })
+      void qc.invalidateQueries({ queryKey: ['forktree'] })
+    },
+  })
+}
+
+// useExecSandbox runs one command in a sandbox (the RunCommand panel). It is
+// not cached: every submit is a fresh call.
+export function useExecSandbox() {
+  return useMutation({
+    mutationFn: (v: { id: string; cmd: string; timeoutS?: number }) => api.execSandbox(v.id, v.cmd, v.timeoutS),
   })
 }
 

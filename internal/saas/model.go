@@ -109,6 +109,25 @@ func (r Role) Can(p Permission) bool {
 	return rolePerms[r][p]
 }
 
+// canGrantRole reports whether actorRole may grant targetRole to someone
+// else, whether by inviting them (InvitationService.CreateInvite) or by
+// changing an existing member's role (AccountService.SetMemberRole). Only an
+// owner may grant the owner role; any other built-in role (admin, billing,
+// member, viewer) may be granted by anyone who already holds
+// PermManageMembers. This is the single ceiling both call sites enforce, so
+// an admin can never mint a new owner through either path. It does not
+// itself check whether actorRole holds PermManageMembers at all; callers
+// already gate that separately before reaching this check. It is defined
+// only in terms of the built-in Role values: a custom role (see
+// console.CustomRole) grants a permission set, never the literal "owner"
+// role string, so it never trips this ceiling.
+func canGrantRole(actorRole, targetRole Role) bool {
+	if targetRole == RoleOwner {
+		return actorRole == RoleOwner
+	}
+	return true
+}
+
 // Membership records that an account belongs to an organization with a role. A
 // single account may hold many memberships (one per org it belongs to).
 type Membership struct {

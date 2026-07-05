@@ -3,13 +3,16 @@
 import { useState } from 'react'
 import { Link } from '@tanstack/react-router'
 import { useProjects, useCreateProject } from '../data/org'
+import { useAccount } from '../data/account-settings'
 import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
+import { fmtAbsolute } from '../lib/dates'
 import { PageHeader } from '../ui/PageHeader'
 
 export function Projects() {
   const { data: projects = [], isLoading, isError } = useProjects()
+  const { data: account } = useAccount()
   const createProject = useCreateProject()
   const { notify } = useToast()
 
@@ -99,7 +102,7 @@ export function Projects() {
                 </div>
               )}
               <div className="t-dim" style={{ fontSize: 'var(--step--1)', marginTop: 'var(--space-1)' }}>
-                Created {new Date(p.created_at).toLocaleDateString()}
+                Created {fmtAbsolute(p.created_at, account?.locale, account?.timezone)}
               </div>
             </li>
           ))}

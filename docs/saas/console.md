@@ -52,8 +52,12 @@ query parameter, path, or body, and returns ONLY that org's data.
 | `/console/usage` | GET | current + historical usage and cost | `UsageStore` + `PriceList.Cost` |
 | `/console/billing` | GET | plan/status, spend, credit balance, dunning, ledger | billing ledger + status + caps + rates |
 | `/console/sandboxes` | GET | list running sandboxes | `SandboxControl` seam |
+| `/console/sandboxes` | POST | create a sandbox from a template | `SandboxControl.Create` |
 | `/console/sandboxes/{id}` | GET | inspect a sandbox | `SandboxControl` seam |
 | `/console/sandboxes/{id}` | DELETE | terminate a sandbox | `SandboxControl` seam |
+| `/console/sandboxes/{id}/fork` | POST | fork a sandbox into count copies (<=16) | `SandboxControl.Fork` |
+| `/console/sandboxes/{id}/exec` | POST | run one command (<=60s timeout) | `SandboxControl.Exec` |
+| `/console/sandboxes/{id}/logs/stream` | GET | live log tail over SSE | `LogStreamer` seam |
 | `/console/members` | GET | org members + roles | `AccountService.ListMembers` |
 | `/console/audit` | GET | org audit log | `AuditRecorder` seam |
 | `/console/templates` | GET | list templates | `TemplateLister` seam |
@@ -82,22 +86,81 @@ denied (403 for membership-guarded verbs) or reported as not-found (404 for a
 cross-org sandbox id). `memseams_test.go` asserts the seams enforce scoping at
 the seam, not just the handler.
 
+## The instance-operator plane (`/console/admin/...`)
+
+A SEPARATE authorization plane from everything above: every other endpoint is
+scoped to the CALLER'S OWN org (org RBAC, resolved by `permissionsFor`).
+`/console/admin/...` instead lets a deployment OPERATOR see every org, the
+node inventory, and the signup waitlist. It is gated by `isInstanceAdmin`
+(`internal/saas/console/admin.go`), never by an org role, so a org
+"owner"/"admin" is not automatically an instance admin:
+
+- an account whose email is in `MITOS_CONSOLE_INSTANCE_ADMINS`
+  (case-insensitive), the hosted-deployment path; or
+- the community-edition fallback: exactly one org exists on the deployment
+  and the caller is that org's owner. Gated on `Edition == "community"` so a
+  hosted deployment's first customer is never silently promoted.
+
+| Endpoint | Method | Reads |
+| --- | --- | --- |
+| `/console/admin/overview` | GET | org count, running sandboxes across all orgs, node readiness (or `null` if no `NodeSource`), signup mode |
+| `/console/admin/orgs` | GET | every org's plan tier, member count, running sandboxes, month-to-date usage (capped at the oldest 200 orgs for the rollup; `total` is always the true count) |
+| `/console/admin/nodes` | GET | the cluster's k8s nodes (name, ready, `mitos.run/kvm` label, `mitos.run/dedicated` taint, allocatable cpu/mem); `{"available": false}` with no Kubernetes client configured |
+| `/console/admin/waitlist` | GET | recorded waitlist entries (email, recorded time) |
+| `/console/admin/waitlist/{id}/approve` | POST | grants allowlist access to the entry's email and sends the "you're in" notification (`onboarding.ApproveWaitlistEntry`, the SAME mechanism `POST /internal/approve-signup` uses) |
+
+`Orgs` (`console.OrgDirectory`) is the one seam here that is deliberately NOT
+org-scoped: it lists every organization, because it backs this operator
+surface rather than a tenant-facing view (`saas.Store` satisfies it
+directly). `Nodes` (`console.NodeSource`) is `nil` when no Kubernetes client
+is configured; unlike every other seam in this package, `New` does NOT fill
+that in with an in-memory default, since "no cluster" is a real, permanent
+state the handler must report honestly rather than paper over.
+
+KNOWN GAP: waitlist entries are only ever written when the onboarding
+funnel's `POST /onboarding/signup` route is mounted, which happens only when
+`MITOS_CONSOLE_SIGNUP` is on (see `docs/saas/onboarding.md`). In the default
+waitlist deployment there is currently no wired public entry point that
+calls `Service.SignUp` in `ModeWaitlist`, so `/console/admin/waitlist` is
+correctly plumbed to the funnel's `PendingStore` but may show nothing until
+that collection gap is closed (a documented follow-up, not this
+workstream's scope).
+
+Every `/console/admin/...` handler is audited (`admin.*` actions,
+`TargetType` `"system"` for the read views, `"waitlist"` for approve).
+
 ## Live-sandbox and log-streaming approach
 
 Live sandboxes are the deliberate differentiator. The BFF shapes the view and
 enforces org-scoping NOW behind two seams:
 
-- `SandboxControl` (list / inspect / terminate): the in-memory
-  `MemSandboxControl` is the tested default. The REAL implementation queries the
-  control plane (the controller's claim/sandbox records) scoped to one org. That
-  cluster query is the documented follow-up; the seam is the place org-scoping is
-  enforced, so swapping it in does not move the isolation boundary.
-- `LogStreamer` (live log tail): a documented seam that reuses the EXISTING SDK
-  exec/log streaming transport (forkd `:9091` to the guest agent over vsock). The
-  BFF's job is only to AUTHORIZE the stream: the sandbox must belong to the
-  caller's org, otherwise the streamer returns `not_found`. The transport itself
-  is already built and tested elsewhere; wiring the proxy (an HTTP chunked or
-  websocket bridge over the existing transport) is the follow-up.
+- `SandboxControl` (list / inspect / terminate / create / fork / exec): the
+  in-memory `MemSandboxControl` is the tested default. The REAL implementation
+  (`internal/saas/console/clustersandbox`) queries and mutates the control
+  plane (`v1.Sandbox` CRDs) scoped to one org. Create writes a `v1.Sandbox`
+  sourced from the chosen pool template; Fork creates COUNT separate top-level
+  `v1.Sandbox` objects (each `replicas=1`, `source.fromSandbox` set to the
+  source), deliberately differing from `agentcli.ClusterBackend.Fork`'s
+  one-object-with-`replicas=N` shape so every fork stays independently
+  addressable through this same seam and visible as its own node in the fork
+  tree; Exec dials the sandbox's own HTTP endpoint with its token Secret's
+  bearer token, the same transport and Secret convention the CLI's
+  `ClusterBackend` uses. KNOWN GAP: `SandboxSpec` has no per-sandbox resource
+  override (sizing lives on the pool template), so Create's requested
+  vcpu/mem are recorded as display-only annotations, not enforced; making
+  per-request sizing real needs either a CRD field or a catalog of
+  per-size pool templates.
+- `LogStreamer` (live log tail): a documented seam. Unlike create/fork/exec,
+  there is currently NO real transport at all (no forkd/guest RPC exposes a
+  sandbox's stdout/stderr), so the real cluster deployment wires an explicit
+  `UnsupportedRawLogStreamer` that reports `ErrUnsupported`, mapped to HTTP 501
+  on both the plain `GET .../logs` route and the SSE `GET .../logs/stream`
+  route, rather than silently serving an always-empty, always-successful
+  stream. The BFF's job is still to AUTHORIZE the stream first (the sandbox
+  must belong to the caller's org, otherwise `not_found`), so authorization is
+  proven independent of whether a transport exists. Building the real
+  transport (an HTTP chunked or websocket bridge, or a genuinely new
+  forkd/guest RPC) is the follow-up.
 
 ## What ships today
 
@@ -114,9 +177,13 @@ enforces org-scoping NOW behind two seams:
 
 ## Documented follow-ups
 
-- The SPA frontend (React/Next) that renders the BFF.
-- The real control-plane `SandboxControl` (cluster query) and the `LogStreamer`
-  proxy over the existing exec/log transport.
+- The `LogStreamer` real transport: no forkd/guest RPC exposes a sandbox's
+  stdout/stderr today; the cluster deployment reports HTTP 501 honestly rather
+  than faking a stream. See the `LogStreamer` bullet above.
+- Per-request sandbox resource sizing (vcpus/mem_gib on create): `SandboxSpec`
+  has no per-sandbox override field, so a console-created sandbox's actual
+  resources are still whatever its pool template configures; the requested
+  sizing is recorded for display only. See the `SandboxControl` bullet above.
 - The `TemplateLister` over the `SandboxPool` CRDs (inline `spec.template`).
 - Real Stripe invoice objects in the billing view (today it shows the credit
   ledger entries).

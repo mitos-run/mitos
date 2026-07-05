@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // newAccountFixture wires an account service over a fresh in-memory store.
@@ -215,6 +216,47 @@ func TestSetMemberRoleAuthorization(t *testing.T) {
 	// SetMemberRole returns ErrNotFound for a target not in the org.
 	if err := svc.SetMemberRole(ctx, ownerID, orgID, "no-such-account", RoleMember); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown target SetMemberRole err = %v, want ErrNotFound", err)
+	}
+}
+
+// TestSetMemberRoleAdminCannotGrantOwner verifies the role-grant ceiling: an
+// admin holds PermManageMembers (so is not blocked by ErrForbidden) but must
+// not be able to promote anyone to owner, only an owner can. This closes the
+// privilege-escalation path an admin would otherwise have via direct role
+// changes, mirroring the same ceiling CreateInvite enforces.
+func TestSetMemberRoleAdminCannotGrantOwner(t *testing.T) {
+	svc, orgID, ownerID, memberID := seedOrgWithOwnerAndMember(t)
+	ctx := context.Background()
+
+	// Promote memberID to admin so it holds PermManageMembers.
+	if err := svc.SetMemberRole(ctx, ownerID, orgID, memberID, RoleAdmin); err != nil {
+		t.Fatalf("owner promote to admin: %v", err)
+	}
+
+	// A second account to be the target of the owner-grant attempt.
+	target, _, err := svc.SignUp(ctx, "target.seed@example.com")
+	if err != nil {
+		t.Fatalf("SignUp target: %v", err)
+	}
+	if err := svc.store.PutMembership(ctx, Membership{AccountID: target.ID, OrgID: orgID, Role: RoleViewer, CreatedAt: time.Now()}); err != nil {
+		t.Fatalf("seed target membership: %v", err)
+	}
+
+	// The admin cannot mint a new owner.
+	if err := svc.SetMemberRole(ctx, memberID, orgID, target.ID, RoleOwner); !errors.Is(err, ErrRoleNotGrantable) {
+		t.Fatalf("admin SetMemberRole to owner err = %v, want ErrRoleNotGrantable", err)
+	}
+
+	// The owner can.
+	if err := svc.SetMemberRole(ctx, ownerID, orgID, target.ID, RoleOwner); err != nil {
+		t.Fatalf("owner SetMemberRole to owner: %v", err)
+	}
+	members, err := svc.ListMembers(ctx, ownerID, orgID)
+	if err != nil {
+		t.Fatalf("ListMembers: %v", err)
+	}
+	if roleOf(members, target.ID) != RoleOwner {
+		t.Fatalf("target role = %s, want owner", roleOf(members, target.ID))
 	}
 }
 

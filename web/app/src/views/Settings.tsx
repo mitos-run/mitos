@@ -8,8 +8,10 @@ import { Skeleton } from '../ui/Skeleton'
 import { EmptyState } from '../ui/EmptyState'
 import { useToast } from '../ui/Toast'
 import { useAccount, useUpdateAccount, useSessions, useRevokeSession, useRevokeAllSessions } from '../data/account-settings'
-import { getAppearance, setAppearance, type Theme } from '../appearance'
+import { setAppearance, type Theme } from '../appearance'
+import { useAppearance } from '../useAppearance'
 import { PageHeader } from '../ui/PageHeader'
+import { fmtAbsolute } from '../lib/dates'
 
 const TABS: TabDef[] = [
   { key: 'profile', label: 'Profile' },
@@ -130,7 +132,7 @@ function ProfileTab() {
                     <td>
                       <span className={`role-badge role-${m.role}`}>{m.role}</span>
                     </td>
-                    <td className="t-dim">{new Date(m.created_at).toLocaleDateString()}</td>
+                    <td className="t-dim">{fmtAbsolute(m.created_at, account.locale, account.timezone)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -146,6 +148,7 @@ function ProfileTab() {
 
 function SecurityTab() {
   const { data: sessions = [], isLoading, isError } = useSessions()
+  const { data: account } = useAccount()
   const revokeSession = useRevokeSession()
   const revokeAll = useRevokeAllSessions()
   const { notify } = useToast()
@@ -192,7 +195,7 @@ function SecurityTab() {
               {sessions.map((s) => (
                 <tr key={s.id}>
                   <td>{s.label}</td>
-                  <td className="t-dim">{new Date(s.created_at).toLocaleDateString()}</td>
+                  <td className="t-dim">{fmtAbsolute(s.created_at, account?.locale, account?.timezone)}</td>
                   <td>{s.current ? <span className="t-dim">Current</span> : null}</td>
                   <td>
                     {!s.current && (
@@ -220,24 +223,21 @@ function SecurityTab() {
 // --- Appearance tab ---
 
 function AppearanceTab() {
-  const [prefs, setPrefs] = useState(() => getAppearance())
+  // Shared with every other mounted control (e.g. TopBar's ThemeToggle) via
+  // useAppearance's useSyncExternalStore subscription, so this always
+  // reflects the true current value instead of a stale local copy.
+  const prefs = useAppearance()
 
   function onReducedMotionChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const next = { ...prefs, reducedMotion: e.target.checked }
-    setPrefs(next)
-    setAppearance(next)
+    setAppearance({ ...prefs, reducedMotion: e.target.checked })
   }
 
   function onDensityChange(e: React.ChangeEvent<HTMLSelectElement>) {
-    const next = { ...prefs, density: e.target.value as 'comfortable' | 'compact' }
-    setPrefs(next)
-    setAppearance(next)
+    setAppearance({ ...prefs, density: e.target.value as 'comfortable' | 'compact' })
   }
 
   function onThemeChange(e: React.ChangeEvent<HTMLSelectElement>) {
-    const next = { ...prefs, theme: e.target.value as Theme }
-    setPrefs(next)
-    setAppearance(next)
+    setAppearance({ ...prefs, theme: e.target.value as Theme })
   }
 
   return (

@@ -221,8 +221,8 @@ func (r *DispatchingRecorder) Record(ctx context.Context, ev AuditEvent) error {
 }
 
 // List delegates to the inner recorder.
-func (r *DispatchingRecorder) List(ctx context.Context, orgID string) ([]AuditEvent, error) {
-	return r.inner.List(ctx, orgID)
+func (r *DispatchingRecorder) List(ctx context.Context, orgID string, limit int) ([]AuditEvent, error) {
+	return r.inner.List(ctx, orgID, limit)
 }
 
 // WaitForDispatch blocks until all in-flight best-effort dispatch goroutines

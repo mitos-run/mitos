@@ -126,7 +126,7 @@ func TestSecretMutationAudited(t *testing.T) {
 	f.req(t, "POST", "/console/secrets", `{"name":"K","value":"`+value+`"}`, f.aliceAcct, f.aliceOrg)
 	f.req(t, "DELETE", "/console/secrets/K", "", f.aliceAcct, f.aliceOrg)
 
-	events, err := f.audit.List(context.Background(), f.aliceOrg)
+	events, err := f.audit.List(context.Background(), f.aliceOrg, 0)
 	if err != nil {
 		t.Fatalf("audit list: %v", err)
 	}
@@ -139,6 +139,11 @@ func TestSecretMutationAudited(t *testing.T) {
 	}
 	if !contains(actions, "secret.create") || !contains(actions, "secret.delete") {
 		t.Fatalf("audit actions = %v, want secret.create and secret.delete", actions)
+	}
+	for _, ev := range events {
+		if ev.TargetType != "secret" || ev.TargetName != "K" {
+			t.Errorf("event %s: TargetType/TargetName = %q/%q, want secret/K", ev.Action, ev.TargetType, ev.TargetName)
+		}
 	}
 }
 

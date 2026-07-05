@@ -1,6 +1,6 @@
 // Audit view tests: filterable event table + retention panel + sinks panel.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { waitFor, screen } from '@testing-library/react'
+import { fireEvent, waitFor, screen } from '@testing-library/react'
 import { renderAt } from '../test/utils'
 import type { Capabilities } from '../api'
 
@@ -65,6 +65,84 @@ describe('Audit view', () => {
     // The sink table row contains the endpoint
     const endpointCell = screen.getByText('https://siem.example/hook')
     expect(endpointCell).toBeInTheDocument()
+  })
+
+  it('shows the actor display name with the raw id as a mono subline, and falls back to target_name for Target', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input) => {
+      const url = String(input).split('?')[0]
+      if (url.endsWith('/console/capabilities'))
+        return Promise.resolve(new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }))
+      if (url.endsWith('/console/audit'))
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              org_id: 'o',
+              events: [
+                {
+                  org_id: 'o',
+                  actor_id: 'acct-alice',
+                  actor_name: 'Alice Anderson',
+                  actor_type: 'user',
+                  action: 'key.create',
+                  target: 'k1',
+                  target_type: 'key',
+                  target_name: 'ci-key',
+                  detail: 'created api key',
+                  at: '2026-06-25T08:00:00Z',
+                },
+              ],
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+    await renderAt('/audit', caps)
+    await waitFor(() => expect(screen.getByText('Alice Anderson')).toBeInTheDocument())
+    expect(screen.getByText('acct-alice')).toBeInTheDocument()
+    expect(screen.getByText('ci-key')).toBeInTheDocument()
+    // The raw action code is still visible for machine-grep parity.
+    expect(screen.getByText('key.create')).toBeInTheDocument()
+  })
+
+  it('falls back to the raw actor id and target id when no name was resolved', async () => {
+    await renderAt('/audit', caps)
+    // The default beforeEach fixture has no actor_name/target_name.
+    await waitFor(() => expect(screen.getByText('alice')).toBeInTheDocument())
+    expect(screen.getByText('k1')).toBeInTheDocument()
+  })
+
+  it('shows the server plan_required cause when adding a sink is plan-gated', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input).split('?')[0]
+      const method = ((init as RequestInit | undefined)?.method ?? 'GET').toUpperCase()
+      if (url.endsWith('/console/capabilities'))
+        return Promise.resolve(new Response(JSON.stringify(caps), { status: 200, headers: { 'content-type': 'application/json' } }))
+      if (url.endsWith('/console/audit/sinks') && method === 'GET')
+        return Promise.resolve(new Response(JSON.stringify({ sinks: [] }), { status: 200, headers: { 'content-type': 'application/json' } }))
+      if (url.endsWith('/console/audit/sinks') && method === 'POST')
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              error: {
+                code: 'plan_required',
+                message: 'audit-sink streaming requires the Team plan',
+                cause: 'audit-sink streaming (forwarding events to webhook, s3, splunk, or datadog) requires the Team plan',
+                remediation: 'Upgrade to the Team plan.',
+              },
+            }),
+            { status: 402, headers: { 'content-type': 'application/json' } },
+          ),
+        )
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200, headers: { 'content-type': 'application/json' } }))
+    })
+
+    await renderAt('/audit', caps)
+    const endpointInput = await waitFor(() => screen.getByLabelText(/sink endpoint/i))
+    fireEvent.change(endpointInput, { target: { value: 'https://example.com/hook' } })
+    fireEvent.click(screen.getByRole('button', { name: /add sink/i }))
+
+    await waitFor(() => expect(screen.getByText(/requires the team plan/i)).toBeInTheDocument())
   })
 
   it('Export control is an anchor linking to /console/audit/export', async () => {

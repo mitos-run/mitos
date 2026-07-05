@@ -11,6 +11,7 @@ import {
 import { Login } from './Login'
 import { Signup } from './Signup'
 import { Verify } from './Verify'
+import { AcceptInvite } from './AcceptInvite'
 
 function PreAuthShell() {
   return (
@@ -52,13 +53,19 @@ export function createPreAuthRouter(initialPath?: string) {
     component: Verify,
   })
 
+  const acceptInviteRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/invite/accept',
+    component: () => <AcceptInvite authenticated={false} />,
+  })
+
   const indexRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: '/',
     component: () => <Navigate to="/login" />,
   })
 
-  const routeTree = rootRoute.addChildren([indexRoute, loginRoute, signupRoute, verifyRoute])
+  const routeTree = rootRoute.addChildren([indexRoute, loginRoute, signupRoute, verifyRoute, acceptInviteRoute])
 
   const router = createRouter({
     routeTree,

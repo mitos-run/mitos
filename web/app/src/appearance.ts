@@ -1,10 +1,18 @@
 // Appearance preferences: reduced-motion toggle, layout density, and theme.
 // Persisted to localStorage; applied immediately to document.documentElement.dataset
 // so that CSS can react without a React re-render cycle.
-// Theme: 'system' removes data-theme so the @media (prefers-color-scheme) default
-// in @mitos/brand tokens.css decides; 'dark'/'light' pin data-theme explicitly.
-// index.html applies a stored explicit theme before first paint; keep it in sync.
+// Theme: dark is the brand default (DEFAULTS.theme), so a first-time visitor with
+// no stored preference gets data-theme="dark" regardless of OS preference.
+// 'system' is a selectable opt-out that removes data-theme so the
+// @media (prefers-color-scheme) default in @mitos/brand tokens.css decides;
+// 'dark'/'light' pin data-theme explicitly.
+// index.html applies the resolved theme (stored value, or 'dark' when nothing is
+// stored / storage fails) before first paint; keep it in sync.
 // Guard every localStorage call with try/catch for SSR or restricted contexts.
+// setAppearance() notifies subscribe() listeners after persisting + applying,
+// so every mounted control (TopBar's ThemeToggle, Settings' AppearanceTab)
+// observes the same value instead of each holding its own stale copy. See
+// useAppearance.ts for the React hook built on top of subscribe().
 
 export type Density = 'comfortable' | 'compact'
 
@@ -18,7 +26,7 @@ export type Appearance = {
 
 const STORAGE_KEY = 'mitos-appearance'
 
-const DEFAULTS: Appearance = { reducedMotion: false, density: 'comfortable', theme: 'system' }
+const DEFAULTS: Appearance = { reducedMotion: false, density: 'comfortable', theme: 'dark' }
 
 export function getAppearance(): Appearance {
   try {
@@ -60,8 +68,37 @@ export function setAppearance(a: Appearance): void {
     // Storage unavailable: still apply to document
   }
   applyToDocument(a)
+  notify()
 }
 
 export function applyAppearanceOnLoad(): void {
   applyToDocument(getAppearance())
+}
+
+// --- Subscription registry ---
+// Framework-free pub/sub so React (or anything else) can observe changes
+// without appearance.ts depending on React. useAppearance.ts wraps this in a
+// useSyncExternalStore-based hook.
+
+type Listener = () => void
+
+const listeners = new Set<Listener>()
+
+export function subscribe(listener: Listener): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
+}
+
+function notify(): void {
+  for (const listener of listeners) {
+    try {
+      listener()
+    } catch {
+      // Isolate one bad subscriber from breaking the rest: every mounted
+      // control observing this value must still get notified even if an
+      // earlier listener throws.
+    }
+  }
 }

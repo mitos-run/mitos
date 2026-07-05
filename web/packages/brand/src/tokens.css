@@ -1,4 +1,8 @@
-/* Fluorescence design tokens: single source of truth.
+/* Fluorescence design tokens: single source of truth for BOTH the console
+   (web/app) and the marketing website. The website vendors a byte-identical
+   copy at src/styles/tokens.css, checked against scripts/brand-tokens.sha256
+   by scripts/check-brand-tokens.mjs on every website build. Never hand-edit
+   the website copy: edit this file, then re-sync and update the hash.
    Spec: docs/superpowers/specs/2026-06-22-fluorescence-brand-book-design.md
    Edit tokens here ONLY. Pages/components reference var(--*), never raw hex.
 
@@ -49,8 +53,28 @@
   --step-4: 2.441rem;
   --step-5: clamp(2.6rem, 5vw, 3.815rem);
   --step-6: clamp(3.2rem, 7vw, 5.96rem);
+  /* website semantic type roles; console keeps using --step-* above */
+  --text-display:         clamp(46px, 6vw, 76px);
+  --text-display-sm:      clamp(30px, 8.4vw, 48px);
+  --text-display-compact: clamp(40px, 4.6vw, 60px);
+  --text-h2:              clamp(28px, 3.6vw, 42px);
+  --text-h2-sm:           clamp(24px, 7vw, 32px);
+  --text-h3:              clamp(22px, 2.6vw, 28px);
+  --text-cta:             clamp(30px, 5vw, 52px);
+  --text-lede:       19px;
+  --text-title:      18px;
+  --text-body:       17px;
+  --text-ui:         15px;
+  --text-dense:      14px;
+  --text-caption:    13px;
+  --text-micro:      12px;
+  --text-nano:       11px;
+  --text-code:       13px;
+  --text-code-block: 12.5px;
   --lh-tight: 1.02;
+  --lh-snug:  1.55;
   --lh-body: 1.5;
+  --lh-prose: 1.7;
   --track-display: -0.03em;
 
   /* ---- Spacing (8px base) ---- */
