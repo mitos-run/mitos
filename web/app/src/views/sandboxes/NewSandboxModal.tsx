@@ -5,12 +5,15 @@
 // hand (see internal/saas/console/sandbox_ops.go allowedVCPUs/allowedMemGiB).
 //
 // A11y: role="dialog" + aria-modal, labelled by the heading, Escape closes,
-// the first field receives focus on open, matching InviteModal's pattern.
+// the first field receives focus on open, Tab/Shift+Tab is trapped within
+// the dialog, and focus returns to whatever opened it on close, all via the
+// shared useModalFocus hook (matching InviteModal's pattern).
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@mitos/brand'
 import { useCreateSandbox } from '../../data/sandboxes'
 import { useTemplates } from '../../data/account'
 import { useProjects } from '../../data/org'
+import { useModalFocus } from '../../ui/useModalFocus'
 
 const VCPU_OPTIONS = [1, 2, 4]
 const MEM_GIB_OPTIONS = [1, 2, 4, 8]
@@ -30,10 +33,9 @@ export function NewSandboxModal({ onClose, onCreated }: NewSandboxModalProps) {
   const [projectId, setProjectId] = useState('')
   const [error, setError] = useState<string | null>(null)
   const firstFieldRef = useRef<HTMLSelectElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    firstFieldRef.current?.focus()
-  }, [])
+  useModalFocus(dialogRef, { active: true, initialFocusRef: firstFieldRef })
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -75,6 +77,7 @@ export function NewSandboxModal({ onClose, onCreated }: NewSandboxModalProps) {
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="new-sandbox-modal-title"

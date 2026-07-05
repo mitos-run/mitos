@@ -6,11 +6,14 @@
 // malformed) never silently swallows the rest.
 //
 // A11y: role="dialog" + aria-modal, labelled by the heading, Escape closes,
-// the first field receives focus on open, a visible focus ring on every
-// control (inherited from base.css / the shared .btn/.auth-link-btn rules).
+// the first field receives focus on open, Tab/Shift+Tab is trapped within
+// the dialog, and focus returns to whatever opened it on close (all via the
+// shared useModalFocus hook), a visible focus ring on every control
+// (inherited from base.css / the shared .btn/.auth-link-btn rules).
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@mitos/brand'
 import { useCreateInvite } from '../../data/org'
+import { useModalFocus } from '../../ui/useModalFocus'
 import type { Role } from '../../api'
 
 const ROLES: Role[] = ['admin', 'member', 'billing', 'viewer']
@@ -41,10 +44,9 @@ export function InviteModal({ onClose }: InviteModalProps) {
   const [results, setResults] = useState<SendResult[] | null>(null)
   const [sending, setSending] = useState(false)
   const firstFieldRef = useRef<HTMLTextAreaElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    firstFieldRef.current?.focus()
-  }, [])
+  useModalFocus(dialogRef, { active: true, initialFocusRef: firstFieldRef })
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -92,6 +94,7 @@ export function InviteModal({ onClose }: InviteModalProps) {
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="invite-modal-title"

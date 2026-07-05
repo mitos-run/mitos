@@ -240,6 +240,31 @@ describe('Members view', () => {
     fireEvent.mouseDown(backdrop, { target: backdrop })
     expect(screen.getByRole('alertdialog')).toBeInTheDocument()
   })
+
+  // Shared useModalFocus behavior (issue #713): focuses Cancel (the
+  // non-destructive default) on open, traps Tab within the dialog, and
+  // returns focus to the row's Remove button once it closes.
+  it('focuses Cancel on open and traps Tab back to it from the Remove button', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: /remove bob/i }))
+    const dialog = screen.getByRole('alertdialog')
+    const cancelButton = within(dialog).getByRole('button', { name: /cancel/i })
+    expect(cancelButton).toHaveFocus()
+    const confirmButton = within(dialog).getByRole('button', { name: /^remove$/i })
+    confirmButton.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(cancelButton).toHaveFocus()
+  })
+
+  it('returns focus to the row Remove button once the confirmation is cancelled', async () => {
+    await renderAt('/members', caps)
+    await waitFor(() => expect(screen.getByText('bob')).toBeInTheDocument())
+    const removeButton = screen.getByRole('button', { name: /remove bob/i })
+    fireEvent.click(removeButton)
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
+    expect(removeButton).toHaveFocus()
+  })
 })
 
 describe('Projects view', () => {

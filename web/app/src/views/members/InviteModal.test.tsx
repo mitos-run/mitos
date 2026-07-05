@@ -86,6 +86,30 @@ describe('InviteModal', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
+  it('traps Tab from the last button back to the textarea, and Shift+Tab from the textarea to the last button', () => {
+    wrap(<InviteModal onClose={vi.fn()} />)
+    const textarea = screen.getByLabelText(/email addresses/i)
+    // Enable the Send button (disabled with no address entered) so it is a
+    // real focusable, and therefore the last element in tab order.
+    fireEvent.change(textarea, { target: { value: 'ada@example.com' } })
+    const sendButton = screen.getByRole('button', { name: /send invite/i })
+    sendButton.focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(textarea).toHaveFocus()
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(sendButton).toHaveFocus()
+  })
+
+  it('returns focus to the trigger once the modal unmounts', () => {
+    const trigger = document.createElement('button')
+    document.body.appendChild(trigger)
+    trigger.focus()
+    const { unmount } = wrap(<InviteModal onClose={vi.fn()} />)
+    unmount()
+    expect(trigger).toHaveFocus()
+    trigger.remove()
+  })
+
   it('disables the send button until at least one email is entered', () => {
     wrap(<InviteModal onClose={vi.fn()} />)
     expect(screen.getByRole('button', { name: /send invite/i })).toBeDisabled()
