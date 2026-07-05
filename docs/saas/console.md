@@ -86,6 +86,49 @@ denied (403 for membership-guarded verbs) or reported as not-found (404 for a
 cross-org sandbox id). `memseams_test.go` asserts the seams enforce scoping at
 the seam, not just the handler.
 
+## The instance-operator plane (`/console/admin/...`)
+
+A SEPARATE authorization plane from everything above: every other endpoint is
+scoped to the CALLER'S OWN org (org RBAC, resolved by `permissionsFor`).
+`/console/admin/...` instead lets a deployment OPERATOR see every org, the
+node inventory, and the signup waitlist. It is gated by `isInstanceAdmin`
+(`internal/saas/console/admin.go`), never by an org role, so a org
+"owner"/"admin" is not automatically an instance admin:
+
+- an account whose email is in `MITOS_CONSOLE_INSTANCE_ADMINS`
+  (case-insensitive), the hosted-deployment path; or
+- the community-edition fallback: exactly one org exists on the deployment
+  and the caller is that org's owner. Gated on `Edition == "community"` so a
+  hosted deployment's first customer is never silently promoted.
+
+| Endpoint | Method | Reads |
+| --- | --- | --- |
+| `/console/admin/overview` | GET | org count, running sandboxes across all orgs, node readiness (or `null` if no `NodeSource`), signup mode |
+| `/console/admin/orgs` | GET | every org's plan tier, member count, running sandboxes, month-to-date usage (capped at the oldest 200 orgs for the rollup; `total` is always the true count) |
+| `/console/admin/nodes` | GET | the cluster's k8s nodes (name, ready, `mitos.run/kvm` label, `mitos.run/dedicated` taint, allocatable cpu/mem); `{"available": false}` with no Kubernetes client configured |
+| `/console/admin/waitlist` | GET | recorded waitlist entries (email, recorded time) |
+| `/console/admin/waitlist/{id}/approve` | POST | grants allowlist access to the entry's email and sends the "you're in" notification (`onboarding.ApproveWaitlistEntry`, the SAME mechanism `POST /internal/approve-signup` uses) |
+
+`Orgs` (`console.OrgDirectory`) is the one seam here that is deliberately NOT
+org-scoped: it lists every organization, because it backs this operator
+surface rather than a tenant-facing view (`saas.Store` satisfies it
+directly). `Nodes` (`console.NodeSource`) is `nil` when no Kubernetes client
+is configured; unlike every other seam in this package, `New` does NOT fill
+that in with an in-memory default, since "no cluster" is a real, permanent
+state the handler must report honestly rather than paper over.
+
+KNOWN GAP: waitlist entries are only ever written when the onboarding
+funnel's `POST /onboarding/signup` route is mounted, which happens only when
+`MITOS_CONSOLE_SIGNUP` is on (see `docs/saas/onboarding.md`). In the default
+waitlist deployment there is currently no wired public entry point that
+calls `Service.SignUp` in `ModeWaitlist`, so `/console/admin/waitlist` is
+correctly plumbed to the funnel's `PendingStore` but may show nothing until
+that collection gap is closed (a documented follow-up, not this
+workstream's scope).
+
+Every `/console/admin/...` handler is audited (`admin.*` actions,
+`TargetType` `"system"` for the read views, `"waitlist"` for approve).
+
 ## Live-sandbox and log-streaming approach
 
 Live sandboxes are the deliberate differentiator. The BFF shapes the view and
