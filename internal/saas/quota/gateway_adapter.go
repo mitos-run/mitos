@@ -51,7 +51,11 @@ func (a GatewayAdapter) Check(ctx context.Context, orgID, op string) error {
 	if a.IPOf != nil {
 		req.IP = a.IPOf(ctx)
 	}
-	if op == "sandbox.create" && a.SizeOf != nil {
+	// A live fork (sandbox.fork) admits a new sandbox exactly like a create
+	// (Request.isCreate classes both), so the requested-shape seam applies to
+	// both: a wired SizeOf must cap forks too, or an org could exceed the size
+	// caps by forking instead of creating.
+	if (op == "sandbox.create" || op == "sandbox.fork") && a.SizeOf != nil {
 		if spec, ok := a.SizeOf(ctx); ok {
 			req.NewSandbox = spec
 		}

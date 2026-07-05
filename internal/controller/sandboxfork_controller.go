@@ -64,7 +64,7 @@ func (r *SandboxReconciler) reconcileFromSandbox(ctx context.Context, fork *v1.S
 	}
 
 	// A rejected fork is terminal: never reconcile it again.
-	if meta.IsStatusConditionTrue(fork.Status.Conditions, "Rejected") {
+	if meta.IsStatusConditionTrue(fork.Status.Conditions, v1.ConditionRejected) {
 		return ctrl.Result{}, nil
 	}
 
@@ -127,10 +127,10 @@ func (r *SandboxReconciler) reconcileFromSandbox(ctx context.Context, fork *v1.S
 		now := metav1.Now()
 		if !inherit {
 			setCondition(&fork.Status.Conditions, metav1.Condition{
-				Type:               "Rejected",
+				Type:               v1.ConditionRejected,
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: now,
-				Reason:             "SecretInheritanceDenied",
+				Reason:             v1.ReasonSecretInheritanceDenied,
 				Message:            "source sandbox holds secrets; recreate the fork with spec.secretInheritance=inherit to permit it (forks duplicate guest memory, including secret values)",
 			})
 			if err := r.Status().Update(ctx, fork); err != nil {
