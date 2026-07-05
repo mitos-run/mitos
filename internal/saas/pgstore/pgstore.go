@@ -165,8 +165,7 @@ func (s *PgStore) PutOrg(ctx context.Context, o saas.Organization) error {
         ON CONFLICT (id) DO UPDATE SET
             name        = EXCLUDED.name,
             created_at  = EXCLUDED.created_at,
-            personal    = EXCLUDED.personal,
-            home_region = EXCLUDED.home_region`
+            personal    = EXCLUDED.personal`
 	if _, err := s.pool.Exec(ctx, q, o.ID, o.Name, timePtr(o.CreatedAt), o.Personal, o.HomeRegion); err != nil {
 		return fmt.Errorf("put org: %w", err)
 	}

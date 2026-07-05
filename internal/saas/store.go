@@ -208,6 +208,12 @@ func (s *MemStore) GetAccountByEmail(_ context.Context, email string) (Account, 
 func (s *MemStore) PutOrg(_ context.Context, o Organization) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// HomeRegion is fixed at creation. A later PutOrg keeps the stored region
+	// so a rename or a reconstructed literal that omits it cannot move an org
+	// out of its residency anchor; this mirrors the pgstore ON CONFLICT clause.
+	if existing, ok := s.orgs[o.ID]; ok {
+		o.HomeRegion = existing.HomeRegion
+	}
 	s.orgs[o.ID] = o
 	return nil
 }

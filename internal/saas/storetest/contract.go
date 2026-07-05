@@ -127,6 +127,34 @@ func RunContract(t *testing.T, factory func(t *testing.T) saas.Store) {
 		}
 	})
 
+	t.Run("OrgHomeRegionImmutableAcrossReput", func(t *testing.T) {
+		s := factory(t)
+		ctx := context.Background()
+		created := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+		// HomeRegion is the residency anchor, fixed at org creation. A later
+		// PutOrg (a rename, a load-modify-store update, or a reconstructed
+		// literal that forgot the region) must never change it; other fields
+		// still update normally.
+		o := saas.Organization{ID: "org-imm", Name: "Acme", CreatedAt: created, HomeRegion: "fra"}
+		if err := s.PutOrg(ctx, o); err != nil {
+			t.Fatalf("PutOrg: %v", err)
+		}
+		reput := saas.Organization{ID: "org-imm", Name: "Acme Renamed", CreatedAt: created, HomeRegion: "iad"}
+		if err := s.PutOrg(ctx, reput); err != nil {
+			t.Fatalf("PutOrg re-put: %v", err)
+		}
+		got, err := s.GetOrg(ctx, "org-imm")
+		if err != nil {
+			t.Fatalf("GetOrg: %v", err)
+		}
+		if got.HomeRegion != "fra" {
+			t.Errorf("HomeRegion = %q, want %q (immutable after creation)", got.HomeRegion, "fra")
+		}
+		if got.Name != "Acme Renamed" {
+			t.Errorf("Name = %q, want %q (non-region fields still update)", got.Name, "Acme Renamed")
+		}
+	})
+
 	t.Run("ListOrgsReturnsEveryOrg", func(t *testing.T) {
 		s := factory(t)
 		ctx := context.Background()
