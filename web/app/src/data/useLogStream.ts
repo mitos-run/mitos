@@ -17,6 +17,15 @@
 // EventSource ever opened (so there is no reconnect loop to speak of),
 // while any other status (or a probe failure, treated as transient) falls
 // through to opening the stream exactly as before.
+//
+// On a deployment that DOES support streaming, the probe's own response is
+// itself a live SSE stream: reading only r.status and never closing it would
+// leave that connection open forever, leaking one server-side stream and
+// goroutine per Live toggle and eating into the browser's per-host
+// connection pool. The probe is therefore issued with an AbortController and
+// aborted immediately once r.status has been read, on every path (501,
+// fall-through to EventSource, and the effect's own cleanup if the
+// component unmounts or id/live changes before the probe resolves).
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 
@@ -47,6 +56,7 @@ export function useLogStream(id: string, live: boolean): LogStreamState {
     if (!live || !id) return
 
     let cancelled = false
+    const probeController = new AbortController()
 
     function open() {
       const es = new EventSource(api.logStreamURL(id))
@@ -73,16 +83,27 @@ export function useLogStream(id: string, live: boolean): LogStreamState {
       document.addEventListener('visibilitychange', onVisibilityChange)
     }
 
-    fetch(api.logStreamURL(id), { headers: { Accept: 'text/event-stream' } })
+    fetch(api.logStreamURL(id), {
+      headers: { Accept: 'text/event-stream' },
+      signal: probeController.signal,
+    })
       .then((r) => {
+        // The status has been read; the probe's own connection (a live SSE
+        // stream on a deployment that supports it) must not be left open.
+        const status = r.status
+        probeController.abort()
         if (cancelled) return
-        if (r.status === 501) {
+        if (status === 501) {
           setUnsupported(true)
           return
         }
         startStreaming()
       })
-      .catch(() => {
+      .catch((err) => {
+        // Our own abort() rejects the fetch promise too; that is expected
+        // teardown, not a probe failure, so it must not fall through to
+        // opening a second stream or surface as console noise.
+        if (err instanceof DOMException && err.name === 'AbortError') return
         // The probe itself failing (e.g. a network error) is a transient
         // condition, not "unsupported": fall back to opening the stream
         // directly so EventSource's own retry logic can take over.
@@ -92,6 +113,10 @@ export function useLogStream(id: string, live: boolean): LogStreamState {
 
     return () => {
       cancelled = true
+      // Abort a still-in-flight probe so an unmounted (or id/live-changed)
+      // component can never leave one pending: same leak as never aborting
+      // the happy path, just triggered by teardown instead of resolution.
+      probeController.abort()
       document.removeEventListener('visibilitychange', onVisibilityChange)
       esRef.current?.close()
       esRef.current = null

@@ -43,6 +43,17 @@ function mockProbeStatus(status: number) {
   vi.spyOn(globalThis, 'fetch').mockImplementation(() => Promise.resolve(new Response(null, { status })))
 }
 
+// Captures the AbortSignal passed to the probe fetch so a test can assert it
+// was aborted once the probe resolves, instead of just its resolved status.
+function mockProbeStatusCapturingSignal(status: number) {
+  const init: { signal?: AbortSignal }[] = []
+  vi.spyOn(globalThis, 'fetch').mockImplementation((_url, opts) => {
+    init.push((opts ?? {}) as { signal?: AbortSignal })
+    return Promise.resolve(new Response(null, { status }))
+  })
+  return init
+}
+
 beforeEach(() => {
   MockEventSource.instances = []
   vi.stubGlobal('EventSource', MockEventSource)
@@ -126,6 +137,21 @@ describe('useLogStream', () => {
     expect(MockEventSource.instances[0].closed).toBe(true)
     await waitFor(() => expect(MockEventSource.instances.length).toBe(2))
     expect(MockEventSource.instances[1].url).toBe('/console/sandboxes/sb-2/logs/stream')
+  })
+
+  it('aborts the probe fetch once it resolves and streaming starts (no leaked stream)', async () => {
+    const calls = mockProbeStatusCapturingSignal(200)
+    renderHook(() => useLogStream('sb-1', true))
+    await waitFor(() => expect(MockEventSource.instances.length).toBe(1))
+
+    expect(calls.length).toBe(1)
+    expect(calls[0].signal).toBeInstanceOf(AbortSignal)
+    // The probe is a live SSE connection on a deployment that supports
+    // streaming: if it is never aborted, it leaks one server-side stream and
+    // goroutine per Live toggle and eats the browser's per-host connection
+    // pool. Once the probe has resolved and the real EventSource has been
+    // opened, the probe request itself must be torn down.
+    expect(calls[0].signal?.aborted).toBe(true)
   })
 
   // --- 501 (unsupported transport) ---

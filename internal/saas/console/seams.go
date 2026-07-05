@@ -135,9 +135,12 @@ type SandboxControl interface {
 	// exist or belongs to a different org; count has already been bounded
 	// (1..16) by the caller.
 	Fork(ctx context.Context, orgID, sandboxID string, count int) ([]string, error)
-	// Exec runs cmd inside the org's sandbox, bounded by timeoutSec (0 means the
-	// backend's own default applies), and returns its result. Returns
-	// ErrNotFound if sandboxID does not exist or belongs to a different org.
+	// Exec runs cmd inside the org's sandbox, bounded by timeoutSec, and
+	// returns its result. The console handler substitutes a 30 second default
+	// (defaultExecTimeoutSec in sandbox_ops.go) before this seam is ever
+	// reached, so an implementation never sees timeoutSec == 0 from the
+	// console path. Returns ErrNotFound if sandboxID does not exist or belongs
+	// to a different org.
 	Exec(ctx context.Context, orgID, sandboxID, cmd string, timeoutSec int) (ExecResult, error)
 }
 
