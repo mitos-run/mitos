@@ -18,6 +18,7 @@ import type { AuditEvent } from '../api'
 import { renderAuditSentence } from '../lib/auditText'
 import { fmtRelative } from '../lib/dates'
 import { FirstRun, isFirstRun } from './firstrun/FirstRun'
+import { InviteNudge } from './firstrun/InviteNudge'
 
 const BENCH = 'bench/husk-activate-latency.sh'
 
@@ -242,6 +243,7 @@ export function Instruments() {
     <section>
       <PageHeader title="Overview" lede="This organization's measured signal, and what's happening right now." />
       {showFirstRun && <FirstRun uc={uc} />}
+      {!showFirstRun && <InviteNudge />}
       <ProofHero />
       <AvailableCreditBand />
       <OperationalPanels />
