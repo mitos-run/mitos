@@ -75,11 +75,10 @@ func (nullOrgDirectory) ListOrgMembers(context.Context, string) ([]saas.Membersh
 }
 
 // NodeView is the console's shape of one Kubernetes node: the read-only
-// operator inventory GET /console/admin/nodes exposes (handler lands in a
-// later commit of this workstream; the type is declared here since Deps.Nodes
-// already references it). AllocatableCPU and AllocatableMem are the
-// Kubernetes-formatted quantity strings (e.g. "16", "62Gi") rather than a
-// parsed number, so the view never silently loses the unit.
+// operator inventory GET /console/admin/nodes exposes. AllocatableCPU and
+// AllocatableMem are the Kubernetes-formatted quantity strings (e.g. "16",
+// "62Gi") rather than a parsed number, so the view never silently loses the
+// unit.
 type NodeView struct {
 	Name           string `json:"name"`
 	Ready          bool   `json:"ready"`
