@@ -47,6 +47,26 @@ func TestValueParseValues(t *testing.T) {
 			raw:  "",
 			want: nil,
 		},
+		{
+			// A value name is stamped verbatim as the mitos.run/region label on
+			// a Sandbox, so a name that is not a valid Kubernetes label value
+			// (spaces, punctuation, over 63 chars) is dropped at parse time
+			// rather than accepted and then failing opaquely at create. Only
+			// the NAME segment is constrained; Display text is unrestricted.
+			name: "invalid label-value names are skipped, display is unconstrained",
+			raw:  "fra:Frankfurt (EU),bad name,iad",
+			want: []Value{
+				{Name: "fra", Display: "Frankfurt (EU)", Default: true, Available: true},
+				{Name: "iad", Display: "iad", Default: false, Available: true},
+			},
+		},
+		{
+			name: "first token invalid, second valid token becomes default",
+			raw:  "us east,iad:Ashburn (US)",
+			want: []Value{
+				{Name: "iad", Display: "Ashburn (US)", Default: true, Available: true},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

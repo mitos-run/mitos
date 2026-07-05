@@ -15,7 +15,11 @@
 // with a 400 before it ever reaches the cluster adapter.
 package placement
 
-import "strings"
+import (
+	"strings"
+
+	"k8s.io/apimachinery/pkg/util/validation"
+)
 
 // Value is one placement option a deployment advertises. Name is the wire
 // value a client sends (e.g. "fra"); Display is the human-readable label the
@@ -102,6 +106,14 @@ func ParseValues(raw string) []Value {
 		name, display, hasDisplay := strings.Cut(tok, ":")
 		name = strings.TrimSpace(name)
 		if name == "" {
+			continue
+		}
+		// The name is stamped verbatim as the mitos.run/region label value on a
+		// Sandbox, so a name that is not a valid Kubernetes label value would
+		// pass Registry.Valid and then fail opaquely at create time. Drop it
+		// here, the same way an empty token is dropped, so it never reaches a
+		// CR. Only the name is constrained; the display text is free-form.
+		if len(validation.IsValidLabelValue(name)) > 0 {
 			continue
 		}
 		if hasDisplay {
