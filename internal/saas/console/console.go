@@ -350,6 +350,9 @@ func (c *Console) routes() {
 	// isInstanceAdmin via authorizeAdmin, ABOVE the session auth every other
 	// route above already requires.
 	mux.HandleFunc("GET /console/admin/overview", c.handleAdminOverview)
+	mux.HandleFunc("GET /console/admin/orgs", c.handleAdminOrgs)
+	mux.HandleFunc("GET /console/admin/waitlist", c.handleAdminWaitlist)
+	mux.HandleFunc("POST /console/admin/waitlist/{id}/approve", c.handleAdminWaitlistApprove)
 	c.mux = mux
 }
 

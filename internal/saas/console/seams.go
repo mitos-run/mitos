@@ -194,7 +194,10 @@ type TemplateLister interface {
 // may be empty (an account lookup failure, or no name being available for the
 // target kind); the console UI falls back to the raw id when empty. ActorType
 // is one of "user", "api_key", "system"; TargetType is one of "session",
-// "key", "sandbox", "member", "project", "secret", "sink", "profile", "org".
+// "key", "sandbox", "member", "project", "secret", "sink", "profile", "org",
+// "waitlist" (the instance-operator plane's waitlist-approve action) and
+// "system" (the instance-operator plane's other read views, which have no
+// single org/entity target).
 type AuditEvent struct {
 	OrgID      string    `json:"org_id"`
 	ActorID    string    `json:"actor_id"`

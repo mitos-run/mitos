@@ -9,16 +9,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/billing"
+	"mitos.run/mitos/internal/saas/console"
 	"mitos.run/mitos/internal/saas/onboarding"
 	"mitos.run/mitos/internal/saas/orgprovision"
-	"mitos.run/mitos/internal/saas/pgstore"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -38,18 +37,21 @@ import (
 //     signup provisions the per-org namespace. With no client it is skipped with a
 //     warning rather than failing signup.
 //
-// When pool is non-nil (durable Postgres configured), the pending-signup store
-// and credit ledger are backed by Postgres so they survive console restarts.
-// When pool is nil (dev / in-memory mode) the in-memory fallbacks are used; a
-// pending unverified signup is cheap to lose on restart (the user re-signs up).
-// Provisioned accounts/orgs always live in the durable saas.Store.
+// pending backs the funnel's pending-signup and waitlist bookkeeping; the
+// caller constructs it durable (Postgres) or in-memory depending on whether a
+// database is configured (see main.go), so mountOnboarding stays agnostic to
+// that choice. It is passed in (rather than built here from a pool) because
+// the SAME store also backs the instance-admin waitlist view
+// (console.Deps.Waitlist), which must keep working regardless of whether
+// self-serve signup is enabled: a deployment in the default waitlist mode is
+// exactly the case that view exists for.
 //
 // sessions is the SAME store the session middleware reads; when non-nil a
 // successful fresh verify mints a session and sets the mitos_session cookie so
 // the new user arrives at the console already authenticated. newToken is the
 // SAME generator used by the OIDC callback; the raw token is never logged.
 // secure is the Secure cookie flag, matching the OIDC handler's value.
-func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, pool *pgxpool.Pool, creditLedger billing.CreditLedger, caps signupGate, sessions saas.Sessions, newToken func() string, secure bool, allowlist onboarding.Allowlist) {
+func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountService, store saas.Store, pending onboarding.PendingStore, creditLedger billing.CreditLedger, caps signupGate, sessions saas.Sessions, newToken func() string, secure bool, allowlist onboarding.Allowlist) {
 	if !caps.signupEnabled() {
 		logger.Info("onboarding signup disabled (waitlist mode); public signup endpoints not mounted")
 		return
@@ -87,17 +89,6 @@ func mountOnboarding(mux *http.ServeMux, logger *slog.Logger, accounts *saas.Acc
 		e2eSink = onboarding.NewMemE2ETokenSink()
 		opts = append(opts, onboarding.WithE2ETokenSink(e2eSink))
 		logger.Info("onboarding E2E token sink enabled (QA only; NEVER enable in production)")
-	}
-
-	// Select the durable pending store when a Postgres pool is available; fall
-	// back to the in-memory implementation in dev mode (no DSN configured).
-	// The credit ledger is the single shared instance passed in from main so
-	// onboarding grants are visible in the billing view.
-	var pending onboarding.PendingStore
-	if pool != nil {
-		pending = pgstore.NewPgPendingStore(pool)
-	} else {
-		pending = onboarding.NewMemPendingStore()
 	}
 
 	svc := onboarding.NewService(
@@ -331,4 +322,37 @@ func (d devLogEmailSender) SendInvite(_ context.Context, _, _, _, _ string) erro
 	// send occurred.
 	d.log.Info("dev email sender: invite email suppressed (configure SMTP to deliver real mail)")
 	return nil
+}
+
+// waitlistAdapter bridges the onboarding package's own PendingStore/
+// Allowlist/EmailSender seams to console.WaitlistSource, so the instance-
+// operator plane's waitlist view/approve reuses the funnel's SAME storage
+// and approval mechanism (onboarding.ApproveWaitlistEntry) rather than a
+// second, parallel implementation. It works regardless of whether self-serve
+// signup is enabled: pending is constructed unconditionally in main.go.
+type waitlistAdapter struct {
+	pending   onboarding.PendingStore
+	allowlist onboarding.Allowlist
+	email     onboarding.EmailSender
+	now       func() time.Time
+}
+
+func (a waitlistAdapter) List(ctx context.Context) ([]console.WaitlistEntry, error) {
+	entries, err := a.pending.Waitlist(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]console.WaitlistEntry, len(entries))
+	for i, e := range entries {
+		out[i] = console.WaitlistEntry{Email: e.Email, CreatedAt: e.CreatedAt}
+	}
+	return out, nil
+}
+
+func (a waitlistAdapter) Approve(ctx context.Context, email string) error {
+	if a.allowlist == nil || a.email == nil {
+		return console.ErrWaitlistNotConfigured
+	}
+	_, err := onboarding.ApproveWaitlistEntry(ctx, a.allowlist, a.email, email, "instance admin: waitlist approve", a.now())
+	return err
 }

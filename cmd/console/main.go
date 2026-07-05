@@ -201,6 +201,30 @@ func main() {
 	// SAME org-scoped control the rest of the BFF uses.
 	sandboxControl := buildSandboxControl(logger)
 
+	// pendingStore and allowlist are built HERE, before con, rather than
+	// inside mountOnboarding below, because BOTH are also needed for the
+	// instance-admin waitlist view (console.Deps.Waitlist) regardless of
+	// whether self-serve signup is enabled: a deployment in the default
+	// waitlist mode is exactly the case that view exists for. Durable
+	// Postgres when configured; in-memory (dev only) otherwise, in which
+	// case entries do not survive a restart.
+	var pendingStore onboarding.PendingStore
+	if pool != nil {
+		pendingStore = pgstore.NewPgPendingStore(pool)
+	} else {
+		pendingStore = onboarding.NewMemPendingStore()
+	}
+	// Auto-allow domains for the signup allowlist gate. Comma-separated, lowercased;
+	// default mitos.run so a mitos.run address never needs a manual approval.
+	autoAllow := parseAutoAllowDomains(os.Getenv("MITOS_CONSOLE_AUTOALLOW_DOMAINS"))
+	var allowlist onboarding.Allowlist
+	if pool != nil {
+		allowlist = pgstore.NewPgAllowlist(pool, autoAllow)
+	} else {
+		logger.Warn("allowlist is in-memory (dev only); approved entries do not survive restarts")
+		allowlist = onboarding.NewMemAllowlist(autoAllow)
+	}
+
 	con := console.New(console.Deps{
 		Accounts:    accounts,
 		Invitations: invitations,
@@ -255,6 +279,12 @@ func main() {
 		// deliberately un-scoped to any one org (see console.OrgDirectory).
 		InstanceAdminEmails: instanceAdminEmailsFromEnv(),
 		Orgs:                store,
+		// The waitlist view/approve seam: reads the SAME pendingStore the
+		// funnel writes to and approves through the SAME allowlist +
+		// EmailSender mountOnboarding wires below, so an admin approving a
+		// waitlist entry produces an identical outcome to the internal
+		// approve-signup endpoint.
+		Waitlist: waitlistAdapter{pending: pendingStore, allowlist: allowlist, email: buildEmailSender(logger), now: time.Now},
 		// Wire the real session store so /console/account/sessions reflects live
 		// sessions. The adapter translates saas.Session to console.SessionRecord.
 		// Both dev and production share the same store; in dev the store is empty
@@ -347,17 +377,9 @@ func main() {
 	// Secure mirrors mountAuth (hardcoded true: the console is always TLS in
 	// production; -dev runs without cookies anyway since no session middleware
 	// is active in that branch).
-	// Auto-allow domains for the signup allowlist gate. Comma-separated, lowercased;
-	// default mitos.run so a mitos.run address never needs a manual approval.
-	autoAllow := parseAutoAllowDomains(os.Getenv("MITOS_CONSOLE_AUTOALLOW_DOMAINS"))
-	var allowlist onboarding.Allowlist
-	if pool != nil {
-		allowlist = pgstore.NewPgAllowlist(pool, autoAllow)
-	} else {
-		logger.Warn("allowlist is in-memory (dev only); approved entries do not survive restarts")
-		allowlist = onboarding.NewMemAllowlist(autoAllow)
-	}
-	mountOnboarding(mux, logger, accounts, store, pool, creditLedger, capsGate{signup: caps.Signup}, sessionStore, newSessionToken, true, allowlist)
+	// pendingStore and allowlist are already built above (shared with
+	// console.Deps.Waitlist).
+	mountOnboarding(mux, logger, accounts, store, pendingStore, creditLedger, capsGate{signup: caps.Signup}, sessionStore, newSessionToken, true, allowlist)
 
 	// The billing webhook is PUBLIC by design: it is authenticated by the
 	// provider's signature, not a session, so it is mounted OUTSIDE the session

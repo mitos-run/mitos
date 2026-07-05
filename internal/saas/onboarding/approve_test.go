@@ -307,3 +307,62 @@ func TestApproveSignup_SendApprovedFailure500(t *testing.T) {
 		t.Fatal("allowlist must contain the row even when SendApproved fails")
 	}
 }
+
+// --- ApproveWaitlistEntry (the exported helper the console instance-admin
+// waitlist adapter reuses, so an admin approving a waitlist entry produces
+// the SAME allowlist row and email as POST /internal/approve-signup) ---
+
+// TestApproveWaitlistEntry_SuccessAddsAllowlistAndSendsEmail mirrors the HTTP
+// handler's own happy-path test, calling the exported function directly.
+func TestApproveWaitlistEntry_SuccessAddsAllowlistAndSendsEmail(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+
+	canonical, err := ApproveWaitlistEntry(context.Background(), al, em, "User+tag@Example.com", "approved via admin", fixedNow())
+	if err != nil {
+		t.Fatalf("ApproveWaitlistEntry: %v", err)
+	}
+	if canonical != "user@example.com" {
+		t.Fatalf("canonical = %q, want user@example.com", canonical)
+	}
+	if ok, _ := al.IsAllowed(context.Background(), "user@example.com"); !ok {
+		t.Fatal("allowlist does not contain the approved canonical email")
+	}
+	if !em.Approved("user+tag@example.com") {
+		t.Fatal("SendApproved was not called with the delivery-form email")
+	}
+}
+
+// TestApproveWaitlistEntry_InvalidEmail asserts a malformed email returns
+// ErrInvalidEmail and touches neither the allowlist nor the email sender.
+func TestApproveWaitlistEntry_InvalidEmail(t *testing.T) {
+	al := NewMemAllowlist(nil)
+	em := NewFakeEmailSender()
+
+	_, err := ApproveWaitlistEntry(context.Background(), al, em, "not-an-email", "", fixedNow())
+	if !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("err = %v, want ErrInvalidEmail", err)
+	}
+	if ok, _ := al.IsAllowed(context.Background(), "not-an-email"); ok {
+		t.Fatal("allowlist must not be modified on an invalid email")
+	}
+}
+
+// TestApproveWaitlistEntry_SendFailureLeavesAllowlistRow asserts a
+// SendApproved failure surfaces its own error (not ErrInvalidEmail, not the
+// allowlist-add sentinel) while the allowlist row still lands (idempotent
+// retry-safe), matching the HTTP handler's own 500 behavior.
+func TestApproveWaitlistEntry_SendFailureLeavesAllowlistRow(t *testing.T) {
+	al := NewMemAllowlist(nil)
+
+	_, err := ApproveWaitlistEntry(context.Background(), al, errSendApproved{}, "err@example.com", "", fixedNow())
+	if err == nil {
+		t.Fatal("expected an error when SendApproved fails")
+	}
+	if errors.Is(err, ErrInvalidEmail) || errors.Is(err, errApproveAllowlistAdd) {
+		t.Fatalf("err = %v, want a bare send-failure error", err)
+	}
+	if ok, _ := al.IsAllowed(context.Background(), "err@example.com"); !ok {
+		t.Fatal("allowlist must contain the row even when SendApproved fails")
+	}
+}

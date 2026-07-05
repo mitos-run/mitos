@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"mitos.run/mitos/internal/saas"
+	"mitos.run/mitos/internal/saas/billing"
+	"mitos.run/mitos/internal/usage"
 )
 
 // adminFixture builds a Console wired with a real AccountService/Store (so
@@ -267,5 +269,229 @@ func TestAdminOverviewSignupModeOpen(t *testing.T) {
 	decode(t, w, &view)
 	if view.SignupMode != "open" {
 		t.Errorf("signup_mode = %q, want open", view.SignupMode)
+	}
+}
+
+// --- GET /console/admin/orgs ---
+
+// TestAdminOrgsForbiddenForNonAdmin asserts the orgs table is gated exactly
+// like every other /console/admin/... endpoint.
+func TestAdminOrgsForbiddenForNonAdmin(t *testing.T) {
+	f := newAdminFixture(t, Deps{Capabilities: Capabilities{Edition: "hosted"}})
+	regular, org, err := f.accounts.SignUp(context.Background(), "regular@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "GET", "/console/admin/orgs", regular.ID, org.ID)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
+	}
+}
+
+// TestAdminOrgsShape asserts each row's tier, member count, running count,
+// and month-to-date usage cents, and that Total is the true org count.
+func TestAdminOrgsShape(t *testing.T) {
+	now := time.Date(2026, 7, 5, 12, 0, 0, 0, time.UTC)
+	usageStore := usage.NewMemUsageStore()
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+		Usage:               usageStore,
+		Now:                 func() time.Time { return now },
+	})
+	ctx := context.Background()
+	ops, opsOrg, err := f.accounts.SignUp(ctx, "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp ops: %v", err)
+	}
+	_, teamOrg, err := f.accounts.SignUp(ctx, "team-customer@example.com")
+	if err != nil {
+		t.Fatalf("SignUp team customer: %v", err)
+	}
+	member, _, err := f.accounts.SignUp(ctx, "second-member@example.com")
+	if err != nil {
+		t.Fatalf("SignUp second member: %v", err)
+	}
+	if err := f.store.PutMembership(ctx, saas.Membership{
+		AccountID: member.ID, OrgID: teamOrg.ID, Role: saas.RoleMember, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	f.con.deps.Plans = billing.NewStaticPlanSource([]string{teamOrg.ID})
+	f.sandboxes.Add(SandboxView{ID: "sbx-a", OrgID: teamOrg.ID, Phase: "Running"})
+
+	// A within-month record (counted) and a prior-month record (excluded).
+	if err := usageStore.UpsertRecord(ctx, usage.UsageRecord{OrgID: teamOrg.ID, SandboxID: "sbx-a", Window: now.Add(-time.Hour), VCPUSeconds: 3600}); err != nil {
+		t.Fatalf("seed usage: %v", err)
+	}
+	if err := usageStore.UpsertRecord(ctx, usage.UsageRecord{OrgID: teamOrg.ID, SandboxID: "sbx-a", Window: now.AddDate(0, -1, 0), VCPUSeconds: 999_999}); err != nil {
+		t.Fatalf("seed prior-month usage: %v", err)
+	}
+
+	w := f.req(t, "GET", "/console/admin/orgs", ops.ID, opsOrg.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Orgs  []AdminOrgView `json:"orgs"`
+		Total int            `json:"total"`
+	}
+	decode(t, w, &body)
+	// Three SignUps (ops, team-customer, second-member) each create their own
+	// personal org; second-member is ADDITIONALLY seeded as a member of
+	// teamOrg below, so the total org count is 3, not 2.
+	if body.Total != 3 {
+		t.Fatalf("total = %d, want 3", body.Total)
+	}
+	var teamRow *AdminOrgView
+	for i := range body.Orgs {
+		if body.Orgs[i].ID == teamOrg.ID {
+			teamRow = &body.Orgs[i]
+		}
+	}
+	if teamRow == nil {
+		t.Fatalf("team org row not found in %+v", body.Orgs)
+	}
+	if teamRow.Tier != string(billing.PlanTeam) {
+		t.Errorf("tier = %q, want %q", teamRow.Tier, billing.PlanTeam)
+	}
+	if teamRow.Members != 2 {
+		t.Errorf("members = %d, want 2", teamRow.Members)
+	}
+	if teamRow.Running != 1 {
+		t.Errorf("running = %d, want 1", teamRow.Running)
+	}
+	wantCents := int64(billing.DefaultRates().CostCents(usage.UsageRecord{VCPUSeconds: 3600}))
+	if teamRow.MonthUsageCents != wantCents {
+		t.Errorf("month_usage_cents = %d, want %d (prior-month record must be excluded)", teamRow.MonthUsageCents, wantCents)
+	}
+}
+
+// --- Waitlist ---
+
+// fakeWaitlistSource is an in-memory WaitlistSource test double that records
+// Approve calls.
+type fakeWaitlistSource struct {
+	entries    []WaitlistEntry
+	approved   []string
+	approveErr error
+}
+
+func (f *fakeWaitlistSource) List(context.Context) ([]WaitlistEntry, error) {
+	return f.entries, nil
+}
+
+func (f *fakeWaitlistSource) Approve(_ context.Context, email string) error {
+	if f.approveErr != nil {
+		return f.approveErr
+	}
+	f.approved = append(f.approved, email)
+	return nil
+}
+
+// TestAdminWaitlistDefaultNotConfigured asserts the safe-to-instantiate
+// default (no WaitlistSource wired) lists as empty and refuses approval with
+// an honest 501, never a fabricated success.
+func TestAdminWaitlistDefaultNotConfigured(t *testing.T) {
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+	})
+	ops, org, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "GET", "/console/admin/waitlist", ops.ID, org.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d", w.Code)
+	}
+	var body struct {
+		Entries []AdminWaitlistEntryView `json:"entries"`
+	}
+	decode(t, w, &body)
+	if len(body.Entries) != 0 {
+		t.Fatalf("expected no entries by default, got %+v", body.Entries)
+	}
+
+	w = f.req(t, "POST", "/console/admin/waitlist/"+encodeWaitlistID("someone@example.com")+"/approve", ops.ID, org.ID)
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("approve status = %d, want 501; body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestAdminWaitlistListAndApprove asserts the list round-trips id->email and
+// that POST .../{id}/approve decodes the id and calls WaitlistSource.Approve
+// with the exact original email.
+func TestAdminWaitlistListAndApprove(t *testing.T) {
+	fw := &fakeWaitlistSource{entries: []WaitlistEntry{
+		{Email: "waiting@example.com", CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
+	}}
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+		Waitlist:            fw,
+	})
+	ops, org, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+
+	w := f.req(t, "GET", "/console/admin/waitlist", ops.ID, org.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("list status = %d", w.Code)
+	}
+	var body struct {
+		Entries []AdminWaitlistEntryView `json:"entries"`
+	}
+	decode(t, w, &body)
+	if len(body.Entries) != 1 || body.Entries[0].Email != "waiting@example.com" {
+		t.Fatalf("entries = %+v", body.Entries)
+	}
+	id := body.Entries[0].ID
+
+	w = f.req(t, "POST", "/console/admin/waitlist/"+id+"/approve", ops.ID, org.ID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("approve status = %d, body=%s", w.Code, w.Body.String())
+	}
+	if len(fw.approved) != 1 || fw.approved[0] != "waiting@example.com" {
+		t.Fatalf("approved = %v, want [waiting@example.com]", fw.approved)
+	}
+}
+
+// TestAdminWaitlistApproveInvalidID asserts a garbage path segment is
+// rejected with 404 rather than reaching the seam.
+func TestAdminWaitlistApproveInvalidID(t *testing.T) {
+	fw := &fakeWaitlistSource{}
+	f := newAdminFixture(t, Deps{
+		Capabilities:        Capabilities{Edition: "hosted"},
+		InstanceAdminEmails: []string{"ops@example.com"},
+		Waitlist:            fw,
+	})
+	ops, org, err := f.accounts.SignUp(context.Background(), "ops@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	w := f.req(t, "POST", "/console/admin/waitlist/not-valid-base64!!/approve", ops.ID, org.ID)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", w.Code)
+	}
+	if len(fw.approved) != 0 {
+		t.Fatal("Approve must not be called for an invalid id")
+	}
+}
+
+// TestAdminWaitlistForbiddenForNonAdmin asserts both waitlist endpoints are
+// gated like every other /console/admin/... endpoint.
+func TestAdminWaitlistForbiddenForNonAdmin(t *testing.T) {
+	f := newAdminFixture(t, Deps{Capabilities: Capabilities{Edition: "hosted"}})
+	regular, org, err := f.accounts.SignUp(context.Background(), "regular@example.com")
+	if err != nil {
+		t.Fatalf("SignUp: %v", err)
+	}
+	if w := f.req(t, "GET", "/console/admin/waitlist", regular.ID, org.ID); w.Code != http.StatusForbidden {
+		t.Fatalf("list status = %d, want 403", w.Code)
+	}
+	if w := f.req(t, "POST", "/console/admin/waitlist/"+encodeWaitlistID("x@example.com")+"/approve", regular.ID, org.ID); w.Code != http.StatusForbidden {
+		t.Fatalf("approve status = %d, want 403", w.Code)
 	}
 }

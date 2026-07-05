@@ -29,6 +29,7 @@ package console
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net/http"
 	"sort"
@@ -329,4 +330,187 @@ func (c *Console) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 		At:         c.deps.Now(),
 	})
 	writeJSON(w, http.StatusOK, view)
+}
+
+// startOfMonth returns t truncated to the first instant of its (UTC)
+// calendar month, the "month-to-date" lower bound monthUsageCents uses.
+func startOfMonth(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+// --- GET /console/admin/orgs ---
+
+// AdminOrgView is one row of the instance-operator org table: enough to spot
+// an outlier org (heavy usage, many members, lots running) without leaving
+// the operator plane.
+type AdminOrgView struct {
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Tier            string `json:"tier"`
+	Members         int    `json:"members"`
+	Running         int    `json:"running"`
+	MonthUsageCents int64  `json:"month_usage_cents"`
+}
+
+// handleAdminOrgs serves GET /console/admin/orgs: every org's id/name/plan
+// tier/member count/running-sandbox count/month-to-date usage, capped at
+// adminOrgRollupCap oldest orgs (see its doc); Total is always the true,
+// uncapped org count so the SPA can show "showing 200 of 1,203 orgs"
+// honestly rather than silently truncating.
+func (c *Console) handleAdminOrgs(w http.ResponseWriter, r *http.Request) {
+	accountID, e, ok := c.authorizeAdmin(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	all, capped, err := c.adminOrgsCapped(r.Context())
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the org directory could not be read"))
+		return
+	}
+	monthStart := startOfMonth(c.deps.Now())
+	out := make([]AdminOrgView, 0, len(capped))
+	for _, org := range capped {
+		members, err := c.deps.Orgs.ListOrgMembers(r.Context(), org.ID)
+		if err != nil {
+			apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the org membership could not be read"))
+			return
+		}
+		running, err := c.runningSandboxCount(r.Context(), org.ID)
+		if err != nil {
+			apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the sandbox count could not be read"))
+			return
+		}
+		usageCents, err := c.monthUsageCents(r.Context(), org.ID, monthStart)
+		if err != nil {
+			apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the usage rollup could not be read"))
+			return
+		}
+		out = append(out, AdminOrgView{
+			ID:              org.ID,
+			Name:            org.Name,
+			Tier:            string(c.planFor(r.Context(), org.ID)),
+			Members:         len(members),
+			Running:         running,
+			MonthUsageCents: usageCents,
+		})
+	}
+	c.audit(r.Context(), AuditEvent{
+		ActorID:    accountID,
+		Action:     "admin.orgs.view",
+		TargetType: "system",
+		Detail:     "viewed the instance operator org list",
+		At:         c.deps.Now(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"orgs": out, "total": len(all)})
+}
+
+// --- Waitlist (GET /console/admin/waitlist, POST .../{id}/approve) ---
+
+// AdminWaitlistEntryView is the wire shape of one waitlist entry. ID is
+// synthesized here (a reversible encoding of Email), NOT part of
+// WaitlistEntry: the underlying onboarding.PendingStore.Waitlist carries no
+// id, so the approve action's path segment is a presentation-layer concern
+// of this handler, not the seam.
+type AdminWaitlistEntryView struct {
+	ID        string    `json:"id"`
+	Email     string    `json:"email"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// encodeWaitlistID/decodeWaitlistID convert between a waitlist entry's email
+// and the opaque, URL-safe path segment POST .../waitlist/{id}/approve
+// takes. Reversible (not a lookup key into any store), so no server-side
+// waitlist index is needed to support the approve action.
+func encodeWaitlistID(email string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(email))
+}
+
+func decodeWaitlistID(id string) (string, bool) {
+	b, err := base64.RawURLEncoding.DecodeString(id)
+	if err != nil || len(b) == 0 {
+		return "", false
+	}
+	return string(b), true
+}
+
+// handleAdminWaitlist serves GET /console/admin/waitlist.
+func (c *Console) handleAdminWaitlist(w http.ResponseWriter, r *http.Request) {
+	accountID, e, ok := c.authorizeAdmin(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	entries, err := c.deps.Waitlist.List(r.Context())
+	if err != nil {
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the waitlist could not be read"))
+		return
+	}
+	out := make([]AdminWaitlistEntryView, 0, len(entries))
+	for _, en := range entries {
+		out = append(out, AdminWaitlistEntryView{ID: encodeWaitlistID(en.Email), Email: en.Email, CreatedAt: en.CreatedAt})
+	}
+	c.audit(r.Context(), AuditEvent{
+		ActorID:    accountID,
+		Action:     "admin.waitlist.view",
+		TargetType: "system",
+		Detail:     "viewed the signup waitlist",
+		At:         c.deps.Now(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"entries": out})
+}
+
+// waitlistApproveNotConfiguredError is the 501 returned when no
+// allowlist/email seam backs Deps.Waitlist (the nullWaitlistSource default,
+// or a deployment that never wired one): an honest "not available" rather
+// than a fabricated success. Built directly (like failSandbox's
+// ErrUnsupported case) rather than via apierr.Catalogue, which is normative
+// for the forkd/sandbox-server runtime API, a different surface than this
+// console BFF's own error shape.
+func waitlistApproveNotConfiguredError(err error) apierr.Error {
+	return apierr.Error{
+		Code:        "not_implemented",
+		Message:     "waitlist approval is not available on this deployment yet",
+		Cause:       err.Error(),
+		Remediation: "Configure the onboarding allowlist and email sender (see docs/saas/onboarding.md) to enable waitlist approval.",
+		Status:      http.StatusNotImplemented,
+	}
+}
+
+// handleAdminWaitlistApprove serves POST /console/admin/waitlist/{id}/approve.
+// It reuses the onboarding funnel's own approval mechanism
+// (onboarding.ApproveWaitlistEntry, via the WaitlistSource seam): it adds the
+// waitlisted email's canonical form to the signup allowlist and sends the
+// "you're in" notification through the funnel's configured EmailSender. It
+// does NOT create an account, an org, or any invitation; the entry's owner
+// still completes signup/verify themselves once past the allowlist gate.
+func (c *Console) handleAdminWaitlistApprove(w http.ResponseWriter, r *http.Request) {
+	accountID, e, ok := c.authorizeAdmin(r)
+	if !ok {
+		apierr.Encode(w, e)
+		return
+	}
+	email, ok := decodeWaitlistID(r.PathValue("id"))
+	if !ok {
+		apierr.Encode(w, apierr.Get(apierr.CodeNotFound).WithCause("the waitlist entry id is not valid"))
+		return
+	}
+	if err := c.deps.Waitlist.Approve(r.Context(), email); err != nil {
+		if errors.Is(err, ErrWaitlistNotConfigured) {
+			apierr.Encode(w, waitlistApproveNotConfiguredError(err))
+			return
+		}
+		apierr.Encode(w, apierr.Get(apierr.CodeInternal).WithCause("the waitlist entry could not be approved"))
+		return
+	}
+	c.audit(r.Context(), AuditEvent{
+		ActorID:    accountID,
+		Action:     "admin.waitlist.approve",
+		Target:     email,
+		TargetType: "waitlist",
+		Detail:     "approved waitlist entry",
+		At:         c.deps.Now(),
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"email": email, "approved": true})
 }

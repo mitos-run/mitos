@@ -3,14 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/billing"
+	"mitos.run/mitos/internal/saas/console"
+	"mitos.run/mitos/internal/saas/onboarding"
 )
 
 // TestMountOnboardingGatedBySignup asserts the public signup endpoint is mounted
@@ -28,7 +32,7 @@ func TestMountOnboardingGatedBySignup(t *testing.T) {
 
 	// Disabled: no route. Pass nil pool to use the in-memory fallback stores.
 	muxOff := http.NewServeMux()
-	mountOnboarding(muxOff, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: false}, sessions, newTok, false, nil)
+	mountOnboarding(muxOff, logger, accounts, store, onboarding.NewMemPendingStore(), billing.NewMemCreditLedger(), capsGate{signup: false}, sessions, newTok, false, nil)
 	roff := httptest.NewRequest(http.MethodPost, "/onboarding/signup", strings.NewReader(`{"email":"a@b.com"}`))
 	rroff := httptest.NewRecorder()
 	muxOff.ServeHTTP(rroff, roff)
@@ -38,7 +42,7 @@ func TestMountOnboardingGatedBySignup(t *testing.T) {
 
 	// Enabled: route is mounted and accepts. Pass nil pool to use the in-memory fallback stores.
 	muxOn := http.NewServeMux()
-	mountOnboarding(muxOn, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false, nil)
+	mountOnboarding(muxOn, logger, accounts, store, onboarding.NewMemPendingStore(), billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false, nil)
 	ron := httptest.NewRequest(http.MethodPost, "/onboarding/signup", strings.NewReader(`{"email":"a@b.com"}`))
 	ron.Header.Set("Content-Type", "application/json")
 	rron := httptest.NewRecorder()
@@ -100,7 +104,7 @@ func TestE2EEndpointNotMountedWhenFlagOff(t *testing.T) {
 	newTok := func() string { return "test-session-token" }
 
 	mux := http.NewServeMux()
-	mountOnboarding(mux, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false, nil)
+	mountOnboarding(mux, logger, accounts, store, onboarding.NewMemPendingStore(), billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/onboarding/e2e/token?email=qa@e2e.mitos.run", nil)
 	req.Header.Set("Authorization", "Bearer any-bearer")
@@ -160,7 +164,7 @@ func TestE2EEndpointMountedWhenFlagOn(t *testing.T) {
 	newTok := func() string { return "test-session-token" }
 
 	mux := http.NewServeMux()
-	mountOnboarding(mux, logger, accounts, store, nil, billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false, nil)
+	mountOnboarding(mux, logger, accounts, store, onboarding.NewMemPendingStore(), billing.NewMemCreditLedger(), capsGate{signup: true}, sessions, newTok, false, nil)
 
 	// Route is mounted; wrong bearer returns 401 (not 404).
 	req := httptest.NewRequest(http.MethodGet, "/onboarding/e2e/token?email=qa@e2e.mitos.run", nil)
@@ -169,5 +173,51 @@ func TestE2EEndpointMountedWhenFlagOn(t *testing.T) {
 	mux.ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("E2E endpoint mounted but wrong bearer: status %d, want 401", rr.Code)
+	}
+}
+
+// TestWaitlistAdapterListAndApprove asserts waitlistAdapter (the seam wired
+// into console.Deps.Waitlist) round-trips the underlying PendingStore's
+// waitlist entries and approves through the SAME allowlist/email mechanism
+// POST /internal/approve-signup uses.
+func TestWaitlistAdapterListAndApprove(t *testing.T) {
+	pending := onboarding.NewMemPendingStore()
+	allowlist := onboarding.NewMemAllowlist(nil)
+	email := onboarding.NewFakeEmailSender()
+	now := func() time.Time { return time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) }
+
+	if err := pending.AddWaitlist(context.Background(), onboarding.WaitlistEntry{
+		Email: "waiting@example.com", CreatedAt: now(),
+	}); err != nil {
+		t.Fatalf("AddWaitlist: %v", err)
+	}
+
+	a := waitlistAdapter{pending: pending, allowlist: allowlist, email: email, now: now}
+	entries, err := a.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Email != "waiting@example.com" {
+		t.Fatalf("entries = %+v", entries)
+	}
+
+	if err := a.Approve(context.Background(), "waiting@example.com"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+	if ok, _ := allowlist.IsAllowed(context.Background(), "waiting@example.com"); !ok {
+		t.Fatal("Approve did not add the email to the allowlist")
+	}
+	if !email.Approved("waiting@example.com") {
+		t.Fatal("Approve did not send the approved notification")
+	}
+}
+
+// TestWaitlistAdapterApproveNotConfigured asserts a zero-value adapter (no
+// allowlist/email wired) fails closed with console.ErrWaitlistNotConfigured
+// rather than silently succeeding.
+func TestWaitlistAdapterApproveNotConfigured(t *testing.T) {
+	a := waitlistAdapter{pending: onboarding.NewMemPendingStore(), now: time.Now}
+	if err := a.Approve(context.Background(), "x@example.com"); !errors.Is(err, console.ErrWaitlistNotConfigured) {
+		t.Fatalf("err = %v, want console.ErrWaitlistNotConfigured", err)
 	}
 }
