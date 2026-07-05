@@ -97,6 +97,48 @@ with the doc, the JSON Schema, and `llms.txt` (the error-catalogue sync tests st
 A missing, malformed, unknown, expired, or revoked key all collapse to
 `unauthorized` so a probe cannot distinguish them.
 
+## Live fork: POST /v1/sandboxes/{id}/fork
+
+The per-sandbox fork route is a TRUE live fork on the hosted API (it used to
+be a template re-fork stopgap): the control plane resolves the org-owned
+source from the path and submits a Sandbox whose source is
+`spec.source.fromSandbox`, so the child inherits the source's current memory
+and on-disk filesystem, not a fresh boot of the cold template. The flat
+`POST /v1/fork` route is unchanged: it names no source sandbox and stays a
+create-from-template.
+
+Request body (all fields optional):
+
+- `id`: the child sandbox id. DNS-1123 validated (typed 400 on violation);
+  generated when omitted.
+- `pause_source`: freeze the source VM while it is checkpointed so its memory
+  and disk are captured consistently. It pauses only the caller's own
+  org-owned sandbox.
+- `secret_inheritance`: `"reissue"` (default: the child gets fresh
+  credentials) or `"inherit"` (explicit opt-in: the child duplicates the
+  source's in-memory secrets). A source that holds secrets is NOT forkable
+  without the opt-in: the controller's default-deny surfaces as a 403 whose
+  remediation names the exact field and value to send.
+
+Response (201): `{id, endpoint, token, phase, template_id, fork_time_ms}`,
+the same shape as create. `template_id` is the SOURCE's pool; `fork_time_ms`
+is the engine-measured child startup latency (wall-clock fallback), never a
+hardcoded zero. The child's token is freshly issued; the source's token never
+opens the child.
+
+Semantics and limits:
+
+- The source is resolved org-scoped (`getOwned`): a foreign or missing source
+  id answers an indistinguishable 404 and never forks.
+- The source must be Ready (a live fork copies running memory); anything else
+  is an instant 409 with remediation.
+- One child per call; the SDKs' `fork(n)` calls the route n times.
+- A fork counts as a create for quota (concurrency cap, creation-rate bucket)
+  and is billed like any claimed sandbox.
+- Children run on the source's node by construction (the fork copies
+  already-resident guest memory in place), so fan-out is bounded by that
+  node's capacity.
+
 ## Quota enforcement status (what is real today)
 
 The gateway is the ONLY enforcement point for the hosted tier caps; the
