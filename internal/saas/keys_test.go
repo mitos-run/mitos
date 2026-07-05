@@ -220,6 +220,22 @@ func TestSaltChangesHash(t *testing.T) {
 	}
 }
 
+// TestKeyPepperFromEnv asserts the pepper helper reads the pepper from the
+// documented environment variable and reports absence when unset, so the three
+// key components (gateway, console, CLI) can wire an identical pepper from one
+// source (issue #733, item 3). The value is never logged by the helper.
+func TestKeyPepperFromEnv(t *testing.T) {
+	t.Setenv(EnvKeyPepper, "")
+	if p, ok := KeyPepperFromEnv(); ok || p != nil {
+		t.Errorf("empty env: got (%v, %v), want (nil, false)", p, ok)
+	}
+	t.Setenv(EnvKeyPepper, "s3cret-pepper")
+	p, ok := KeyPepperFromEnv()
+	if !ok || string(p) != "s3cret-pepper" {
+		t.Errorf("set env: got (%q, %v), want (s3cret-pepper, true)", p, ok)
+	}
+}
+
 // TestSandboxesScopeImpliesReadOnly: the default onboarding key carries only
 // the sandboxes scope; the gateway's read-only ops (sandbox.list,
 // sandbox.status, template.list) require the read scope. Full lifecycle access

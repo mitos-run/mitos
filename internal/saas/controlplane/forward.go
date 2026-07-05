@@ -27,6 +27,12 @@ import (
 // token and endpoint.
 const tokenSecretSuffix = "-sandbox-token"
 
+// maxCreateReplicas is the inclusive upper bound on the replicas a single create
+// request may ask for. It is a request-validation guard against a huge value
+// churning the controller; real fleet size is separately bounded by controller
+// replica admission and the replica-weighted live-usage cap (issue #733).
+const maxCreateReplicas = 64
+
 // Forward dispatches an authenticated, org-scoped request to the matching
 // Kubernetes action or the runtime reverse proxy. orgID is taken ONLY from
 // req.OrgID and bounds every effect: the namespace is NamespaceForOrg(orgID) and
@@ -130,6 +136,17 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 		return errResp(apierr.Get(apierr.CodeInvalidInput).
 			WithCause("the create request sets none of pool, image, or template and the server has no default pool configured").
 			WithRemediation("Set \"pool\" (or \"image\"/\"template\") in the request body to an existing pool; list pools with GET /v1/templates.")), nil
+	}
+
+	// Bound the requested replica count at request validation. Actual
+	// materialization is already bounded by controller replica admission and the
+	// replica-weighted live-usage cap, so this is not the only guard, but a huge
+	// value still invites needless controller churn before those lower bounds
+	// reject it. The cap is inclusive (issue #733, item 4).
+	if body.Replicas > maxCreateReplicas {
+		return errResp(apierr.Get(apierr.CodeInvalidInput).
+			WithCause(fmt.Sprintf("replicas %d exceeds the per-request maximum of %d", body.Replicas, maxCreateReplicas)).
+			WithRemediation(fmt.Sprintf("Request at most %d replicas per create; fork additional sandboxes if you need a larger fleet.", maxCreateReplicas))), nil
 	}
 
 	ns := k.namespaceForOrg(req.OrgID)

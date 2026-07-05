@@ -419,6 +419,20 @@ database:
     # Key within that Secret holding the postgres://user:pass@host:5432/db DSN.
     key: "dsn"
 
+# Shared SaaS control-plane settings that span the gateway and console.
+saas:
+  # Optional process-wide pepper mixed into every API key hash (issue #733). When
+  # set, both the gateway and console source MITOS_API_KEY_PEPPER from this Secret
+  # so a stolen store dump alone cannot be brute-forced. OPT-IN and OFF by default:
+  # the SAME Secret MUST back both pods, and introducing a pepper invalidates any
+  # pre-existing keys (users must reissue them), so enable it deliberately, ideally
+  # at first install.
+  apiKeyPepperSecret:
+    # Name of the Secret in the release namespace. Empty leaves keys unpeppered.
+    name: ""
+    # Key within that Secret holding the pepper value.
+    key: "pepper"
+
 # Console (Deployment): the hosted/self-hosted web console (issue #214). The BFF
 # plus the embedded SPA, served by cmd/console. ONE image and ONE bundle serve
 # BOTH editions; behavior is driven entirely by the capabilities below, which the
