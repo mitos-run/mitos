@@ -21,6 +21,7 @@ import (
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/husk"
+	"mitos.run/mitos/internal/tenant"
 	"mitos.run/mitos/internal/workspace"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -590,6 +591,15 @@ func (r *SandboxReconciler) resolveWorkspaceHead(ctx context.Context, claim *v1.
 	var ws v1.Workspace
 	if err := r.Get(ctx, types.NamespacedName{Namespace: claim.Namespace, Name: claim.Spec.WorkspaceRef.Name}, &ws); err != nil {
 		return "", nil, false, fmt.Errorf("resolve workspace %s: %w", claim.Spec.WorkspaceRef.Name, err)
+	}
+	// Controller-side defense in depth (GHSA-pgv2-9w24-j7wh): in a shared
+	// namespace a claim owned by one org must not hydrate a Workspace labeled for
+	// another org. An unlabeled workspace or an unlabeled claim (self-hosted) is
+	// allowed; the boundary comes from per-org namespaces there.
+	if wantOrg := claim.Labels[tenant.OrgLabelKey]; wantOrg != "" {
+		if gotOrg := ws.Labels[tenant.OrgLabelKey]; gotOrg != "" && gotOrg != wantOrg {
+			return "", nil, false, fmt.Errorf("resolve workspace %s: cross-org reference refused", claim.Spec.WorkspaceRef.Name)
+		}
 	}
 	if ws.Status.Head == "" {
 		return "", nil, false, nil
