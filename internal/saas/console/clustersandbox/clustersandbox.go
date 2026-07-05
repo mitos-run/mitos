@@ -43,17 +43,24 @@ const (
 	requestedMemGiBAnnotation = "mitos.run/requested-mem-gib"
 )
 
-// Control implements console.SandboxControl against the Kubernetes API.
+// Control implements console.SandboxControl (and console.LogStreamer, see
+// logs.go) against the Kubernetes API.
 type Control struct {
 	c          client.Client
 	httpClient *http.Client
+	// pods is the husk-pod log follow transport StreamLogs uses (see logs.go).
+	// It is nil in dev / outside a cluster, in which case StreamLogs reports
+	// console.ErrUnsupported honestly instead of a fabricated empty stream.
+	pods PodLogStreamer
 }
 
 // New builds the cluster-backed sandbox control. Exec dials the sandbox's own
 // HTTP endpoint directly (not through the Kubernetes API), so a nil
-// http.Client defaults to http.DefaultClient.
-func New(c client.Client) *Control {
-	return &Control{c: c, httpClient: http.DefaultClient}
+// http.Client defaults to http.DefaultClient. pods is the husk-pod log follow
+// transport (see logs.go); pass nil where live log streaming is not wired
+// (StreamLogs then reports console.ErrUnsupported).
+func New(c client.Client, pods PodLogStreamer) *Control {
+	return &Control{c: c, httpClient: http.DefaultClient, pods: pods}
 }
 
 // randomSandboxName returns prefix plus a random hex suffix, so concurrent
