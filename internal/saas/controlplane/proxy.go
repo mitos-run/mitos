@@ -38,16 +38,19 @@ func (k *K8sControlPlane) proxy(ctx context.Context, req saas.ForwardRequest) (s
 	if !ok {
 		return notFound(id), nil
 	}
+	// A multi-child fork fan-out cannot be addressed by one id: refuse it typed
+	// rather than silently routing everything to child 0. This guard runs
+	// BEFORE the terminal gate so a fan-out whose first child happens to be
+	// reaped still gets the single-child limitation, never child 0's
+	// idle_timeout speaking for the whole fan-out.
+	if aerr := multiChildRuntimeError(sb); aerr != nil {
+		return errResp(*aerr), nil
+	}
 	// Terminal phases answer with the typed error BEFORE any dial: the claim
 	// keeps its stale endpoint after the VM stopped (issue #688), and dialing
 	// it would surface a generic 502 where docs/lifecycle.md promises the typed
 	// idle_timeout error for a reaped sandbox.
 	if aerr := terminalRuntimeError(sb); aerr != nil {
-		return errResp(*aerr), nil
-	}
-	// A multi-child fork fan-out cannot be addressed by one id: refuse it typed
-	// rather than silently routing everything to child 0.
-	if aerr := multiChildRuntimeError(sb); aerr != nil {
 		return errResp(*aerr), nil
 	}
 	// Fork-aware endpoint and token resolution: a fromSandbox fork carries its

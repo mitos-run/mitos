@@ -543,3 +543,33 @@ func TestForkOfForkIsRejected(t *testing.T) {
 		t.Errorf("fork objects = %d, want only the pre-seeded parent (nothing created)", len(forks))
 	}
 }
+
+// TestForkMultiChildWithTerminatedFirstChildStillSingleChildError asserts the
+// multi-child guard OUTRANKS the child-terminal gate: a multi-child fan-out
+// whose FIRST child happens to be reaped must still get the documented
+// single-child limitation error, not child 0's idle_timeout, because this
+// surface refuses to interpret any one child of a fan-out (CodeRabbit review
+// of #710).
+func TestForkMultiChildWithTerminatedFirstChildStillSingleChildError(t *testing.T) {
+	fork, childSecret := forkWithChildren("sb-fanx", "10.9.9.9:9091", v1.SandboxTerminated, v1.SandboxReady)
+	c := newFakeClient(t, fork, childSecret)
+	cp := New(c)
+
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.runtime", Path: "/v1/sandboxes/sb-fanx/exec", Method: http.MethodPost,
+		BodyStream: strings.NewReader(`{}`),
+	})
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("proxy status = %d, want 400 (single-child limitation); body = %s", resp.Status, resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), "single-child") {
+		t.Errorf("proxy error does not name the single-child limitation: %s", resp.Body)
+	}
+	if strings.Contains(string(resp.Body), "idle_timeout") {
+		t.Errorf("multi-child fork wrongly answered with child 0's idle_timeout: %s", resp.Body)
+	}
+
+	if _, aerr := cp.ResolveRuntime(context.Background(), orgA, "sb-fanx"); aerr == nil || !strings.Contains(aerr.Cause, "single-child") {
+		t.Errorf("ResolveRuntime error = %+v, want the single-child limitation", aerr)
+	}
+}

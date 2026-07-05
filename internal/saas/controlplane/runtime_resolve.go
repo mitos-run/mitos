@@ -29,16 +29,19 @@ func (k *K8sControlPlane) ResolveRuntime(ctx context.Context, orgID, id string) 
 			WithCause(fmt.Sprintf("no sandbox %q exists for this organization", id))
 		return saas.RuntimeTarget{}, &e
 	}
+	// A multi-child fork fan-out cannot be addressed by one id: refuse it typed
+	// rather than silently routing everything to child 0. This guard runs
+	// BEFORE the terminal gate so a fan-out whose first child happens to be
+	// reaped still gets the single-child limitation, never child 0's
+	// idle_timeout speaking for the whole fan-out.
+	if aerr := multiChildRuntimeError(sb); aerr != nil {
+		return saas.RuntimeTarget{}, aerr
+	}
 	// Terminal phases answer with the typed error BEFORE any dial, mirroring
 	// proxy(): a Terminated claim keeps its stale endpoint after the VM stopped
 	// (issue #688), so the PTY must get the documented idle_timeout error, not
 	// a WebSocket dial failure against a dead pod IP.
 	if aerr := terminalRuntimeError(sb); aerr != nil {
-		return saas.RuntimeTarget{}, aerr
-	}
-	// A multi-child fork fan-out cannot be addressed by one id: refuse it typed
-	// rather than silently routing everything to child 0.
-	if aerr := multiChildRuntimeError(sb); aerr != nil {
 		return saas.RuntimeTarget{}, aerr
 	}
 	// Fork-aware endpoint and token resolution: a fromSandbox fork carries its

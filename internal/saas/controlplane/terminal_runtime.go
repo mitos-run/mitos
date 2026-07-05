@@ -54,10 +54,11 @@ func terminalRuntimeError(sb *v1.Sandbox) *apierr.Error {
 	// flips the CHILD phase while the fork object stays Ready, so the parent
 	// phase alone would pass a reaped fork straight to a dead child endpoint
 	// and a generic 502 (the #688 dead-end class). Consult the child the
-	// runtime surface targets (the gateway fork route creates single-child
-	// forks; a multi-child fan-out is refused upstream by
-	// multiChildRuntimeError before this gate matters).
-	if sb.Spec.Source.FromSandbox != nil && len(sb.Status.Children) > 0 {
+	// runtime surface targets. Only a SINGLE-child fork is interpreted here:
+	// a multi-child fan-out is refused by multiChildRuntimeError, which every
+	// runtime call site runs FIRST, and answering with child 0's terminal
+	// state would wrongly speak for the other children.
+	if sb.Spec.Source.FromSandbox != nil && len(sb.Status.Children) == 1 {
 		child := sb.Status.Children[0]
 		switch child.Phase {
 		case v1.SandboxTerminated:
