@@ -176,3 +176,24 @@ export function getFirstRun(uc?: string): FirstRunContent {
   if (uc === undefined) return DEFAULT_ENTRY
   return FIRST_RUN.find((e) => e.slug === uc) ?? DEFAULT_ENTRY
 }
+
+// Synthetic trigger: shown in the 90 second troubleshooting panel so a stuck
+// user has something to copy-paste that proves the wiring works, independent
+// of whichever runtime tab they picked above. The CLI one-liner is `mitos run
+// <command>` (create, exec, terminate, documented in docs/cli.md). The curl
+// pair mirrors the same two calls the CLI makes under the hood: POST /v1/fork
+// (fields: template, id, per internal/mcp/httpbackend.go) then POST /v1/exec
+// with the sandbox id in the X-Sandbox-Id header (proto/sandbox/v1/sandbox.proto
+// ExecStreamRequest.command), so it is grounded in the real wire shape, not
+// invented.
+export const SYNTHETIC_TRIGGER = {
+  cli: 'mitos run "echo hello"',
+  curl: `\
+curl -s -X POST https://api.mitos.run/v1/fork \\
+  -H "Authorization: Bearer $MITOS_API_KEY" -H "Content-Type: application/json" \\
+  -d '{"template":"python","id":"trigger-1"}'
+
+curl -s -X POST https://api.mitos.run/v1/exec \\
+  -H "Authorization: Bearer $MITOS_API_KEY" -H "X-Sandbox-Id: trigger-1" -H "Content-Type: application/json" \\
+  -d '{"command":"echo hello"}'`,
+}
