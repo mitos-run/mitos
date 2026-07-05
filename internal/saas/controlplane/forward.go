@@ -120,6 +120,27 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 		}
 	}
 
+	// Single-tenant mode shares ONE namespace across all orgs, so a client
+	// supplied secretRef or workspace name resolves by bare name into that shared
+	// namespace with no org boundary: a tenant could name a platform Secret
+	// (database DSN, mail credentials) or another tenant's Secret/Workspace and
+	// have it mounted into its own sandbox (GHSA-pgv2-9w24-j7wh). There is no safe
+	// per-org meaning for a bare object name in a shared namespace, so refuse
+	// these references here. Per-org tenancy (a namespace per org) restores the
+	// boundary and lifts this restriction.
+	if k.singleTenantNamespace != "" {
+		if len(body.Secrets) > 0 {
+			return errResp(apierr.Get(apierr.CodeInvalidInput).
+				WithCause("secret references are not permitted in single-tenant mode: a bare Secret name has no org boundary in a shared namespace").
+				WithRemediation("Pass values inline via \"env\" instead of \"secrets\", or run the control plane with per-org tenancy (a namespace per org) to use secretRef safely.")), nil
+		}
+		if body.Workspace != "" {
+			return errResp(apierr.Get(apierr.CodeInvalidInput).
+				WithCause("workspace references are not permitted in single-tenant mode: a bare Workspace name has no org boundary in a shared namespace").
+				WithRemediation("Run the control plane with per-org tenancy (a namespace per org) to use a workspace, or omit \"workspace\".")), nil
+		}
+	}
+
 	pool := body.Pool
 	if pool == "" {
 		pool = body.Image
