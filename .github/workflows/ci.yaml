@@ -423,7 +423,18 @@ jobs:
             fi
             sleep 1
           done
-          docker logs cu 2>&1 | tail -5 || true
+          if [ "$ok" != 1 ]; then
+            # Chromium is backgrounded by start-chromium.sh, so its stderr lands
+            # in the container log interleaved with the relay's once-per-second
+            # "connection refused" proxy errors. Drop that spam and the benign
+            # dbus/cpufreq warnings so the actual Chromium launch failure (e.g. a
+            # SIGTRAP from an unlaunchable package, the 150 regression this pin
+            # guards against) is visible in CI without a local repro.
+            echo "=== chromium version ==="
+            docker run --rm --entrypoint chromium mitos-computer-use:ci --version || true
+            echo "=== container log (relay proxy-error spam and benign warnings filtered) ==="
+            docker logs cu 2>&1 | grep -viE 'proxy error: dial tcp 127.0.0.1:9223|dbus/bus.cc|cpufreq/scaling' | tail -40 || true
+          fi
           docker rm -f cu >/dev/null 2>&1 || true
           [ "$ok" = 1 ] || { echo "FAIL: CDP /json/version did not return webSocketDebuggerUrl"; exit 1; }
       # Trivy scans each locally built image for known OS/library CVEs (CVE
