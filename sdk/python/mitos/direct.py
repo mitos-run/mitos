@@ -549,16 +549,19 @@ class DirectSandbox:
         return url
 
     def fork(self, n: int = 1, id: Optional[str] = None) -> list["DirectSandbox"]:
-        """Fork this RUNNING sandbox into n independent sibling copies (issue
-        #596).
+        """Fork this RUNNING sandbox into n independent sibling copies (issues
+        #596, #709).
 
-        On the standalone server this is a LIVE fork: the server checkpoints this
-        sandbox while it is paused, so each child inherits this sandbox's live
-        memory AND its current on-disk filesystem, not a re-fork of the cold
-        template. Files written and kernels left running in the parent are present
-        in every child. The snapshot-fork engine reseeds each child's CRNG before
-        it is served. Each child is a READY DirectSandbox with its own id. Returns
-        the list of children; the source keeps running.
+        This is a LIVE fork on both the standalone server and the hosted API:
+        the source is checkpointed while paused, so each child inherits this
+        sandbox's live memory AND its current on-disk filesystem, not a re-fork
+        of the cold template. Files written and kernels left running in the
+        parent are present in every child. The snapshot-fork engine reseeds each
+        child's CRNG before it is served. On the hosted API the source is
+        resolved inside your organization only, and each child gets its own
+        freshly issued token (the parent's token never opens a child). Each
+        child is a READY DirectSandbox with its own id. Returns the list of
+        children; the source keeps running.
         """
         children: list[DirectSandbox] = []
         for i in range(n):
@@ -583,12 +586,11 @@ class DirectSandbox:
         # Live fork of THIS running sandbox: POST to the per-sandbox fork route so
         # the server checkpoints this sandbox (memory + on-disk filesystem) and
         # boots the child from it, instead of re-forking the cold template. The
-        # template is still sent in the body for hosted-gateway compatibility: the
-        # gateway maps this route to sandbox.create, whose control-plane handler
-        # reads the template as the pool (the true hosted live-fork route is a
-        # follow-up; the cluster SDK already live-forks on hosted). pause_source
-        # keeps the parent frozen across the checkpoint so its memory and disk are
-        # captured consistently.
+        # hosted gateway routes this to its live-fork op (sandbox.fork, the
+        # FromSandbox controller path); the template is still sent in the body
+        # for compatibility with older gateways that mapped this route to a
+        # template claim. pause_source keeps the parent frozen across the
+        # checkpoint so its memory and disk are captured consistently.
         resp = _fork_post(
             self._http,
             f"{self._server_url}/v1/sandboxes/{self.id}/fork",
