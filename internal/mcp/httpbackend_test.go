@@ -249,6 +249,49 @@ func TestHTTPBackendExecZeroTimeout(t *testing.T) {
 	}
 }
 
+// TestHTTPBackendExecCapsOutputAtOneMiB asserts a command whose stdout (or
+// stderr) exceeds maxTransportExecOutputBytes is capped there with a trailing
+// truncation marker, rather than Exec buffering the whole thing in memory
+// without bound.
+func TestHTTPBackendExecCapsOutputAtOneMiB(t *testing.T) {
+	big := strings.Repeat("a", 2*maxTransportExecOutputBytes) // well past the 1 MiB cap
+	fake := &fakeSandbox{execStdout: big, execStderr: big, execExitCode: 0}
+	srv := connectServer(t, fake, nil)
+	defer srv.Close()
+
+	b := NewHTTPBackend(srv.URL, "", srv.Client())
+	res, err := b.Exec(context.Background(), "sbx-1", "produce-lots-of-output", 0)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	for name, got := range map[string]string{"stdout": res.Stdout, "stderr": res.Stderr} {
+		if !strings.HasSuffix(got, execOutputTruncatedMarker) {
+			t.Fatalf("%s missing truncation marker, len=%d", name, len(got))
+		}
+		body := strings.TrimSuffix(got, execOutputTruncatedMarker)
+		if len(body) != maxTransportExecOutputBytes {
+			t.Fatalf("%s truncated body len = %d, want %d", name, len(body), maxTransportExecOutputBytes)
+		}
+	}
+}
+
+// TestHTTPBackendExecUnderCapIsUntouched asserts output well under the cap is
+// returned exactly, with no truncation marker appended.
+func TestHTTPBackendExecUnderCapIsUntouched(t *testing.T) {
+	fake := &fakeSandbox{execStdout: "small output", execExitCode: 0}
+	srv := connectServer(t, fake, nil)
+	defer srv.Close()
+
+	b := NewHTTPBackend(srv.URL, "", srv.Client())
+	res, err := b.Exec(context.Background(), "sbx-1", "echo hi", 0)
+	if err != nil {
+		t.Fatalf("Exec: %v", err)
+	}
+	if res.Stdout != "small output" {
+		t.Fatalf("Stdout = %q, want unmodified %q", res.Stdout, "small output")
+	}
+}
+
 // TestHTTPBackendReadFile asserts ReadFile rides the Connect ReadFile RPC,
 // concatenating the streamed chunks, and carries both auth headers.
 func TestHTTPBackendReadFile(t *testing.T) {
