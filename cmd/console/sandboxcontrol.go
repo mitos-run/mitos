@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 
 	"k8s.io/client-go/kubernetes"
@@ -44,11 +45,11 @@ func buildSandboxControl(logger *slog.Logger) console.SandboxControl {
 func buildPodLogStreamer() (clustersandbox.PodLogStreamer, error) {
 	cfg, err := ctrlconfig.GetConfig()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("load kube config for pod log streamer: %w", err)
 	}
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("build clientset for pod log streamer: %w", err)
 	}
 	return clustersandbox.NewClientsetPodLogStreamer(cs), nil
 }

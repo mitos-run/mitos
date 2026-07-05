@@ -547,6 +547,74 @@ func TestSandboxLogsStreamHeartbeatsDuringBlockingFollowTransport(t *testing.T) 
 	}
 }
 
+// emptyLogStreamer models a LogStreamer that completes cleanly having
+// written zero lines (e.g. a sandbox with no log output yet). It is the
+// stand-in for the MINOR fix in issue #726: before that fix, this exact
+// shape left sink.wrote permanently false even after writeSSEHeaders had
+// already sent the 200 response, so the ticker.C heartbeat case no-op'd for
+// the rest of the connection's life.
+type emptyLogStreamer struct{}
+
+func (emptyLogStreamer) StreamLogs(_ context.Context, _, _ string, _ LogSink) error {
+	return nil
+}
+
+// TestSandboxLogsStreamEmptyStreamStillHeartbeats is the regression test for
+// the MINOR fix in issue #726: a stream that finishes with zero log lines
+// (StreamLogs returns nil having never called sink.Write) must still send
+// heartbeats for as long as the connection is held open, not go silent after
+// its initial 200 response. Before the fix, writeSSEHeaders was called but
+// sink.wrote was never latched true on this path, so heartbeat() kept
+// no-op'ing forever and an idle-timeout proxy could drop the connection
+// despite it being intentionally kept alive.
+func TestSandboxLogsStreamEmptyStreamStillHeartbeats(t *testing.T) {
+	origInterval := sseHeartbeatInterval
+	sseHeartbeatInterval = 5 * time.Millisecond
+	t.Cleanup(func() { sseHeartbeatInterval = origInterval })
+
+	sandboxes := NewMemSandboxControl()
+	sandboxes.Add(SandboxView{ID: "sb-1", OrgID: "org-alice"})
+	con := New(Deps{
+		Accounts:  newMemberAuthorizedAccounts(t, "acct-1", "org-alice"),
+		Sandboxes: sandboxes,
+		Logs:      emptyLogStreamer{},
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("GET", "/console/sandboxes/sb-1/logs/stream", nil)
+	r = r.WithContext(WithCaller(ctx, "acct-1", "org-alice"))
+	w := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		con.ServeHTTP(w, r)
+		close(done)
+	}()
+
+	// Give the heartbeat ticker time to fire more than once after StreamLogs
+	// already completed with zero lines, proving wrote latched true with no
+	// real content ever written.
+	time.Sleep(40 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not return after ctx cancel for an empty (zero-line) stream")
+	}
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "data:") {
+		t.Fatalf("expected no data events for an empty stream, got: %q", body)
+	}
+	if strings.Count(body, ": heartbeat") < 2 {
+		t.Fatalf("want at least 2 heartbeats for an empty (zero-line) stream, got: %q", body)
+	}
+}
+
 // recordingPeriodicLogStreamer models a real follow transport that keeps
 // writing lines on its own goroutine for as long as ctx is alive (a live
 // husk-pod follow with steady output), unlike blockingLogStreamer above which
