@@ -512,12 +512,16 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// reading --tls-cert. They are the SAME Secrets the warm-pool path uses.
 		TLSSecretName: r.HuskTLSSecretName,
 		CASecretName:  r.HuskCASecretName,
-		// BUG 1 fix: the child's per-activation rootfs CoW clone must be sourced
-		// from the SOURCE sandbox's live rootfs (the disk the fork snapshot's
-		// vmstate was baked against), NOT the pristine template rootfs. The source
-		// pod name is its Status.SandboxID; its rootfs is visible to the child
-		// through the shared husk-rootfs hostPath dir.
-		ForkSourceRootfsPath: huskSourceRootfsInPodPath(source.Status.SandboxID),
+		// The child's per-activation rootfs CoW clone is sourced from the FROZEN
+		// source rootfs the source stub captured inside the fork snapshot's paused
+		// window (SnapshotDir/rootfs.ext4), NOT the source's LIVE rootfs and NOT the
+		// pristine template rootfs. The frozen copy is a point-in-time pair with the
+		// mem+vmstate checkpoint, so the child's restored memory matches its disk.
+		// Cloning from the source's live rootfs would let the resumed source drift
+		// the disk out of sync with the checkpoint; the template rootfs would lose
+		// every write the source made. The frozen copy rides the SAME read-only
+		// snapshot mount the child restores mem+vmstate from.
+		ForkSourceRootfsPath: huskForkRootfsInPodPath(),
 	}
 
 	// Fixed-slot, idempotent child set. The child pods are EXACTLY Replicas, with
