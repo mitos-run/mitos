@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.26.0](https://github.com/mitos-run/mitos/compare/v1.25.0...v1.26.0) (2026-07-06)
+
+
+### Features
+
+* **api:** add status.vmId to Sandbox for the shared-host multi-vm mapping ([#802](https://github.com/mitos-run/mitos/issues/802)) ([34229c1](https://github.com/mitos-run/mitos/commit/34229c12965d15f40e440008934bc7bd861a84b3))
+* **controller:** account co-located fork VMs against the source pod memory budget ([#804](https://github.com/mitos-run/mitos/issues/804)) ([3064e00](https://github.com/mitos-run/mitos/commit/3064e00ea8d1377f5611f7fa77fb128425b34739))
+* **controller:** route a fork to a VM in the source pod behind a flag ([#803](https://github.com/mitos-run/mitos/issues/803)) ([6596b43](https://github.com/mitos-run/mitos/commit/6596b43478e054dca70470f154403bd3b404e733))
+* **controller:** start warm husk pods with --multi-vm when multi-vm-fork is on ([#805](https://github.com/mitos-run/mitos/issues/805)) ([0f13527](https://github.com/mitos-run/mitos/commit/0f13527532e48823744080e881adf11c53710bdf))
+* **helm:** add controller.multiVMFork value to render --multi-vm-fork ([#806](https://github.com/mitos-run/mitos/issues/806)) ([9f6d75b](https://github.com/mitos-run/mitos/commit/9f6d75be61c5c583c12c2842300afa7dfa062934))
+* **helm:** add forkd AppArmor profile value ([#747](https://github.com/mitos-run/mitos/issues/747)) ([48fbd48](https://github.com/mitos-run/mitos/commit/48fbd48ab6de99b53a7fc2f6c8bb91d6517c2e4c))
+* **husk:** add the spawn-vm control op to add a VM to a running pod ([#801](https://github.com/mitos-run/mitos/issues/801)) ([869e671](https://github.com/mitos-run/mitos/commit/869e671ef973c45436c5582c395aa2d7dc688849))
+* **husk:** spawn a real second firecracker with a per-VM tap and IP ([#799](https://github.com/mitos-run/mitos/issues/799)) ([db00921](https://github.com/mitos-run/mitos/commit/db00921875645c5eba57ba8daef9ba0fc67e8791))
+
 ## [1.25.0](https://github.com/mitos-run/mitos/compare/v1.24.2...v1.25.0) (2026-07-06)
 
 
