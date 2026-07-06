@@ -515,6 +515,15 @@ type Stub struct {
 	memStat     func(pid int) (unique, shared int64)
 	egressBytes func(tap string) int64
 
+	// sleep is the backoff sleep the bounded resume-retry uses; nil falls back to
+	// time.Sleep. Tests inject a no-op so the retry runs without real sleeps.
+	sleep func(time.Duration)
+	// onSourceLeftPaused fires when every resume attempt after a fork snapshot
+	// failed and the source is left paused (the v1.24.1 stuck-paused incident). It
+	// is the observability marker/metrics seam; nil is a no-op. The stub also logs
+	// a distinct error-level line in that case so a source left paused is visible.
+	onSourceLeftPaused func()
+
 	mu              sync.Mutex
 	state           State
 	vm              vmm
@@ -593,6 +602,9 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 	}
 	if s.egressBytes == nil {
 		s.egressBytes = readEgressCounterBytes
+	}
+	if s.sleep == nil {
+		s.sleep = time.Sleep
 	}
 	if s.wsTransport == nil {
 		s.wsTransport = productionWorkspaceTransport
@@ -941,6 +953,50 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 // error. On a snapshot or freeze failure it still attempts to resume the source
 // so a transient error does not leave a live sandbox frozen. The fork id and
 // snapshot paths carry no secrets.
+// resumeMaxAttempts and resumeRetryBackoff bound the resume-retry the fork
+// snapshot uses to keep its "never leave the source paused" guarantee: a
+// transient Resume error is retried a few times a short interval apart before we
+// give up, so a blip does not recreate the v1.24.1 stuck-paused incident.
+const (
+	resumeMaxAttempts  = 3
+	resumeRetryBackoff = 20 * time.Millisecond
+)
+
+// backoffSleep sleeps for the resume-retry backoff using the injected sleep seam
+// when present, else time.Sleep. It keeps the retry testable without real sleeps.
+func (s *Stub) backoffSleep(d time.Duration) {
+	if s.sleep != nil {
+		s.sleep(d)
+		return
+	}
+	time.Sleep(d)
+}
+
+// resumeSourceAfterFork resumes the source VM after a fork snapshot with a
+// bounded retry: a TRANSIENT resume error must not leave a tenant's live source
+// frozen (the v1.24.1 stuck-paused incident, where a post-fork exec against the
+// source timed out at 30s). It retries resumeMaxAttempts times, resumeRetryBackoff
+// apart, and returns nil as soon as one resume succeeds. When every attempt fails
+// it emits a distinct error-level log and fires the onSourceLeftPaused marker so a
+// source left paused is observable, then returns the last error. The caller under
+// s.mu owns the VM.
+func (s *Stub) resumeSourceAfterFork() error {
+	var err error
+	for attempt := 0; attempt < resumeMaxAttempts; attempt++ {
+		if attempt > 0 {
+			s.backoffSleep(resumeRetryBackoff)
+		}
+		if err = s.vm.Resume(); err == nil {
+			return nil
+		}
+	}
+	fmt.Fprintf(os.Stderr, "husk: source left paused after fork snapshot: resume failed after %d attempts: %v\n", resumeMaxAttempts, err)
+	if s.onSourceLeftPaused != nil {
+		s.onSourceLeftPaused()
+	}
+	return err
+}
+
 func (s *Stub) ForkSnapshot(ctx context.Context, req ForkSnapshotRequest) (ForkSnapshotResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -998,7 +1054,9 @@ func (s *Stub) ForkSnapshot(ctx context.Context, req ForkSnapshotRequest) (ForkS
 	if s.rootfsClonePath != "" {
 		frozenRootfs := filepath.Join(req.SnapshotDir, "rootfs.ext4")
 		if err := s.reflink(s.rootfsClonePath, frozenRootfs); err != nil {
-			_ = s.vm.Resume()
+			// Invariant: the source must not be left paused. Resume it (bounded
+			// retry) before failing closed on the freeze error.
+			_ = s.resumeSourceAfterFork()
 			werr := fmt.Errorf("husk: freeze source rootfs for fork snapshot: %w", err)
 			return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 		}
@@ -1012,8 +1070,9 @@ func (s *Stub) ForkSnapshot(ctx context.Context, req ForkSnapshotRequest) (ForkS
 	// leaves the source stopped: the hosted fork-the-winner-and-continue loop
 	// POSTs pause_source=true and then execs against the SOURCE, which MUST be
 	// running. Leaving the source paused was the production bug (v1.24.1): a
-	// post-fork exec against the source timed out at 30s.
-	if err := s.vm.Resume(); err != nil {
+	// post-fork exec against the source timed out at 30s. The resume is retried a
+	// few times so a transient blip does not recreate that stuck-paused incident.
+	if err := s.resumeSourceAfterFork(); err != nil {
 		werr := fmt.Errorf("husk: resume source VM after fork snapshot: %w", err)
 		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 	}

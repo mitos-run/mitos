@@ -243,10 +243,13 @@ type ForkSnapshotRequest struct {
 }
 
 // ForkSnapshotResult is the control reply for a ForkSnapshot op. OK is true only
-// when the VM paused, the snapshot was written, the source rootfs was frozen, and
-// the VM resumed. SnapshotDir echoes where the snapshot was written (it carries
-// no secret). Error carries actionable remediation text when OK is false; it
-// never carries secrets.
+// when the VM paused, the snapshot was written, the source rootfs was frozen IF a
+// per-activation rootfs clone exists, and the VM resumed. The freeze is
+// CONDITIONAL: ForkSnapshot skips it when the stub has no on-disk rootfs clone
+// (the mock/CI paths) and still returns OK=true, so OK=true means paused +
+// snapshot written + (rootfs frozen only when a clone path exists) + resumed.
+// SnapshotDir echoes where the snapshot was written (it carries no secret). Error
+// carries actionable remediation text when OK is false; it never carries secrets.
 type ForkSnapshotResult struct {
 	OK          bool    `json:"ok"`
 	SnapshotDir string  `json:"snapshot_dir,omitempty"`
