@@ -15,11 +15,13 @@ import (
 	"crypto/tls"
 	v1 "mitos.run/mitos/api/v1"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"mitos.run/mitos/internal/controller"
@@ -681,5 +683,105 @@ func TestHuskForkChildPodInheritsSourcePodScheduling(t *testing.T) {
 	}
 	if !pinned {
 		t.Errorf("fork child nodeAffinity must pin to the source node %q; terms=%v", srcPod.Spec.NodeName, terms)
+	}
+}
+
+// TestHuskForkChildInheritsSourceNetwork is the issue #760 regression for the
+// network + egress half: the live-fork child's ActivateRequest must carry the
+// SAME network posture a warm-claimed sandbox of the source pool gets, resolved
+// from the SOURCE pool template. Before the fix the child request set only
+// SnapshotDir + Token, so a child of a networked/allowlisted pool came up with
+// NO network (Network nil, Egress empty) instead of the pool's access, and a
+// deny-all child came up networkless (an immediate-OSError socket connect rather
+// than the tap + nft-drop TIMEOUT a real deny-all sandbox shows). This asserts
+// the controller threads Network + Egress + Allow from the source pool into the
+// fork-child activate. That the child then actually gets a working tap + nft deny
+// chain is only provable by the real-KVM firecracker/cluster suite
+// (cluster-husk-network-e2e); this proves the controller-plane wiring.
+func TestHuskForkChildInheritsSourceNetwork(t *testing.T) {
+	pool := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-net760", Namespace: "default"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{
+				Image: "python:3.12-slim",
+				Network: &v1.NetworkPolicy{
+					Egress: v1.EgressAllow,
+					Allow:  []string{"api.example.com:443"},
+				},
+				Resources: v1.SandboxResources{CPU: resource.MustParse("2")},
+			},
+			Warm: &v1.PoolWarm{Min: 0},
+		},
+	}
+	if err := k8sClient.Create(ctx, pool); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, pool) })
+
+	srcPod := makeDormantHuskPod(t, "pool-net760", "10.0.0.9")
+	makeForkSourceClaim(t, "src-net760", "pool-net760", srcPod)
+
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+
+	var mu sync.Mutex
+	var gotReq husk.ActivateRequest
+	var captured bool
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error) {
+		mu.Lock()
+		gotReq = req
+		captured = true
+		mu.Unlock()
+		return husk.ActivateResult{OK: true, VsockPath: "/run/husk/vsock.sock"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+
+	fork := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "hf-net760",
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: "src-net760"}}, Replicas: 1},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var pods corev1.PodList
+		_ = k8sClient.List(ctx, &pods, listForkChildren("hf-net760"))
+		for i := range pods.Items {
+			forceHuskPodReady(t, &pods.Items[i])
+		}
+		var got v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: "hf-net760", Namespace: "default"}, &got); err != nil {
+			return false
+		}
+		return got.Status.ReadyReplicas == 1
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !captured {
+		t.Fatal("fork child was never activated: no ActivateRequest captured")
+	}
+	if gotReq.Network == nil {
+		t.Fatal("fork child ActivateRequest.Network is nil: the child came up networkless instead of inheriting the source pool network (issue #760)")
+	}
+	if gotReq.Egress != string(v1.EgressAllow) {
+		t.Errorf("fork child ActivateRequest.Egress = %q, want %q from the source pool", gotReq.Egress, v1.EgressAllow)
+	}
+	foundAllow := false
+	for _, a := range gotReq.Allow {
+		if a == "api.example.com:443" {
+			foundAllow = true
+		}
+	}
+	if !foundAllow {
+		t.Errorf("fork child ActivateRequest.Allow = %v, want the source pool allowlist entry api.example.com:443", gotReq.Allow)
 	}
 }
