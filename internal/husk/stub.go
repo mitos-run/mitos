@@ -924,15 +924,23 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 // the owning stub to snapshot it.
 //
 // It pauses the VM (CreateSnapshot requires a paused VM), writes a Full snapshot
-// to req.SnapshotDir/{mem,vmstate} (the same layout Activate reads), then resumes
-// it UNLESS req.PauseSource is set, in which case it leaves the source paused.
-// The stub stays StateActive throughout: it still owns its one VM.
+// to req.SnapshotDir/{mem,vmstate} (the same layout Activate reads), freezes the
+// source rootfs to req.SnapshotDir/rootfs.ext4 (a point-in-time CoW copy paired
+// with the memory checkpoint, so a resumed source cannot drift a child's rootfs
+// clone), then ALWAYS resumes the source. The stub stays StateActive throughout:
+// it still owns its one VM.
+//
+// req.PauseSource is a compatibility field: the pause is always internal to the
+// checkpoint and the source is always resumed afterward. Leaving the source
+// paused (the old PauseSource behavior) was the production bug on v1.24.1: the
+// hosted fork-the-winner-and-continue loop POSTs pause_source=true and then execs
+// against the SOURCE, which timed out at 30s because nothing resumed it.
 //
 // FAIL CLOSED: it requires StateActive (else error, no snapshot); a pause,
-// snapshot-create, or resume failure returns OK=false plus an error. On a
-// snapshot failure it still attempts to resume the source so a transient
-// snapshot error does not leave a live sandbox frozen. The fork id and snapshot
-// paths carry no secrets.
+// snapshot-create, rootfs-freeze, or resume failure returns OK=false plus an
+// error. On a snapshot or freeze failure it still attempts to resume the source
+// so a transient error does not leave a live sandbox frozen. The fork id and
+// snapshot paths carry no secrets.
 func (s *Stub) ForkSnapshot(ctx context.Context, req ForkSnapshotRequest) (ForkSnapshotResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -975,13 +983,39 @@ func (s *Stub) ForkSnapshot(ctx context.Context, req ForkSnapshotRequest) (ForkS
 		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 	}
 
-	// Resume the source UNLESS the fork asked to keep it paused. PauseSource
-	// trades a brief source interruption for a colder, quiescent snapshot.
-	if !req.PauseSource {
-		if err := s.vm.Resume(); err != nil {
-			werr := fmt.Errorf("husk: resume source VM after fork snapshot: %w", err)
+	// Freeze the source rootfs INSIDE the paused window, as a point-in-time pair
+	// with the mem+vmstate checkpoint just written. Child husk pods clone from
+	// THIS frozen copy (the controller points their per-activation CoW clone at
+	// SnapshotDir/rootfs.ext4), never the source's live rootfs, so once the source
+	// resumes below and keeps writing its own disk it can NEVER drift a child's
+	// rootfs clone out of sync with that child's restored memory. reflink makes
+	// the freeze a copy-on-write clone (cheap on a reflink filesystem, a full copy
+	// otherwise), the same primitive the activate path uses for the per-activation
+	// clone. Skipped when this stub has no per-activation clone (the mock/CI paths
+	// with no on-disk rootfs), which leaves those paths unchanged. The path
+	// carries no secret. On failure the source is resumed (never leave a tenant's
+	// live sandbox frozen) before we fail closed.
+	if s.rootfsClonePath != "" {
+		frozenRootfs := filepath.Join(req.SnapshotDir, "rootfs.ext4")
+		if err := s.reflink(s.rootfsClonePath, frozenRootfs); err != nil {
+			_ = s.vm.Resume()
+			werr := fmt.Errorf("husk: freeze source rootfs for fork snapshot: %w", err)
 			return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 		}
+	}
+
+	// ALWAYS resume the source after the checkpoint. The pause above is only the
+	// brief quiescence CreateSnapshot requires; the memory checkpoint AND the
+	// frozen rootfs are a consistent point-in-time pair captured entirely inside
+	// that paused window, so the source is safe to run and mutate its live disk
+	// again. PauseSource stays a wire field for compatibility, but it no longer
+	// leaves the source stopped: the hosted fork-the-winner-and-continue loop
+	// POSTs pause_source=true and then execs against the SOURCE, which MUST be
+	// running. Leaving the source paused was the production bug (v1.24.1): a
+	// post-fork exec against the source timed out at 30s.
+	if err := s.vm.Resume(); err != nil {
+		werr := fmt.Errorf("husk: resume source VM after fork snapshot: %w", err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 	}
 
 	latency := time.Since(start)
