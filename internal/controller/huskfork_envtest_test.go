@@ -705,8 +705,11 @@ func TestHuskForkChildInheritsSourceNetwork(t *testing.T) {
 			Template: &v1.PoolTemplateSpec{
 				Image: "python:3.12-slim",
 				Network: &v1.NetworkPolicy{
-					Egress: v1.EgressAllow,
-					Allow:  []string{"api.example.com:443"},
+					Egress:       v1.EgressAllow,
+					Allow:        []string{"api.example.com:443"},
+					AllowCIDRs:   []string{"10.10.0.0/16"},
+					Inbound:      v1.InboundAllow,
+					InboundCIDRs: []string{"192.168.5.0/24"},
 				},
 				Resources: v1.SandboxResources{CPU: resource.MustParse("2")},
 			},
@@ -783,5 +786,19 @@ func TestHuskForkChildInheritsSourceNetwork(t *testing.T) {
 	}
 	if !foundAllow {
 		t.Errorf("fork child ActivateRequest.Allow = %v, want the source pool allowlist entry api.example.com:443", gotReq.Allow)
+	}
+	// The remaining security-relevant egress/inbound controls must also flow from
+	// the source pool to the child, not just Network/Egress/Allow (issue #760).
+	if gotReq.BlockNetwork {
+		t.Errorf("fork child ActivateRequest.BlockNetwork = true, want false from the source pool (pool does not block)")
+	}
+	if len(gotReq.AllowCIDRs) != 1 || gotReq.AllowCIDRs[0] != "10.10.0.0/16" {
+		t.Errorf("fork child ActivateRequest.AllowCIDRs = %v, want the source pool [10.10.0.0/16]", gotReq.AllowCIDRs)
+	}
+	if gotReq.Inbound != string(v1.InboundAllow) {
+		t.Errorf("fork child ActivateRequest.Inbound = %q, want %q from the source pool", gotReq.Inbound, v1.InboundAllow)
+	}
+	if len(gotReq.InboundCIDRs) != 1 || gotReq.InboundCIDRs[0] != "192.168.5.0/24" {
+		t.Errorf("fork child ActivateRequest.InboundCIDRs = %v, want the source pool [192.168.5.0/24]", gotReq.InboundCIDRs)
 	}
 }
