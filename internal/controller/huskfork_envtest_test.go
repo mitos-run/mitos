@@ -507,13 +507,22 @@ func TestHuskForkChildPodHasFullHuskShape(t *testing.T) {
 	}
 
 	// Fork-specific bits remain: pinned to the source node, and --template-rootfs
-	// (the CoW clone source) is the SOURCE pod's live rootfs, not the template's.
+	// (the CoW clone source) is the FROZEN source rootfs the source stub captured
+	// inside the fork snapshot's paused window (SnapshotDir/rootfs.ext4 on the
+	// read-only snapshot mount), NOT the source pod's LIVE rootfs under the
+	// husk-rootfs CoW dir. Cloning from the live rootfs would let the resumed
+	// source drift the child's disk out of sync with its memory checkpoint.
 	if child.Spec.Affinity == nil || child.Spec.Affinity.NodeAffinity == nil {
 		t.Fatalf("fork child must be pinned to the source node via affinity")
 	}
 	args := strings.Join(stub.Args, " ")
-	if !strings.Contains(args, "--template-rootfs /var/lib/mitos/husk-rootfs/"+srcPod.Name+"/rootfs.ext4") {
-		t.Fatalf("fork child --template-rootfs must be the source pod rootfs; args=%v", stub.Args)
+	if !strings.Contains(args, "--template-rootfs /var/lib/mitos/snapshot/rootfs.ext4") {
+		t.Fatalf("fork child --template-rootfs must be the frozen snapshot rootfs; args=%v", stub.Args)
+	}
+	// It must NOT clone from the source's live rootfs (the resumed source keeps
+	// writing that file).
+	if strings.Contains(args, "--template-rootfs /var/lib/mitos/husk-rootfs/"+srcPod.Name+"/rootfs.ext4") {
+		t.Fatalf("fork child must not clone from the source's live rootfs; args=%v", stub.Args)
 	}
 }
 
