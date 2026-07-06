@@ -4,16 +4,19 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
 
+	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/vsock"
+	"mitos.run/mitos/internal/workspace"
 )
 
 // validVMID is the allowlist a vmID must satisfy before it is ever used to
@@ -669,4 +672,285 @@ func (s *Stub) pingInstances() error {
 		}
 	}
 	return nil
+}
+
+// resumeInstanceAfterFork resumes ONE per-VM instance's source VM after a fork
+// snapshot with the SAME bounded retry the single-VM resumeSourceAfterFork uses,
+// but scoped to inst.vm: a TRANSIENT resume error must not leave a tenant's live
+// source frozen (the v1.24.1 stuck-paused incident). It retries resumeMaxAttempts
+// times, resumeRetryBackoff apart, returns nil as soon as one resume succeeds, and
+// on total failure emits a distinct error-level log and fires the onSourceLeftPaused
+// marker so a source left paused is observable. The caller holds inst.mu.
+func (s *Stub) resumeInstanceAfterFork(id vmID, inst *vmInstance) error {
+	var err error
+	for attempt := 0; attempt < resumeMaxAttempts; attempt++ {
+		if attempt > 0 {
+			s.backoffSleep(resumeRetryBackoff)
+		}
+		if err = inst.vm.Resume(); err == nil {
+			return nil
+		}
+	}
+	fmt.Fprintf(os.Stderr, "husk: source vm %q left paused after fork snapshot: resume failed after %d attempts: %v\n", id, resumeMaxAttempts, err)
+	if s.onSourceLeftPaused != nil {
+		s.onSourceLeftPaused()
+	}
+	return err
+}
+
+// forkSnapshotInstance snapshots ONE per-VM instance's running VM, scoped to one
+// entry in the instances map. It is the per-VM analog of the single-VM
+// ForkSnapshot and mirrors it exactly (pause -> create snapshot -> freeze rootfs
+// inside the paused window -> ALWAYS resume the source), but gates on inst.state
+// and drives inst.vm.
+//
+// This is the fix for the L1.8 prod canary: under --multi-vm the CLAIM path
+// advanced the DEFAULT instance's state to Active (activateInstance), NOT the
+// single-VM s.state, which stays StateNew. The single-VM ForkSnapshot's
+// `s.state != StateActive` gate therefore saw StateNew and refused EVERY fork of a
+// multi-vm source with "fork-snapshot in state new: must be active", timing out
+// the hosted fork loop. Routing through the default instance reads the state
+// Activate set, exactly as Metering/Close/pingVMM already multiplex.
+//
+// FAIL CLOSED: it requires inst StateActive; a pause, snapshot-create, rootfs-freeze,
+// or resume failure returns OK=false plus an error, and on a snapshot or freeze
+// failure it still attempts to resume the source so a transient error never leaves a
+// live sandbox frozen. The fork id and snapshot paths carry no secrets.
+func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapshotRequest) (ForkSnapshotResult, error) {
+	if err := checkVMID(id); err != nil {
+		return ForkSnapshotResult{OK: false, Error: err.Error()}, err
+	}
+	// Fork does NOT create an instance: a missing entry reads as StateNew and is
+	// refused, mirroring activateInstance.
+	inst := s.instanceFor(id, false)
+	if inst == nil {
+		werr := fmt.Errorf("husk: fork-snapshot vm %q in state %s: must be active", id, StateNew)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+
+	if inst.state != StateActive {
+		return ForkSnapshotResult{OK: false, Error: fmt.Sprintf("fork-snapshot vm %q in state %s: must be active", id, inst.state)},
+			fmt.Errorf("husk: fork-snapshot vm %q in state %s: must be active", id, inst.state)
+	}
+	if err := ctx.Err(); err != nil {
+		return ForkSnapshotResult{OK: false, Error: err.Error()}, err
+	}
+	if req.SnapshotDir == "" {
+		return ForkSnapshotResult{OK: false, Error: "fork-snapshot: empty snapshot dir"},
+			fmt.Errorf("husk: fork-snapshot vm %q: empty snapshot dir", id)
+	}
+	if err := s.confineToForksDir(req.SnapshotDir); err != nil {
+		return ForkSnapshotResult{OK: false, Error: err.Error()}, err
+	}
+
+	memFile := filepath.Join(req.SnapshotDir, "mem")
+	vmStateFile := filepath.Join(req.SnapshotDir, "vmstate")
+	if err := os.MkdirAll(req.SnapshotDir, 0o755); err != nil {
+		werr := fmt.Errorf("husk: create fork snapshot dir %s: %w", req.SnapshotDir, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	start := time.Now()
+
+	if err := inst.vm.Pause(); err != nil {
+		werr := fmt.Errorf("husk: pause source vm %q for fork snapshot: %w", id, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	if err := inst.vm.CreateSnapshot(memFile, vmStateFile); err != nil {
+		// Best effort: resume the source so a transient snapshot error does not leave
+		// a tenant's live sandbox frozen. Here the snapshot already failed, so the
+		// resume error is not surfaced.
+		_ = inst.vm.Resume()
+		werr := fmt.Errorf("husk: create fork snapshot in %s for vm %q: %w", req.SnapshotDir, id, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	// Freeze THIS instance's source rootfs INSIDE the paused window, as a
+	// point-in-time pair with the mem+vmstate checkpoint, exactly as the single-VM
+	// ForkSnapshot does. Skipped when this instance has no per-activation clone (the
+	// mock/CI paths). On failure the source is resumed (never leave a tenant's live
+	// sandbox frozen) before failing closed. The path carries no secret.
+	if inst.rootfsClonePath != "" {
+		frozenRootfs := filepath.Join(req.SnapshotDir, "rootfs.ext4")
+		if err := s.reflink(inst.rootfsClonePath, frozenRootfs); err != nil {
+			_ = s.resumeInstanceAfterFork(id, inst)
+			werr := fmt.Errorf("husk: freeze source rootfs for fork snapshot vm %q: %w", id, err)
+			return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+		}
+	}
+
+	// ALWAYS resume the source after the checkpoint: the pause is only the brief
+	// quiescence CreateSnapshot requires, and the memory + frozen rootfs are a
+	// consistent point-in-time pair, so the source is safe to run again. Leaving it
+	// paused was the v1.24.1 production bug. The resume is retried a few times so a
+	// transient blip does not recreate that stuck-paused incident.
+	if err := s.resumeInstanceAfterFork(id, inst); err != nil {
+		werr := fmt.Errorf("husk: resume source vm %q after fork snapshot: %w", id, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	latency := time.Since(start)
+	return ForkSnapshotResult{
+		OK:          true,
+		SnapshotDir: req.SnapshotDir,
+		LatencyMs:   float64(latency.Microseconds()) / 1000.0,
+	}, nil
+}
+
+// dialWorkspaceAgentVM resolves the guest-agent bulk-tar transport for a SPECIFIC
+// per-VM handle (an instance's inst.vm under --multi-vm) and returns it plus a
+// close hook. It is the per-VM analog of the single-VM dialWorkspaceAgent, which
+// reads s.vm; under --multi-vm s.vm is nil and the VM lives on the instance, so the
+// workspace ops resolve the transport from inst.vm here instead. The caller holds
+// the instance lock.
+func (s *Stub) dialWorkspaceAgentVM(vm vmm) (workspace.VsockTransport, func(), error) {
+	vsockPath := vm.VsockHostPath(s.vsockRelPath)
+	agent, err := s.wsTransport(vsockPath)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("husk: connect guest agent for workspace transfer: %w", err)
+	}
+	closeHook := func() {}
+	if c, ok := agent.(io.Closer); ok {
+		closeHook = func() { _ = c.Close() }
+	}
+	return agent, closeHook, nil
+}
+
+// dehydrateWorkspaceInstance captures ONE per-VM instance's guest /workspace into
+// the node CAS, scoped to one entry in the instances map. It is the per-VM analog
+// of the single-VM DehydrateWorkspace and mirrors it exactly, but gates on
+// inst.state and dials inst.vm. Same L1.8 fix class as forkSnapshotInstance: the
+// single-VM DehydrateWorkspace gates on s.state (StateNew under --multi-vm) and
+// dials s.vm (nil), so on a multi-vm pod it refused with "dehydrate-workspace in
+// state new: must be active"; routing through the default instance uses the state
+// and VM Activate set.
+//
+// FAIL CLOSED: it requires inst StateActive and a configured node CAS. The manifest
+// digest is a content address, NOT a secret; workspace CONTENT bytes are never
+// logged. The instance stays StateActive throughout.
+func (s *Stub) dehydrateWorkspaceInstance(ctx context.Context, id vmID, req DehydrateWorkspaceRequest) (DehydrateWorkspaceResult, error) {
+	if err := checkVMID(id); err != nil {
+		return DehydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	inst := s.instanceFor(id, false)
+	if inst == nil {
+		werr := fmt.Errorf("husk: dehydrate-workspace vm %q in state %s: must be active", id, StateNew)
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+
+	if inst.state != StateActive {
+		werr := fmt.Errorf("husk: dehydrate-workspace vm %q in state %s: must be active", id, inst.state)
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	if err := ctx.Err(); err != nil {
+		return DehydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	if s.casStore == nil {
+		werr := fmt.Errorf("husk: dehydrate-workspace: no node CAS configured; set --cas-dir so the stub can persist a workspace revision")
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	agent, closeAgent, err := s.dialWorkspaceAgentVM(inst.vm)
+	if err != nil {
+		return DehydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	defer closeAgent()
+
+	start := time.Now()
+	digest, err := workspace.Dehydrate(ctx, agent, s.casStore, req.ExcludePaths, req.CapturePaths)
+	if err != nil {
+		werr := fmt.Errorf("husk: dehydrate workspace: %w", err)
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	if err := digest.Validate(); err != nil {
+		werr := fmt.Errorf("husk: dehydrate workspace produced an invalid content digest: %w", err)
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	// Optional content-hash diff against the parent head, computed from the two
+	// manifests in the node CAS via the SAME stub-level helper the single-VM path
+	// uses; it never materializes chunk bytes. An error names manifests/digests
+	// (content addresses), never content.
+	var diff *workspace.Diff
+	if req.ParentManifestDigest != "" {
+		parent := cas.Digest(req.ParentManifestDigest)
+		if err := parent.Validate(); err != nil {
+			werr := fmt.Errorf("husk: dehydrate workspace: invalid parent manifest digest: %w", err)
+			return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+		}
+		d, derr := s.diffManifests(parent, digest)
+		if derr != nil {
+			werr := fmt.Errorf("husk: dehydrate workspace: compute diff against parent: %w", derr)
+			return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+		}
+		diff = &d
+	}
+
+	latency := time.Since(start)
+	return DehydrateWorkspaceResult{
+		OK:             true,
+		ManifestDigest: string(digest),
+		Diff:           diff,
+		LatencyMs:      float64(latency.Microseconds()) / 1000.0,
+	}, nil
+}
+
+// hydrateWorkspaceInstance restores a node-CAS manifest into ONE per-VM instance's
+// guest /workspace, the inverse of dehydrateWorkspaceInstance and the per-VM analog
+// of the single-VM HydrateWorkspace. Same L1.8 fix class: it gates on inst.state
+// and dials inst.vm instead of s.state / s.vm.
+//
+// FAIL CLOSED: it requires inst StateActive, a configured node CAS, and a valid
+// content-address manifest digest. Workspace CONTENT bytes are never logged. The
+// instance stays StateActive throughout.
+func (s *Stub) hydrateWorkspaceInstance(ctx context.Context, id vmID, req HydrateWorkspaceRequest) (HydrateWorkspaceResult, error) {
+	if err := checkVMID(id); err != nil {
+		return HydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	inst := s.instanceFor(id, false)
+	if inst == nil {
+		werr := fmt.Errorf("husk: hydrate-workspace vm %q in state %s: must be active", id, StateNew)
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+
+	if inst.state != StateActive {
+		werr := fmt.Errorf("husk: hydrate-workspace vm %q in state %s: must be active", id, inst.state)
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	if err := ctx.Err(); err != nil {
+		return HydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	if s.casStore == nil {
+		werr := fmt.Errorf("husk: hydrate-workspace: no node CAS configured; set --cas-dir so the stub can restore a workspace revision")
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	digest := cas.Digest(req.ManifestDigest)
+	if err := digest.Validate(); err != nil {
+		werr := fmt.Errorf("husk: hydrate-workspace: %w", err)
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	agent, closeAgent, err := s.dialWorkspaceAgentVM(inst.vm)
+	if err != nil {
+		return HydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	defer closeAgent()
+
+	start := time.Now()
+	if err := workspace.Hydrate(ctx, agent, s.casStore, digest); err != nil {
+		werr := fmt.Errorf("husk: hydrate workspace: %w", err)
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	latency := time.Since(start)
+	return HydrateWorkspaceResult{
+		OK:        true,
+		LatencyMs: float64(latency.Microseconds()) / 1000.0,
+	}, nil
 }

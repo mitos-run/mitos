@@ -124,6 +124,119 @@ func TestMultiVMTwoRealFirecrackersKVM(t *testing.T) {
 	}
 }
 
+// TestMultiVMForkSnapshotDefaultVMKVM is the KVM acceptance bar for the L1.8 prod
+// canary: it FORKS a --multi-vm husk stub's DEFAULT VM end to end on a REAL
+// Firecracker (prepare -> activate -> fork-snapshot), then proves the produced
+// child snapshot is a real, restorable checkpoint by activating a SECOND --multi-vm
+// stub from it and exec-ing in the restored guest. TestMultiVMTwoRealFirecrackersKVM
+// above only proves two VMs ACTIVATE; it never forks a multi-vm stub, which is
+// exactly the coverage gap that let the bug ship.
+//
+// The bug: under --multi-vm the CLAIM path (Activate) advances the DEFAULT
+// INSTANCE's state, not the single-VM s.state, which stays StateNew. On origin/main
+// ForkSnapshot gated on s.state and so refused EVERY fork of a multi-vm source with
+// "fork-snapshot in state new: must be active", timing out the hosted fork loop.
+// After the fix ForkSnapshot routes through the default instance and succeeds here.
+//
+// It is GATED and skips cleanly unless /dev/kvm exists AND the SAME asset env vars
+// TestMultiVMTwoRealFirecrackersKVM uses are set (MITOS_KVM_HUSK_SNAPSHOT_DIR, plus
+// MITOS_KVM_FIRECRACKER), so on a darwin dev box or any non-KVM runner it never
+// asserts and is never a fake pass.
+func TestMultiVMForkSnapshotDefaultVMKVM(t *testing.T) {
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("skipping multi-vm fork-snapshot e2e: /dev/kvm not available (needs a KVM runner)")
+	}
+	snapDir := os.Getenv("MITOS_KVM_HUSK_SNAPSHOT_DIR")
+	if snapDir == "" {
+		t.Skip("skipping multi-vm fork-snapshot e2e: set MITOS_KVM_HUSK_SNAPSHOT_DIR (the KVM CI sets it)")
+	}
+	for _, name := range []string{"mem", "vmstate"} {
+		if _, err := os.Stat(filepath.Join(snapDir, name)); err != nil {
+			t.Skipf("skipping multi-vm fork-snapshot e2e: snapshot file %s not present: %v", name, err)
+		}
+	}
+	fcBin := os.Getenv("MITOS_KVM_FIRECRACKER")
+	if fcBin == "" {
+		fcBin = "/usr/local/bin/firecracker"
+	}
+
+	// newStub builds a real --multi-vm husk stub, each with its OWN base workdir so
+	// the source and the child never collide on a Firecracker API socket or vsock
+	// UDS. Same machine sizing and AllowUnverified as TestMultiVMTwoRealFirecrackersKVM.
+	newStub := func(id string) *Stub {
+		workdir := filepath.Join(t.TempDir(), id)
+		if err := os.MkdirAll(workdir, 0o755); err != nil {
+			t.Fatalf("mkdir workdir for %s: %v", id, err)
+		}
+		return New(firecracker.VMConfig{
+			ID:             id,
+			FirecrackerBin: fcBin,
+			WorkDir:        workdir,
+			VcpuCount:      1,
+			MemSizeMib:     256,
+		}, Options{
+			AllowUnverified: true,
+			ReadyTimeout:    30 * time.Second,
+			MultiVM:         true,
+		})
+	}
+
+	ctx := context.Background()
+
+	// Source: a --multi-vm stub whose DEFAULT VM is activated from the template
+	// snapshot. Under --multi-vm the single-VM s.state stays StateNew (activateInstance
+	// advanced the DEFAULT INSTANCE), which is the state ForkSnapshot must NOT read.
+	src := newStub("husk-fork-src")
+	defer func() { _ = src.Close() }()
+	if err := src.Prepare(ctx); err != nil {
+		t.Fatalf("source Prepare (multi-vm default): %v", err)
+	}
+	if res, err := src.Activate(ctx, ActivateRequest{SnapshotDir: snapDir}); err != nil || !res.OK {
+		t.Fatalf("source Activate (multi-vm default): err=%v res=%+v", err, res)
+	}
+	if src.state != StateNew {
+		t.Fatalf("precondition: single-VM s.state must stay StateNew under multi-vm, got %s", src.state)
+	}
+
+	// Fork the source's default VM. On origin/main this returned OK=false with
+	// "fork-snapshot in state new: must be active"; after the fix it routes through
+	// the default instance and writes a restorable child checkpoint.
+	childDir := filepath.Join(t.TempDir(), "child-snapshot")
+	fres, err := src.ForkSnapshot(ctx, ForkSnapshotRequest{ForkID: "child-1", SnapshotDir: childDir})
+	if err != nil || !fres.OK {
+		t.Fatalf("ForkSnapshot of a multi-vm stub's default VM must succeed on KVM: err=%v res=%+v", err, fres)
+	}
+	for _, name := range []string{"mem", "vmstate"} {
+		if _, err := os.Stat(filepath.Join(childDir, name)); err != nil {
+			t.Fatalf("fork snapshot did not write %s: %v", name, err)
+		}
+	}
+
+	// Child: a fresh --multi-vm stub activates its DEFAULT VM from the fork snapshot
+	// and its guest answers, proving the fork of a multi-vm stub actually restores.
+	child := newStub("husk-fork-child")
+	defer func() { _ = child.Close() }()
+	if err := child.Prepare(ctx); err != nil {
+		t.Fatalf("child Prepare (from fork snapshot): %v", err)
+	}
+	cres, err := child.Activate(ctx, ActivateRequest{SnapshotDir: childDir})
+	if err != nil || !cres.OK {
+		t.Fatalf("child Activate from the fork snapshot must succeed: err=%v res=%+v", err, cres)
+	}
+	client, err := kvmConnectAgent(cres.VsockPath)
+	if err != nil {
+		t.Fatalf("connect agent in the forked child: %v", err)
+	}
+	defer client.Close() //nolint:errcheck // best-effort teardown
+	got, err := kvmExecOK(client, "printf forked-child-alive")
+	if err != nil {
+		t.Fatalf("exec in the forked child guest: %v", err)
+	}
+	if strings.TrimSpace(got) != "forked-child-alive" {
+		t.Fatalf("forked child guest exec = %q, want %q (the restored fork must run)", strings.TrimSpace(got), "forked-child-alive")
+	}
+}
+
 // kvmConnectAgent dials the guest agent's gRPC service on the vsock UDS with a
 // bounded retry.
 func kvmConnectAgent(udsPath string) (*guestgrpc.Client, error) {
