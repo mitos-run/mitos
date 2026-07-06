@@ -160,6 +160,10 @@
           "description": "Render --enable-husk-pods so each SandboxPool maintains a warm pool of pre-scheduled husk pods.",
           "type": "boolean"
         },
+        "multiVMFork": {
+          "description": "EXPERIMENTAL, default off. Render --multi-vm-fork so a fork child co-locates as an additional VM inside a multi-VM-capable source husk pod instead of a new pod, and warm husk pods start with --multi-vm. Only meaningful with enableHuskPods.",
+          "type": "boolean"
+        },
         "huskDataDir": {
           "description": "Value for --husk-data-dir, the node template snapshot root the husk pods mount; must match forkd's --data-dir.",
           "type": "string"
