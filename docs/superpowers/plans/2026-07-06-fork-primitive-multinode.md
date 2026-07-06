@@ -179,6 +179,60 @@ Non-goal: cross-TENANT VMs in one pod. A session pod is one org/one fork-tree. T
 moment two tenants would share a pod, all of the above stops being acceptable, so
 the pod-per-session boundary is a hard invariant, enforced at claim time.
 
+## Two hard guarantees the multi-VM model must keep (resource accounting + resilience)
+
+These are not optional. The one-pod-per-VM model gets them for free; the multi-VM
+model must engineer them explicitly, and no milestone ships without them.
+
+### Guarantee A: a fork never overcommits a node's memory
+
+Today each husk pod requests its guest memory HONESTLY (huskpod.go: Requests[memory]
+= configured, no overcommit, because Firecracker holds guest RAM resident), the
+scheduler packs by sum-of-requests, and a capacity-admission gate pends a claim
+with a NoCapacity condition when the node budget is full (capacity_admission
+envtest). So a fork that does not fit PENDS, it never crushes the node. CPU is the
+only deliberate overcommit lever (50m request floor, burst to the cap).
+
+Multi-VM breaks the automatic version of this: N VMs share ONE pod whose k8s
+memory request is fixed at creation, so adding a VM to a pod could overcommit
+WITHIN the pod (a sibling OOMs its siblings). CoW makes the TYPICAL footprint tiny
+(shared parent once + each child's dirty set; measured per-child CoW-read floor
+0.0039 MiB), but the WORST case (every child dirties its whole guest) is N x the
+guest size. The design must therefore, before admitting a fork into a pod:
+
+- account for the added VM against a per-pod memory budget AND the node budget, and
+- keep the node honest at worst case, via one of: reserve the pod at a bounded max
+  VM count up front; grow the pod request with k8s in-place pod resize as VMs join;
+  or admit-and-spill, placing the fork in a NEW session pod (possibly on another
+  node, accepting it is then a template re-fork not a live fork) when the current
+  pod's budget is exhausted.
+
+The capacity-admission gate must extend to the per-pod dimension: a fork that would
+push a pod (or node) past its memory budget PENDS or spills, never overcommits.
+Metering already reports CoW-aware MemoryUnique/MemoryShared, which feeds the
+sizing; the reservation must still be safe at worst case, not the CoW-typical case.
+
+### Guarantee B: a swarm always survives node loss by reconstructing from durable state
+
+Today Mitos has real multi-node resilience for independent sandboxes: node registry
++ capacity heartbeats, fast node-loss eviction tolerations (shorter than k8s's 300s
+default), re-pend and re-create on a surviving node from a per-node snapshot digest
+(husk_pernode_digest), GC that only sweeps healthy nodes. That is k8s-grade
+failover and the multi-VM model must not regress it.
+
+The honest physics: node-loss recovery is a COLD restore from a durable snapshot,
+not live-memory preservation. Resident guest RAM cannot survive a node crash (same
+as any VM or any k8s pod losing process memory). A live-fork swarm is node-local
+(checkpoint + resident memory on one node) and the multi-VM model CONCENTRATES the
+blast radius (a pod or node loss drops that whole session's swarm at once). So the
+resilience contract is: the session's DURABLE state (its snapshots and disk) always
+survives node loss and the swarm is reconstructable by re-forking from a snapshot on
+a surviving node; the in-memory LIVE state of a swarm is not preserved across a
+crash until cross-node post-copy (Layer 3) exists. The milestone must ensure a
+session is always reconstructable from a durable snapshot, degrade a pod/node loss
+to a re-fork (not lost user work), and surface the node-outage status the single-VM
+path already does.
+
 ## Milestones (each its own PR/issue; correctness first, then density, then reach)
 
 1. [#759] Parent-resume. Correctness; in flight (PR #763).
