@@ -118,9 +118,11 @@ func updateSandboxStatusWithRetry(t *testing.T, name, namespace string, mutate f
 	t.Helper()
 	// retry.DefaultRetry is only ~5 short steps; a source claim whose reconciler
 	// churns the object continuously (it re-reconciles while pending) can conflict
-	// on every one of them, flaking the status write. Retry longer (about 4s
-	// total) so a sustained reconcile loop cannot exhaust the budget.
-	backoff := wait.Backoff{Steps: 30, Duration: 20 * time.Millisecond, Factor: 1.3, Cap: 500 * time.Millisecond}
+	// on every one of them, flaking the status write. Retry longer (about 3.4s
+	// worst case: 12 steps, 40ms base, 1.4x, capped at 500ms) so a sustained
+	// reconcile loop cannot exhaust the budget, while still failing fast enough to
+	// surface a genuinely wedged write.
+	backoff := wait.Backoff{Steps: 12, Duration: 40 * time.Millisecond, Factor: 1.4, Cap: 500 * time.Millisecond}
 	if err := retry.RetryOnConflict(backoff, func() error {
 		var sb v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sb); err != nil {
