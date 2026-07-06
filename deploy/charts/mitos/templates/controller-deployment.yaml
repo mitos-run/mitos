@@ -1,3 +1,6 @@
+{{- if and .Values.controller.multiVMFork (not .Values.controller.enableHuskPods) }}
+{{- fail "controller.multiVMFork requires controller.enableHuskPods: the multi-vm fork routing co-locates a fork child in a warm husk pod, which only exists on the husk-pods path. Set enableHuskPods: true or multiVMFork: false." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
