@@ -57,6 +57,18 @@ type fakeVMM struct {
 	// error = a dead/defunct Firecracker). Nil keeps the VMM alive, so existing
 	// tests need not care about liveness. It is called under f.mu.
 	ping func() error
+
+	// pid, when set, is what PID returns (the fake firecracker process id the
+	// metering tests key their MemStat fake on). Zero (the default) reads as no
+	// process, which the memory reader meters as (0, 0).
+	pid int
+}
+
+// PID returns the fake firecracker process id (0 = no process).
+func (f *fakeVMM) PID() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pid
 }
 
 // errSnap is a scripted CreateSnapshot failure used by the fork-snapshot
