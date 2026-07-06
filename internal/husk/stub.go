@@ -95,6 +95,10 @@ type vmm interface {
 	// error once the Firecracker process is gone or defunct, which the husk
 	// liveness monitor uses to detect a dead warm slot (issue #527).
 	Ping() error
+	// PID returns the Firecracker process id, or 0 when no process is running.
+	// Metering reads /proc/<pid>/smaps_rollup through it so the husk pod's
+	// single-VM report carries the real CoW-aware memory split (issue #613).
+	PID() int
 	// Close tears the VMM down.
 	Close() error
 }
@@ -427,6 +431,16 @@ type Options struct {
 	// workspace ops. Nil uses the production seam (gRPC Archive/Upload on
 	// AgentGRPCPort 53). Tests inject a fake in-memory transport.
 	WorkspaceTransport wsTransporter
+	// MemStat reads the (unique, shared) CoW-aware memory split of a pid for
+	// Metering. Nil uses the production reader (metering.ReadProcessMemory,
+	// /proc/<pid>/smaps_rollup). Tests inject a fake so the metering report is
+	// assertable without a real Firecracker process.
+	MemStat func(pid int) (unique, shared int64)
+	// EgressBytes reads the cumulative egress byte total of this VM's per-tap
+	// nftables counter (the #211 metering seam applyEgressFilter always
+	// installs). Nil uses the production reader (nft -j list counter). Tests
+	// inject a fake; a deployment without networking never calls it (no tap).
+	EgressBytes func(tap string) int64
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -495,6 +509,12 @@ type Stub struct {
 	// activeTap records the active VM's tap so Close can tear the filter down.
 	activeTap string
 
+	// memStat and egressBytes are the Metering seams (Options.MemStat and
+	// Options.EgressBytes): the smaps_rollup CoW memory split of the firecracker
+	// pid and the per-tap cumulative egress counter.
+	memStat     func(pid int) (unique, shared int64)
+	egressBytes func(tap string) int64
+
 	mu              sync.Mutex
 	state           State
 	vm              vmm
@@ -543,6 +563,8 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		forksDir:           opts.ForksDir,
 		wsTransport:        opts.WorkspaceTransport,
 		vsockRelPath:       firecracker.VsockRelPath,
+		memStat:            opts.MemStat,
+		egressBytes:        opts.EgressBytes,
 	}
 	if s.start == nil {
 		s.start = productionStarter
@@ -565,6 +587,12 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 	}
 	if s.reflink == nil {
 		s.reflink = volume.New("").ReflinkCopy
+	}
+	if s.memStat == nil {
+		s.memStat = metering.ReadProcessMemory
+	}
+	if s.egressBytes == nil {
+		s.egressBytes = readEgressCounterBytes
 	}
 	if s.wsTransport == nil {
 		s.wsTransport = productionWorkspaceTransport
@@ -1240,23 +1268,91 @@ func (s *Stub) State() State {
 // label, so the collector can attribute the usage. Template is empty: a husk pod
 // holds exactly one VM, so there is no intra-report CoW group to amortize.
 //
+// MEMORY (CoW-aware): the sample's MemoryUnique/MemoryShared are the live
+// smaps_rollup split of the pod's own Firecracker process (Private_* vs
+// Shared_*), the same split the fork engine reports (docs/metering.md), so the
+// shared template snapshot pages stay distinguishable from the pages this VM
+// alone dirtied. A dead or recycled pid reads back (0, 0), which is correct for
+// a VM going away.
+//
+// DISK (honest v1, apparent sizes): the rootfs template seed counts as
+// DiskShared (it is the reflink source shared with the template's other husk
+// pods on the node) and the per-activation clone's divergence is approximated
+// as max(0, cloneApparentSize - seedApparentSize) DiskUnique, mirroring the
+// fork engine's Snapshot-volume rule. Without a per-activation clone (the
+// legacy shared-rootfs mode) only the seed is counted.
+//
+// EGRESS: the cumulative per-tap nftables egress counter applyEgressFilter
+// installs (#211/#219); zero when networking is disabled (no tap).
+//
+// The IO (proc read, file stat, nft exec) runs OUTSIDE the stub lock, like the
+// fork engine's Metering, so a slow stat can never block Activate/Close.
+//
 // SECRET-FREE: the report carries ONLY the vm-id and numeric byte/second counts,
 // never argv, env, file bytes, or the per-sandbox bearer token.
 func (s *Stub) Metering() metering.Report {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.state != StateActive {
 		// A dormant/warm pod meters nothing yet: the empty report keeps a scrape a
 		// clean empty body rather than an error.
+		s.mu.Unlock()
 		return metering.Report{}
 	}
-	// TODO(#613): memory sampling. The firecracker child PID is reachable (the
-	// production vmm promotes firecracker.Client.PID, so a type assertion could
-	// read it) and internal/fork.readMemoryStats reads /proc/<pid>/smaps_rollup,
-	// but reusing that reader would mean exporting it from the security-sensitive
-	// internal/fork package. vCPU-seconds (billed from the Sample's presence over
-	// time) is the priority; memory bytes are a fast-follow, reported as 0 for now.
-	return metering.Aggregate([]metering.Sample{{ID: s.cfg.ID}})
+	id := s.cfg.ID
+	var pid int
+	if s.vm != nil {
+		pid = s.vm.PID()
+	}
+	tap := s.activeTap
+	seedPath := s.rootfsTemplatePath
+	clonePath := s.rootfsClonePath
+	s.mu.Unlock()
+
+	memUnique, memShared := s.memStat(pid)
+
+	var diskUnique, diskShared int64
+	if seedPath != "" {
+		seedSize := apparentSize(seedPath)
+		diskShared = seedSize
+		if clonePath != "" {
+			if div := apparentSize(clonePath) - seedSize; div > 0 {
+				diskUnique = div
+			}
+		}
+	} else if clonePath != "" {
+		// No known seed to share against: the whole clone is this VM's own.
+		diskUnique = apparentSize(clonePath)
+	}
+
+	var egress int64
+	if tap != "" && s.egressBytes != nil {
+		egress = s.egressBytes(tap)
+	}
+
+	// Template stays empty: a husk pod holds exactly ONE VM, so within this
+	// report the sample is its own group and Aggregate counts its shared set
+	// once. Cross-pod amortization of the same template's shared pages is an
+	// open item (docs/metering.md).
+	return metering.Aggregate([]metering.Sample{{
+		ID:           id,
+		MemoryUnique: memUnique,
+		MemoryShared: memShared,
+		DiskUnique:   diskUnique,
+		DiskShared:   diskShared,
+		EgressBytes:  egress,
+	}})
+}
+
+// apparentSize returns the apparent (logical) size of path, or 0 when it does
+// not exist or cannot be statted. Apparent size matches the fork engine's disk
+// metering rule; precise reflink block accounting is an open item
+// (docs/metering.md).
+func apparentSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 // ErrVMMDead is returned by MonitorVMM when the Firecracker VMM has been
