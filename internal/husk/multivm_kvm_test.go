@@ -92,26 +92,34 @@ func TestMultiVMTwoRealFirecrackersKVM(t *testing.T) {
 		t.Fatalf("the two VMs must own distinct vsock paths, both = %q", vsockByID[ids[0]])
 	}
 
-	// Each VM execs INDEPENDENTLY over its OWN vsock: write a per-VM marker in one
-	// and read it back only from that same VM, proving the two guests are isolated
-	// live processes and the exec traffic does not cross.
+	// Each VM execs INDEPENDENTLY over its OWN vsock. Write a distinct marker to
+	// the SAME path in EVERY VM FIRST, then read them all back, so a regression
+	// where two VMs shared a rootfs backing (one clobbering the other's file) is
+	// caught: each VM must still read its OWN marker. Reading back in the same VM
+	// immediately after writing would not detect crossing, since the last write
+	// would win the shared file; writing all then reading all does.
+	clients := map[vmID]*guestgrpc.Client{}
 	for _, id := range ids {
 		client, err := kvmConnectAgent(vsockByID[id])
 		if err != nil {
 			t.Fatalf("connect agent for %s: %v", id, err)
 		}
 		defer client.Close() //nolint:errcheck // best-effort teardown
+		clients[id] = client
 
 		marker := fmt.Sprintf("marker-%s", id)
 		if _, err := kvmExecOK(client, fmt.Sprintf("printf %s > /vm-marker.txt", marker)); err != nil {
 			t.Fatalf("write marker in %s: %v", id, err)
 		}
-		got, err := kvmExecOK(client, "cat /vm-marker.txt")
+	}
+	for _, id := range ids {
+		marker := fmt.Sprintf("marker-%s", id)
+		got, err := kvmExecOK(clients[id], "cat /vm-marker.txt")
 		if err != nil {
 			t.Fatalf("read marker in %s: %v", id, err)
 		}
 		if strings.TrimSpace(got) != marker {
-			t.Fatalf("%s read back %q, want %q (exec crossed between VMs?)", id, strings.TrimSpace(got), marker)
+			t.Fatalf("%s read back %q, want %q (VMs shared a backing or exec crossed?)", id, strings.TrimSpace(got), marker)
 		}
 	}
 }
