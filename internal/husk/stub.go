@@ -62,7 +62,7 @@ func (s State) String() string {
 // there is exactly one implicit instance, so this type is not exercised at
 // runtime; the multi-VM-per-pod work (#764) keys the instances map by it once a
 // later increment migrates the single-VM state onto that map.
-type vmID = string
+type vmID string
 
 // defaultVMID is the key of the single implicit instance a stub manages. It
 // gives the scaffold instances map a stable key for the one VM a husk pod holds

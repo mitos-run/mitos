@@ -69,9 +69,10 @@ func TestMultiVMFlagIsRecognized(t *testing.T) {
 		t.Fatalf("build husk-stub: %v\n%s", err, out)
 	}
 
+	dir := t.TempDir()
 	out, _ := exec.Command(bin,
-		"--workdir", "/run/husk/vm",
-		"--control-socket", "/run/husk/control.sock",
+		"--workdir", filepath.Join(dir, "vm"),
+		"--control-socket", filepath.Join(dir, "control.sock"),
 		"--multi-vm=false",
 	).CombinedOutput()
 	if strings.Contains(string(out), "flag provided but not defined") {
