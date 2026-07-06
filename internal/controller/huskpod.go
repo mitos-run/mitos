@@ -224,6 +224,14 @@ type HuskPodOptions struct {
 	// source changes. Empty (a warm pod, not a fork child) clones from the template
 	// rootfs.
 	ForkSourceRootfsPath string
+	// Template, when set on a FORK CHILD, is the resolved SOURCE pool template.
+	// buildForkChildPod threads it into buildHuskPod so the child pod carries the
+	// SAME per-sandbox resources (cpu burst cap, memory) a warm-claimed sandbox of
+	// the source pool gets, instead of the default caps an empty template yields
+	// (issue #760). Nil (or a warm pod, which passes its template to buildHuskPod
+	// directly) leaves the child on the documented default resources.
+	Template *v1.PoolTemplateSpec
+
 	// SnapshotNodes is the set of node hostnames the pool has materialized the
 	// template snapshot on (the registry's NodesWithTemplate). When non-empty the
 	// husk pod carries a nodeAffinity pinning it to exactly these nodes, so its
@@ -1026,7 +1034,15 @@ func buildForkChildPod(fork *v1.Sandbox, srcPod *corev1.Pod, childName string, o
 	// below.
 	r := &SandboxPoolReconciler{}
 	carrier := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: fork.Name, Namespace: fork.Namespace}}
-	pod := r.buildHuskPod(carrier, &v1.PoolTemplateSpec{}, opts)
+	// Build from the resolved SOURCE pool template so the fork child inherits the
+	// SAME cpu burst cap + memory a warm-claimed sandbox of the pool gets, not the
+	// default caps an empty template yields (issue #760). Nil falls back to the
+	// empty template (default caps), which is the pre-fix behavior and safe.
+	template := opts.Template
+	if template == nil {
+		template = &v1.PoolTemplateSpec{}
+	}
+	pod := r.buildHuskPod(carrier, template, opts)
 
 	// Rewrite identity: owned by the SandboxFork (GC with it), labeled as a fork
 	// child (never a warm-pool slot), deterministic name so re-reconcile is
