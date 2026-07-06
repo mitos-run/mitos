@@ -549,7 +549,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		childName := fmt.Sprintf("%s-fork-%d", fork.Name, i)
 
 		// Get-or-create the child pod for this slot (idempotent by the stable name).
-		child, err := r.ensureForkChildPod(ctx, fork, childName, opts)
+		child, err := r.ensureForkChildPod(ctx, fork, srcPod, childName, opts)
 		if err != nil {
 			logger.Error(err, "create fork child pod failed", "child", childName)
 			continue
@@ -656,8 +656,9 @@ func (r *SandboxReconciler) findHuskPod(ctx context.Context, ns, name string) (*
 
 // ensureForkChildPod creates the fork child pod if it does not exist and returns
 // the current pod object. Idempotent across requeues (a child already created is
-// fetched and returned).
-func (r *SandboxReconciler) ensureForkChildPod(ctx context.Context, fork *v1.Sandbox, name string, opts HuskPodOptions) (*corev1.Pod, error) {
+// fetched and returned). srcPod is the SOURCE husk pod whose scheduling
+// constraints the child inherits (buildForkChildPod).
+func (r *SandboxReconciler) ensureForkChildPod(ctx context.Context, fork *v1.Sandbox, srcPod *corev1.Pod, name string, opts HuskPodOptions) (*corev1.Pod, error) {
 	var existing corev1.Pod
 	err := r.Get(ctx, client.ObjectKey{Namespace: fork.Namespace, Name: name}, &existing)
 	if err == nil {
@@ -666,7 +667,7 @@ func (r *SandboxReconciler) ensureForkChildPod(ctx context.Context, fork *v1.San
 	if !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("get fork child pod %s: %w", name, err)
 	}
-	pod := buildForkChildPod(fork, name, opts, r.Scheme)
+	pod := buildForkChildPod(fork, srcPod, name, opts, r.Scheme)
 	if err := r.Create(ctx, pod); err != nil && !apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("create fork child pod %s: %w", name, err)
 	}

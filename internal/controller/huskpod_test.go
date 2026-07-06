@@ -1045,7 +1045,8 @@ func TestBuildHuskPodForkChildClonesFromSourceRootfs(t *testing.T) {
 
 func TestBuildForkChildPodOwnedByFork(t *testing.T) {
 	fork := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "f1", Namespace: "default", UID: "uid-f1"}}
-	pod := controller.BuildForkChildPodForTest(fork, "child-0", controller.HuskPodOptions{
+	srcPod := &corev1.Pod{Spec: corev1.PodSpec{NodeName: "kvm-node-1"}}
+	pod := controller.BuildForkChildPodForTest(fork, srcPod, "child-0", controller.HuskPodOptions{
 		StubImage:      "img",
 		SnapshotID:     "tmpl-a",
 		DataDir:        "/data",
@@ -1090,7 +1091,8 @@ func TestBuildHuskPodDisablesSATokenAutomount(t *testing.T) {
 
 	// Fork-child pods share buildHuskPod, so they must inherit the opt-out too.
 	fork := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sa-fork", Namespace: "default", UID: "uid-sa-fork"}}
-	child := controller.BuildForkChildPodForTest(fork, "sa-child-0", controller.HuskPodOptions{
+	srcPod := &corev1.Pod{Spec: corev1.PodSpec{NodeName: "kvm-node-1"}}
+	child := controller.BuildForkChildPodForTest(fork, srcPod, "sa-child-0", controller.HuskPodOptions{
 		StubImage:      "img",
 		SnapshotID:     "tmpl-a",
 		DataDir:        "/data",
@@ -1221,4 +1223,75 @@ func TestBuildHuskPodStampsOrgFromNamespace(t *testing.T) {
 			t.Errorf("org label = %q, want acme (client-set %q must be ignored)", got, "evil")
 		}
 	})
+}
+
+// TestBuildForkChildPodInheritsSourcePodScheduling is the builder-level
+// regression for the production fork 504 (FailedScheduling: "1 node(s) had
+// untolerated taint {mitos.run/dedicated}"). buildForkChildPod pins the child
+// to the source node via nodeAffinity, but affinity does not clear taints: the
+// child must also inherit the SOURCE pod's tolerations and nodeSelector (the
+// pod spec is the authoritative record of what it took to schedule onto that
+// node; the pool's spec.placement may have changed since). The fast node-loss
+// pair huskTolerations adds to every husk pod must not be duplicated by the
+// inheritance. Only a real-cluster e2e proves scheduling against actual taints
+// (kind/envtest nodes are untainted); this pins the emitted spec.
+func TestBuildForkChildPodInheritsSourcePodScheduling(t *testing.T) {
+	fork := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "f-sched", Namespace: "default", UID: "uid-f-sched"}}
+	notReadySecs := int64(60)
+	srcPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a-husk-abcde", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			NodeName: "kvm-node-1",
+			NodeSelector: map[string]string{
+				"mitos.run/kvm":    "true",
+				"mitos.run/tenant": "acme",
+			},
+			Tolerations: []corev1.Toleration{
+				{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &notReadySecs},
+				{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &notReadySecs},
+				{Key: "mitos.run/dedicated", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+			},
+		},
+	}
+
+	child := controller.BuildForkChildPodForTest(fork, srcPod, "f-sched-fork-0", controller.HuskPodOptions{
+		StubImage:      "img",
+		SnapshotID:     "tmpl-a",
+		DataDir:        "/data",
+		ForkSnapshotID: "f-sched",
+		ForkSourceNode: srcPod.Spec.NodeName,
+	}, scheme)
+
+	tolCount := map[string]int{}
+	for _, tol := range child.Spec.Tolerations {
+		tolCount[tol.Key]++
+	}
+	if tolCount["mitos.run/dedicated"] != 1 {
+		t.Errorf("fork child must inherit the source pod's mitos.run/dedicated toleration exactly once, got %d; tolerations=%v", tolCount["mitos.run/dedicated"], child.Spec.Tolerations)
+	}
+	for _, key := range []string{"node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable"} {
+		if tolCount[key] != 1 {
+			t.Errorf("fork child toleration %s count = %d, want exactly 1 (huskTolerations adds it; inheritance must not duplicate it)", key, tolCount[key])
+		}
+	}
+	if child.Spec.NodeSelector["mitos.run/tenant"] != "acme" || child.Spec.NodeSelector["mitos.run/kvm"] != "true" {
+		t.Errorf("fork child nodeSelector = %v, want the source pod's kvm=true + tenant=acme merged in", child.Spec.NodeSelector)
+	}
+	// The exact-node affinity pin must survive the inheritance: the fork
+	// snapshot and source rootfs are node-local hostPaths on kvm-node-1.
+	aff := child.Spec.Affinity
+	if aff == nil || aff.NodeAffinity == nil || aff.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		t.Fatalf("fork child must keep the required nodeAffinity source-node pin; affinity=%v", aff)
+	}
+	pinned := false
+	for _, term := range aff.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms {
+		for _, expr := range term.MatchExpressions {
+			if expr.Key == "kubernetes.io/hostname" && len(expr.Values) == 1 && expr.Values[0] == "kvm-node-1" {
+				pinned = true
+			}
+		}
+	}
+	if !pinned {
+		t.Errorf("fork child nodeAffinity must pin to the source node kvm-node-1; affinity=%v", aff.NodeAffinity)
+	}
 }
