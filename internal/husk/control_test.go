@@ -133,3 +133,76 @@ func TestForkSnapshotResultRoundTrip(t *testing.T) {
 		t.Fatalf("round trip mismatch: got %+v want %+v", got, want)
 	}
 }
+
+func TestSpawnVMRequestRoundTrip(t *testing.T) {
+	want := SpawnVMRequest{
+		VMID: "fork-7",
+		Activate: ActivateRequest{
+			SnapshotDir:    "/var/lib/mitos/forks/fork-7",
+			ExpectedDigest: "sha256:abc",
+			Egress:         "deny",
+			Allow:          []string{"api.example.com:443"},
+			Env:            map[string]string{"LANG": "C"},
+			Secrets:        map[string]string{"API_KEY": "s3cr3t-value"},
+			Token:          "bearer-token",
+			Network: &vsock.NotifyForkedNetwork{
+				GuestIP:   "10.0.0.2",
+				GatewayIP: "10.0.0.1",
+				PrefixLen: 30,
+			},
+			NetworkOverrides: []firecracker.NetworkOverride{
+				{IfaceID: "eth0", HostDevName: "tap-fork-7"},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := WriteSpawnVMRequest(&buf, want); err != nil {
+		t.Fatalf("WriteSpawnVMRequest: %v", err)
+	}
+	if !bytes.HasSuffix(buf.Bytes(), []byte("\n")) {
+		t.Fatalf("WriteSpawnVMRequest did not newline-terminate: %q", buf.String())
+	}
+	got, err := ReadSpawnVMRequest(&buf)
+	if err != nil {
+		t.Fatalf("ReadSpawnVMRequest: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("round trip mismatch:\n got %+v\nwant %+v", got, want)
+	}
+}
+
+func TestSpawnVMResultRoundTrip(t *testing.T) {
+	want := SpawnVMResult{
+		OK:        true,
+		VMID:      "fork-7",
+		VsockPath: "/run/husk/fork-7/vsock.sock",
+		LatencyMs: 6.25,
+	}
+	var buf bytes.Buffer
+	if err := WriteSpawnVMResult(&buf, want); err != nil {
+		t.Fatalf("WriteSpawnVMResult: %v", err)
+	}
+	got, err := ReadSpawnVMResult(&buf)
+	if err != nil {
+		t.Fatalf("ReadSpawnVMResult: %v", err)
+	}
+	if got != want {
+		t.Fatalf("round trip mismatch: got %+v want %+v", got, want)
+	}
+}
+
+func TestSpawnVMResultErrorRoundTrip(t *testing.T) {
+	want := SpawnVMResult{OK: false, VMID: "fork-7", Error: "spawn-vm prepare vm \"fork-7\": boom"}
+	var buf bytes.Buffer
+	if err := WriteSpawnVMResult(&buf, want); err != nil {
+		t.Fatalf("WriteSpawnVMResult: %v", err)
+	}
+	got, err := ReadSpawnVMResult(&buf)
+	if err != nil {
+		t.Fatalf("ReadSpawnVMResult: %v", err)
+	}
+	if got.OK || got.Error != want.Error {
+		t.Fatalf("error result mismatch: got %+v want %+v", got, want)
+	}
+}
