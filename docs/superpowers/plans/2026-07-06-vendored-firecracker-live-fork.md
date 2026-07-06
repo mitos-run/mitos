@@ -33,6 +33,23 @@ and resume the parent's vCPUs immediately after the vmstate dump. The vmstate
 (vCPU plus device state) is captured WITHOUT rewriting the whole guest RAM to a
 mem file, because the memfd already IS the shared memory image the children map.
 
+**Correctness invariant: `MAP_PRIVATE` alone is NOT sufficient once the parent
+resumes.** `MAP_PRIVATE` gives child-to-parent write isolation (a child write
+copies the page for that child only), but it does NOT freeze the parent's pages.
+If the parent resumes and writes a shared page a child has not yet faulted, the
+child's later read of that page sees the parent's NEW value, not the value at
+fork time; the child is then not a point-in-time snapshot and parent state leaks
+FORWARD into the child. Point-in-time consistency for a resumed parent therefore
+requires the write-protect: a parent write to any still-shared (unfaulted) page
+must trigger a WP fault that preserves the pre-fork page for the children BEFORE
+the parent's write lands. This makes `UFFD_FEATURE_PAGEFAULT_FLAG_WP` a
+CORRECTNESS mechanism, not merely an async-resume performance optimization, and
+it is why m2 (not m1) is the milestone that makes a resumed-parent live fork
+sound. Until m2 lands, the ONLY safe configuration is to keep the parent PAUSED
+until every child has fully faulted its working set (the interim behavior m1 must
+use, and the reason m1's proof pauses the parent). A resumed parent under the
+`MAP_PRIVATE`-only model is incorrect and must never ship.
+
 **Constraints from CLAUDE.md:** no em or en dashes anywhere; security findings
 block features and the threat model moves in the same PR as the surface; no
 unverified numbers (every MiB and every millisecond must come from `bench/`);
@@ -260,10 +277,18 @@ the m4 PR (docs/threat-model.md):
   snapshot mem/vmstate as a shared READ-ONLY object; the live memfd is a new
   shared object whose isolation rests on `MAP_PRIVATE` CoW plus the WP freeze
   being consistent, and that has to be stated and tested, not assumed.
-- **No stale-page leak.** The WP-frozen page image handed to a child must be a
-  consistent point-in-time image; a torn read (parent dirtied a page mid-copy)
-  would leak parent state forward. m2 must prove the freeze-copy-unprotect
-  sequence is atomic with respect to guest writes.
+- **No parent-to-child leak (both a resumed-parent hazard AND a torn-read
+  hazard).** Two distinct failures leak parent state forward into a child:
+  (1) WITHOUT the write-protect, a resumed parent writing a page the child has
+  not yet faulted makes that new value visible to the child (see the correctness
+  invariant in the Architecture section); MAP_PRIVATE does not prevent this. m1
+  MUST therefore keep the parent paused until children drain, and must NOT claim
+  a resumed-parent fork is safe. (2) WITH the write-protect, a torn read (parent
+  dirtied a page mid-copy) would still leak; m2 must prove the
+  freeze-copy-unprotect sequence is atomic with respect to guest writes. Closing
+  BOTH directions is the m2 gate; the threat-model delta must state the
+  resumed-parent invariant explicitly, not only the child-to-parent write
+  isolation.
 - **Fork-correctness invariants still hold (docs/fork-correctness.md).** The RNG
   reseed, clock step, and secret-inheritance gates are NotifyForked-driven and
   run AFTER restore, so they are orthogonal to how memory is backed; but a live
@@ -285,9 +310,11 @@ the m4 PR (docs/threat-model.md):
   ONLY patch (a) (widen `memfd_backed` so the running guest is memfd/`MAP_SHARED`
   and export the fd). A throwaway KVM harness boots a parent, has a second process
   `MAP_PRIVATE` the parent's memfd, and MEASURES real per-child MiB (RSS delta /
-  `smaps` private-dirty) to compare against the `0.12 MiB/child` target. No mitos
-  integration yet. Deliverable: a number in `bench/`, plus go/no-go on the memfd
-  backend.
+  `smaps` private-dirty) to compare against the `0.12 MiB/child` target. The
+  parent stays PAUSED for the whole measurement (m1 has no write-protect, so a
+  resumed parent would leak forward into children, per the correctness invariant);
+  m1 proves ONLY the CoW density, not resumed-parent safety. No mitos integration
+  yet. Deliverable: a number in `bench/`, plus go/no-go on the memfd backend.
 - **m2: UFFD_WP async parent resume.** Apply patch (b): register the running
   guest with `UFFD_FEATURE_PAGEFAULT_FLAG_WP`, add the freeze-copy-unprotect
   sequence, and prove the parent resumes before the copy completes AND that the
