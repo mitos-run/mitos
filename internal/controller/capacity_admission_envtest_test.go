@@ -76,6 +76,16 @@ func waitForPhase(t *testing.T, name string, want v1.SandboxPhase, timeout time.
 	return last
 }
 
+// waitForSettledNoCapacity waits for the claim's Ready reason to settle to
+// NoCapacity (a claim can transiently pend with PoolNotFound before its pool is
+// visible to the reconciler cache) and returns the re-fetched claim, so callers
+// assert against the settled state and never race a transient reason.
+func waitForSettledNoCapacity(t *testing.T, name string) v1.Sandbox {
+	t.Helper()
+	waitForReadyReason(t, name, "NoCapacity")
+	return getClaim(t, name)
+}
+
 // TestClaimPendsThenReadyOnFreedCapacity drives the capacity-aware admission
 // path: the only node reports a full memory budget, so the claim pends with a
 // NoCapacity condition (not Ready, not Failed); freeing the node lets the claim
@@ -97,11 +107,7 @@ func TestClaimPendsThenReadyOnFreedCapacity(t *testing.T) {
 
 	// The claim must pend (not Ready, not Failed) while capacity is exhausted.
 	pending := waitForPhase(t, "cap1", v1.SandboxPending, 15*time.Second)
-	// The claim can transiently pend with PoolNotFound before its pool is visible
-	// to the reconciler cache; wait for the reason to SETTLE to NoCapacity, then
-	// re-fetch, so the assertions below never race a transient reason.
-	waitForReadyReason(t, "cap1", "NoCapacity")
-	pending = getClaim(t, "cap1")
+	pending = waitForSettledNoCapacity(t, "cap1")
 	if got := counterValue(t, "mitos_claim_pending_total", nil); got <= pendingBefore {
 		t.Fatalf("claim_pending_total = %v, want > %v", got, pendingBefore)
 	}
@@ -200,11 +206,7 @@ func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
 	makeCapacityFixture(t, "cap3")
 
 	pending := waitForPhase(t, "cap3", v1.SandboxPending, 15*time.Second)
-	// The claim can transiently pend with PoolNotFound before its pool is visible
-	// to the reconciler cache; wait for the reason to SETTLE to NoCapacity, then
-	// re-fetch, so the assertions below never race a transient reason.
-	waitForReadyReason(t, "cap3", "NoCapacity")
-	pending = getClaim(t, "cap3")
+	pending = waitForSettledNoCapacity(t, "cap3")
 	cond := meta.FindStatusCondition(pending.Status.Conditions, "Ready")
 	if cond == nil || cond.Reason != "NoCapacity" {
 		t.Fatalf("Ready condition = %+v, want reason NoCapacity (re-pend, not terminal)", cond)
@@ -250,11 +252,7 @@ func TestClaimRePendsOnForkdUnavailable(t *testing.T) {
 	makeCapacityFixture(t, "cap4")
 
 	pending := waitForPhase(t, "cap4", v1.SandboxPending, 15*time.Second)
-	// The claim can transiently pend with PoolNotFound before its pool is visible
-	// to the reconciler cache; wait for the reason to SETTLE to NoCapacity, then
-	// re-fetch, so the assertions below never race a transient reason.
-	waitForReadyReason(t, "cap4", "NoCapacity")
-	pending = getClaim(t, "cap4")
+	pending = waitForSettledNoCapacity(t, "cap4")
 	cond := meta.FindStatusCondition(pending.Status.Conditions, "Ready")
 	if cond == nil || cond.Reason != "NoCapacity" {
 		t.Fatalf("Ready condition = %+v, want reason NoCapacity (re-pend, not terminal)", cond)
