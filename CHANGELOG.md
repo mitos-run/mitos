@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.24.1](https://github.com/mitos-run/mitos/compare/v1.24.0...v1.24.1) (2026-07-06)
+
+
+### Bug Fixes
+
+* **controller:** fork child pod inherits source pod scheduling constraints ([#749](https://github.com/mitos-run/mitos/issues/749)) ([d8fcef2](https://github.com/mitos-run/mitos/commit/d8fcef2a6b364a5a33cfe9ab1ba955102c07559a))
+
 ## [1.24.0](https://github.com/mitos-run/mitos/compare/v1.23.0...v1.24.0) (2026-07-06)
 
 
