@@ -1066,6 +1066,38 @@ func TestBuildForkChildPodOwnedByFork(t *testing.T) {
 	}
 }
 
+// TestBuildForkChildPodCarriesPoolCPUCap is the issue #760 regression for the
+// resource half: a live-fork child built from an EMPTY PoolTemplateSpec lost the
+// pool's cpu burst cap and ran at the default 250m ceiling instead of the
+// tenant's configured cap. buildForkChildPod must thread the resolved source
+// pool template's resources into the child pod, so the child's cpu LIMIT matches
+// the pool cap a warm-claimed sandbox of the same pool gets.
+func TestBuildForkChildPodCarriesPoolCPUCap(t *testing.T) {
+	fork := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "cap-fork", Namespace: "default", UID: "uid-cap"}}
+	srcPod := &corev1.Pod{Spec: corev1.PodSpec{NodeName: "kvm-node-1"}}
+	poolCPU := resource.MustParse("2")
+	child := controller.BuildForkChildPodForTest(fork, srcPod, "cap-child-0", controller.HuskPodOptions{
+		StubImage:      "img",
+		SnapshotID:     "tmpl-a",
+		DataDir:        "/data",
+		ForkSnapshotID: "cap-fork",
+		ForkSourceNode: "kvm-node-1",
+		// The resolved SOURCE pool template: the fork child must inherit its cpu cap.
+		Template: &v1.PoolTemplateSpec{Resources: v1.SandboxResources{CPU: poolCPU}},
+	}, scheme)
+
+	var c corev1.Container
+	for i := range child.Spec.Containers {
+		if child.Spec.Containers[i].Name == "husk-stub" {
+			c = child.Spec.Containers[i]
+		}
+	}
+	got := c.Resources.Limits[corev1.ResourceCPU]
+	if got.Cmp(poolCPU) != 0 {
+		t.Fatalf("fork child cpu limit = %s, want the pool cap %s (not the default): the child lost the pool cpu burst cap", got.String(), poolCPU.String())
+	}
+}
+
 // TestBuildHuskPodDisablesSATokenAutomount asserts the husk pod opts out of the
 // default ServiceAccount token automount. The stub speaks vsock + mTLS and never
 // calls the Kubernetes API, so mounting the namespace default SA token would only
