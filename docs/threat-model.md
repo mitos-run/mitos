@@ -449,6 +449,35 @@ the warm-pool/shared-CAS model (a warm pod is built before a claim binds, so its
 eventual workspace is unknown at mount time) and need cluster-e2e and a named
 security reviewer, so they are deliberately not rushed here.
 
+### Husk spawn-vm (add a VM to a running pod, multi-VM path)
+
+A `spawn-vm` control op asks a RUNNING husk pod to bring up an ADDITIONAL
+same-tenant VM (a new vmID) INSIDE the same pod, using the experimental
+multi-VM-per-pod engine (`Options.MultiVM`, #764). It rides the SAME
+op-dispatched mTLS channel as activate, fork-snapshot, and the workspace ops,
+authorized to the controller identity ONLY (`internal/husk.ServeTLS` plus
+`AuthorizeControllerIdentity`); the auth is NOT weakened for it. The request
+carries the new VM's id plus the same activation inputs an activate takes
+(snapshot dir/source and expected digest, per-fork network, egress policy and
+allowlists, inbound policy, env, secrets, token), so like activate it CAN carry
+tenant SECRETS; those are never logged. The stub validates the vmID with the
+`checkVMID` allowlist BEFORE deriving any per-VM socket, workdir, tap, or /30 from
+it, so a traversing id can never spawn a VM, then runs the per-VM prepare +
+activate (`internal/husk/multivm.go` `SpawnVM` -> `prepareInstance` +
+`activateInstance`), which fails closed per instance and never disturbs a sibling.
+The op FAILS CLOSED on the flag: a stub NOT started with `--multi-vm` refuses
+spawn-vm, so a single-VM pod is never driven to host a second VM. The spawned VM
+lands on its OWN tap + /30 + default-deny egress chain derived from the vmID (the
+per-VM network isolation in the multi-VM-per-pod row of Surface 2, Guest to guest), so a
+co-located VM's egress cannot cross into a sibling's. This is DEFAULT OFF and the
+controller is NOT wired to call it (the fork-routing that drives it is a later
+increment), so the shipped surface is unchanged: nothing spawns a second VM in
+production today. Residual: a compromised controller can drive a spawn-vm against
+any multi-VM husk pod it can reach, the same residual already stated for activate
+and fork-snapshot (Surface 2); and it inherits the shared-pod-netns residual of
+the multi-VM-per-pod mode (Surface 2, Guest to guest), which is why it stays flag-gated behind that
+mode's per-VM tap + /30 isolation and a named security review before it ships.
+
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin
 (`cmd/kvm-device-plugin`, `internal/deviceplugin`): the pod requests
 `mitos.run/kvm` like any extended resource and the kubelet bind-mounts
