@@ -67,6 +67,21 @@ type huskVMSpawner func(ctx context.Context, addr string, tlsConf *tls.Config, r
 // capacity-admission gate account honestly, so a fork that cannot fit the node
 // pends there exactly as an independent claim does. The node-level spill-vs-pend
 // refinement for the co-located dimension is deferred to a follow-up increment.
+//
+// SCOPE, and the honest limit today: this budget is computed PER FORK reconcile
+// from the source pod's static resources. It does NOT yet subtract co-located VMs
+// that OTHER SandboxForks targeting the SAME source pod have already placed there,
+// so N concurrent forks of one source can each independently admit up to this
+// budget and over-admit VMs into the pod. The NODE is still not overcommitted:
+// the pod's cgroup memory LIMIT is a hard ceiling the node scheduler already
+// reserved, so an over-admission is caught INSIDE the pod (a co-located guest that
+// would exceed memory.max is OOM-killed, fail-closed at the pod boundary) rather
+// than as a node overcommit. What is missing is a cross-fork SHARED RESERVATION or
+// live-occupancy check so an over-budget co-located child cleanly SPILLS to a new
+// pod instead of risking an intra-pod OOM under concurrent same-source forks. That
+// shared reservation (a race-free occupancy count across forks) is a tracked
+// follow-up; until it lands, guarantee A's per-pod dimension is enforced per fork,
+// not across concurrent forks of one source.
 func coLocatedForkVMBudget(pod *corev1.Pod) int {
 	if pod == nil {
 		return 0
