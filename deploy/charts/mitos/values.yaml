@@ -207,7 +207,8 @@ forkd:
 
   # forkd AppArmor profile. On platforms where the runtime default profile blocks
   # the Firecracker jailer's mount setup, configure a Localhost profile loaded on
-  # every KVM node:
+  # every KVM node. See docs/platforms/hardened-runtimes.md and
+  # docs/platforms/examples/mitos-forkd.apparmor:
   #   appArmorProfile:
   #     type: Localhost
   #     localhostProfile: mitos-forkd
