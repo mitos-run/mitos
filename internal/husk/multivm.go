@@ -182,7 +182,7 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID) error {
 // not build. No production caller runs multi-VM yet, so nothing regresses.
 func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateRequest) (ActivateResult, error) {
 	if err := checkVMID(id); err != nil {
-		return ActivateResult{}, err
+		return ActivateResult{OK: false, Error: err.Error()}, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
