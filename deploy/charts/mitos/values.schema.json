@@ -275,6 +275,23 @@
             }
           }
         },
+        "appArmorProfile": {
+          "description": "Optional forkd container AppArmor profile, rendered into securityContext.appArmorProfile.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "description": "AppArmor profile type.",
+              "type": "string",
+              "enum": ["RuntimeDefault", "Unconfined", "Localhost"]
+            },
+            "localhostProfile": {
+              "description": "Name of the pre-loaded Localhost AppArmor profile.",
+              "type": "string"
+            }
+          }
+        },
         "extraCapabilities": {
           "description": "Extra Linux capabilities added to forkd's hardened base set; the base set is not removable here.",
           "type": "array",
