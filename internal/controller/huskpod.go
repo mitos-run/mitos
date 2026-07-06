@@ -235,7 +235,10 @@ type HuskPodOptions struct {
 	// husk pod's KVM nodeSelector (so the VM runs only on the tenant's dedicated
 	// nodes); the tolerations are appended so the pod schedules onto tainted
 	// dedicated nodes. Both empty/nil leave the pod unconstrained beyond KVM +
-	// snapshot-node affinity.
+	// snapshot-node affinity. For a FORK CHILD, buildForkChildPod fills both from
+	// the SOURCE husk pod's own spec (not the pool): the child must land on the
+	// source pod's exact node, so the source's scheduling constraints are the
+	// authoritative record of what it takes to get there.
 	PlacementNodeSelector map[string]string
 	PlacementTolerations  []corev1.Toleration
 }
@@ -987,7 +990,31 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 // then rewrites the ownership, labels, and name for the fork. The pod is pinned
 // to the source node (opts.ForkSourceNode) and activates from
 // <DataDir>/forks/<ForkSnapshotID> (opts.ForkSnapshotID), both set by the caller.
-func buildForkChildPod(fork *v1.Sandbox, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+// srcPod is that source node's SOURCE husk pod; the child inherits its
+// scheduling constraints (nodeSelector and tolerations) so it can actually
+// land next to it (see the inheritance comment in the body).
+func buildForkChildPod(fork *v1.Sandbox, srcPod *corev1.Pod, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+	// Inherit the SOURCE pod's scheduling constraints so the child can actually
+	// land on the source node. The child is pinned to that exact node by the
+	// ForkSourceNode nodeAffinity (the fork snapshot and the source rootfs are
+	// node-local hostPaths), but affinity does not clear taints: hosted KVM
+	// nodes carry mitos.run/dedicated:NoSchedule, which warm pods tolerate via
+	// the pool's spec.placement tolerations. The fork path has no pool in hand,
+	// and the pool's placement may have changed since the source scheduled, so
+	// the source pod's OWN spec is the authoritative record of what it took to
+	// land there; without this the child sits Pending forever (production
+	// FailedScheduling: "1 node(s) had untolerated taint {mitos.run/dedicated}")
+	// and the fork 504s. The pin deliberately stays scheduler-visible
+	// (nodeAffinity, NOT spec.nodeName): husk pods are scheduler-placed
+	// throughout this file, and the KVM extended-resource request must pass
+	// scheduler fit; spec.nodeName would bypass that and turn node capacity
+	// exhaustion into a terminal kubelet OutOf<kvm-resource> pod instead of a
+	// Pending pod that schedules when a slot frees.
+	if srcPod != nil {
+		opts.PlacementNodeSelector = srcPod.Spec.NodeSelector
+		opts.PlacementTolerations = forkChildInheritedTolerations(srcPod.Spec.Tolerations)
+	}
+
 	// buildHuskPod only reads r.Scheme() (for the owner ref we overwrite) and the
 	// opts, so a zero reconciler is sufficient to build the spec. A synthetic pool
 	// carrier supplies GenerateName/namespace; ownership and labels are overwritten
@@ -1334,6 +1361,25 @@ func huskTolerations(opts HuskPodOptions) []corev1.Toleration {
 		{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: ptrInt64(huskNodeLossTolerationSeconds)},
 	}
 	return append(tol, opts.PlacementTolerations...)
+}
+
+// forkChildInheritedTolerations returns the SOURCE husk pod's tolerations
+// minus the fast node-loss pair (node.kubernetes.io/not-ready and
+// node.kubernetes.io/unreachable) that huskTolerations re-adds to every husk
+// pod, so a fork child carries each toleration exactly once. Everything else
+// is copied verbatim: the pool placement tolerations the source scheduled with
+// (#172, e.g. the mitos.run/dedicated NoSchedule taint on hosted KVM nodes)
+// and anything admission injected for the source apply equally to the child,
+// which must land on the SAME node.
+func forkChildInheritedTolerations(src []corev1.Toleration) []corev1.Toleration {
+	var out []corev1.Toleration
+	for _, t := range src {
+		if t.Key == corev1.TaintNodeNotReady || t.Key == corev1.TaintNodeUnreachable {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // huskPlacementNodeSelector / huskPlacementTolerations read the pool's
