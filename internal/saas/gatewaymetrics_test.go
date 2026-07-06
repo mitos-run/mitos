@@ -102,6 +102,119 @@ func TestGatewayMetricsQuotaDenialIsNotAuthDenial(t *testing.T) {
 	}
 }
 
+// TestGatewayMetricsObservesForwardDuration asserts a forwarded request lands
+// exactly one observation in the request duration histogram, labeled by the
+// gateway op and the status class, so the hosted latency SLO can be read from
+// mitos_gateway_request_duration_seconds instead of client-side timing.
+func TestGatewayMetricsObservesForwardDuration(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	m := NewGatewayMetrics()
+	reg := prometheus.NewRegistry()
+	m.MustRegister(reg)
+	WithGatewayMetrics(m)(f.gw)
+
+	rec := doRequest(f.gw, http.MethodPost, "/v1/sandboxes", f.rawA, `{"pool":"default"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var found bool
+	for _, mf := range mfs {
+		if mf.GetName() != "mitos_gateway_request_duration_seconds" {
+			continue
+		}
+		found = true
+		if len(mf.GetMetric()) != 1 {
+			t.Fatalf("duration series = %d, want 1", len(mf.GetMetric()))
+		}
+		metric := mf.GetMetric()[0]
+		labels := map[string]string{}
+		for _, lp := range metric.GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		if labels["op"] != "sandbox.create" {
+			t.Errorf("op label = %q, want sandbox.create", labels["op"])
+		}
+		if labels["code_class"] != "2xx" {
+			t.Errorf("code_class label = %q, want 2xx", labels["code_class"])
+		}
+		if got := metric.GetHistogram().GetSampleCount(); got != 1 {
+			t.Errorf("sample count = %d, want 1", got)
+		}
+	}
+	if !found {
+		t.Fatal("mitos_gateway_request_duration_seconds not registered or never observed")
+	}
+}
+
+// TestGatewayMetricsObservesForwardDurationOnFailure asserts a control-plane
+// failure still lands a duration observation, in the 5xx class, so slow
+// failures are visible in the same histogram as slow successes.
+func TestGatewayMetricsObservesForwardDurationOnFailure(t *testing.T) {
+	f := newGatewayFixture(t, nil)
+	m := NewGatewayMetrics()
+	reg := prometheus.NewRegistry()
+	m.MustRegister(reg)
+	WithGatewayMetrics(m)(f.gw)
+
+	f.cp.err = errors.New("control plane down")
+	rec := doRequest(f.gw, http.MethodPost, "/v1/sandboxes", f.rawA, "{}")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "mitos_gateway_request_duration_seconds" {
+			continue
+		}
+		if len(mf.GetMetric()) != 1 {
+			t.Fatalf("duration series = %d, want 1", len(mf.GetMetric()))
+		}
+		metric := mf.GetMetric()[0]
+		labels := map[string]string{}
+		for _, lp := range metric.GetLabel() {
+			labels[lp.GetName()] = lp.GetValue()
+		}
+		if labels["code_class"] != "5xx" {
+			t.Errorf("code_class label = %q, want 5xx", labels["code_class"])
+		}
+		if got := metric.GetHistogram().GetSampleCount(); got != 1 {
+			t.Errorf("sample count = %d, want 1", got)
+		}
+		return
+	}
+	t.Fatal("mitos_gateway_request_duration_seconds never observed on a control-plane failure")
+}
+
+// TestOpLabelBoundsUnknownOps asserts the histogram op label is a bounded set:
+// the known gateway ops pass through and anything else (the "sandbox.<method>"
+// fallback for unmatched routes, where the method is caller controlled)
+// collapses to "other" so a garbage request can never mint unbounded series.
+func TestOpLabelBoundsUnknownOps(t *testing.T) {
+	for _, op := range []string{
+		"sandbox.create", "sandbox.fork", "sandbox.status", "sandbox.list",
+		"sandbox.terminate", "sandbox.runtime", "sandbox.pause", "sandbox.resume",
+		"template.ensure", "template.list",
+	} {
+		if got := opLabel(op); got != op {
+			t.Errorf("opLabel(%q) = %q, want the op itself", op, got)
+		}
+	}
+	for _, op := range []string{"sandbox.brew", "sandbox.post", "", "TOTALLY-MADE-UP"} {
+		if got := opLabel(op); got != "other" {
+			t.Errorf("opLabel(%q) = %q, want other", op, got)
+		}
+	}
+}
+
 // TestGatewayWithoutMetricsIsSafe asserts a gateway with no metrics wired (the
 // default, every existing caller) serves without panicking.
 func TestGatewayWithoutMetricsIsSafe(t *testing.T) {
