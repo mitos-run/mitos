@@ -504,3 +504,27 @@ func TestMultiVMRejectsUnsafeVMID(t *testing.T) {
 		}
 	}
 }
+
+// TestMultiVMPrepareRefusedWhileClosing proves a prepareInstance create cannot
+// add a VM after closeAllInstances has begun teardown (issue #795 review): once
+// s.closing is set, instanceFor refuses the create and prepareInstance errors,
+// so no VM outlives Close.
+func TestMultiVMPrepareRefusedWhileClosing(t *testing.T) {
+	vms := map[string]*fakeVMM{}
+	s := newMultiVMTestStub(t, vms)
+	s.mu.Lock()
+	s.closing = true
+	s.mu.Unlock()
+	if got := s.instanceFor("late", true); got != nil {
+		t.Fatalf("instanceFor create during closing = %v, want nil (refused)", got)
+	}
+	if err := s.prepareInstance(context.Background(), "late"); err == nil {
+		t.Fatal("prepareInstance during closing = nil error, want a closing error")
+	}
+	s.mu.Lock()
+	_, exists := s.instances["late"]
+	s.mu.Unlock()
+	if exists {
+		t.Fatal("a vm was added to the instances map during closing; it would outlive Close")
+	}
+}

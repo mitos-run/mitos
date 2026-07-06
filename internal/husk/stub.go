@@ -596,6 +596,10 @@ type Stub struct {
 	// a caller opts in, so increment 1 changes no runtime behavior.
 	multiVM   bool
 	instances map[vmID]*vmInstance
+	// closing is set (under mu) when closeAllInstances begins teardown, so a
+	// concurrent create can no longer add a VM that would outlive Close. Guarded
+	// by mu; only meaningful on the multi-VM path.
+	closing bool
 }
 
 // NetRunner is the exported alias for the host-command runner type so callers

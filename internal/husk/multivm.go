@@ -63,6 +63,13 @@ func (s *Stub) instanceFor(id vmID, create bool) *vmInstance {
 	defer s.mu.Unlock()
 	inst := s.instances[id]
 	if inst == nil && create {
+		// Refuse to create a new VM once teardown has begun: a VM added after
+		// closeAllInstances snapshotted the map would outlive Close. A nil return
+		// from a create call therefore means "the stub is closing" (prepareInstance
+		// maps it to an error). This is the only reason a create=true lookup is nil.
+		if s.closing {
+			return nil
+		}
 		inst = newVMInstance()
 		s.instances[id] = inst
 	}
@@ -109,6 +116,11 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID) error {
 	// + rootfs clone below run under THIS instance's own lock, so preparing a second
 	// VM never waits behind the first's blocking I/O.
 	inst := s.instanceFor(id, true)
+	if inst == nil {
+		// instanceFor refused the create because teardown has begun; do not start
+		// a VM that would outlive Close.
+		return fmt.Errorf("husk: cannot prepare vm %q: stub is closing", id)
+	}
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
 
@@ -368,6 +380,10 @@ func (s *Stub) closeAllInstances() error {
 		inst *vmInstance
 	}
 	s.mu.Lock()
+	// Mark closing BEFORE snapshotting so any concurrent prepareInstance create is
+	// refused (instanceFor returns nil) and cannot add a VM after this snapshot that
+	// would outlive Close.
+	s.closing = true
 	entries := make([]entry, 0, len(s.instances))
 	for id, inst := range s.instances {
 		entries = append(entries, entry{id: id, inst: inst})
