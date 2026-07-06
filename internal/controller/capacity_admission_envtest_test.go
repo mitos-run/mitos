@@ -82,6 +82,7 @@ func waitForPhase(t *testing.T, name string, want v1.SandboxPhase, timeout time.
 // assert against the settled state and never race a transient reason.
 func waitForSettledNoCapacity(t *testing.T, name string) v1.Sandbox {
 	t.Helper()
+	waitForPhase(t, name, v1.SandboxPending, 15*time.Second)
 	waitForReadyReason(t, name, "NoCapacity")
 	return getClaim(t, name)
 }
@@ -106,8 +107,7 @@ func TestClaimPendsThenReadyOnFreedCapacity(t *testing.T) {
 	makeCapacityFixture(t, "cap1")
 
 	// The claim must pend (not Ready, not Failed) while capacity is exhausted.
-	pending := waitForPhase(t, "cap1", v1.SandboxPending, 15*time.Second)
-	pending = waitForSettledNoCapacity(t, "cap1")
+	pending := waitForSettledNoCapacity(t, "cap1")
 	if got := counterValue(t, "mitos_claim_pending_total", nil); got <= pendingBefore {
 		t.Fatalf("claim_pending_total = %v, want > %v", got, pendingBefore)
 	}
@@ -205,8 +205,7 @@ func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
 
 	makeCapacityFixture(t, "cap3")
 
-	pending := waitForPhase(t, "cap3", v1.SandboxPending, 15*time.Second)
-	pending = waitForSettledNoCapacity(t, "cap3")
+	pending := waitForSettledNoCapacity(t, "cap3")
 	cond := meta.FindStatusCondition(pending.Status.Conditions, "Ready")
 	if cond == nil || cond.Reason != "NoCapacity" {
 		t.Fatalf("Ready condition = %+v, want reason NoCapacity (re-pend, not terminal)", cond)
@@ -251,8 +250,7 @@ func TestClaimRePendsOnForkdUnavailable(t *testing.T) {
 
 	makeCapacityFixture(t, "cap4")
 
-	pending := waitForPhase(t, "cap4", v1.SandboxPending, 15*time.Second)
-	pending = waitForSettledNoCapacity(t, "cap4")
+	pending := waitForSettledNoCapacity(t, "cap4")
 	cond := meta.FindStatusCondition(pending.Status.Conditions, "Ready")
 	if cond == nil || cond.Reason != "NoCapacity" {
 		t.Fatalf("Ready condition = %+v, want reason NoCapacity (re-pend, not terminal)", cond)
