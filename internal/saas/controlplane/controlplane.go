@@ -29,11 +29,14 @@ import (
 	"mitos.run/mitos/internal/tenant"
 )
 
-// Defaults for the readiness poll. A create call blocks until the sandbox is
-// Ready, Failed, or the timeout elapses; these bound that wait.
+// Defaults for the readiness wait. A create call blocks until the sandbox is
+// Ready, Failed, or the timeout elapses; these bound that wait. Readiness is
+// normally observed by a WATCH (readywatch.go); the poll interval governs only
+// the fail-open fallback loop, and is kept small so a fallback create is never
+// quantized to a coarse tick boundary.
 const (
 	defaultReadyTimeout = 120 * time.Second
-	defaultPollInterval = 250 * time.Millisecond
+	defaultPollInterval = 25 * time.Millisecond
 )
 
 // K8sControlPlane is the real ControlPlane. It holds a controller-runtime client

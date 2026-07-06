@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -244,60 +245,119 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 // phase, so waiting on the phase alone would misreport it as a timeout), or the
 // readiness timeout (504-style). startedAt is when the create or fork op began;
 // it feeds the observed-latency fallback in the ready payload.
+//
+// Readiness is observed by a WATCH on the single sandbox (readywatch.go), so
+// the response returns the moment the controller flips the phase instead of on
+// a poll-tick boundary (production measured the tick quantization as the
+// dominant create/fork cost: p50 545ms client observed vs 6-40ms on-node
+// activate). When the client cannot watch or the watch cannot be established,
+// the wait fails OPEN to the legacy poll loop below.
 func (k *K8sControlPlane) pollReady(ctx context.Context, ns, name string, startedAt time.Time) (saas.ForwardResponse, error) {
 	deadline := k.now().Add(k.readyTimeout)
+	if w, ok := k.c.(client.WithWatch); ok {
+		if resp, done := k.watchReady(ctx, w, ns, name, startedAt, deadline); done {
+			return resp, nil
+		}
+		slog.Warn("sandbox ready watch unavailable; falling back to status polling",
+			"namespace", ns, "sandbox", name)
+	}
+	return k.pollReadyTicker(ctx, ns, name, startedAt, deadline)
+}
+
+// pollReadyTicker is the legacy ticker-driven readiness wait, kept as the
+// fail-open fallback when a watch cannot be established. It re-reads the
+// sandbox every pollInterval until a terminal outcome or the deadline.
+func (k *K8sControlPlane) pollReadyTicker(ctx context.Context, ns, name string, startedAt time.Time, deadline time.Time) (saas.ForwardResponse, error) {
 	ticker := time.NewTicker(k.pollInterval)
 	defer ticker.Stop()
 
 	for {
 		var sb v1.Sandbox
 		if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &sb); err != nil {
-			if apierrors.IsNotFound(err) {
-				// The object vanished mid-create (a terminate raced the poll).
-				return errResp(apierr.Get(apierr.CodeNotFound).
-					WithCause("the sandbox was removed before it became ready")), nil
-			}
-			return errResp(apierr.Get(apierr.CodeInternal).
-				WithCause("could not read the sandbox status while waiting for readiness")), nil
+			return readSandboxError(ctx, err), nil
 		}
 
-		switch sb.Status.Phase {
-		case v1.SandboxReady:
-			return k.readyResponse(ctx, &sb, startedAt)
-		case v1.SandboxFailed:
-			return errResp(withStatus(apierr.Get(apierr.CodeInternal).
-				WithCause("the sandbox failed to start: "+failureReason(&sb)), http.StatusBadGateway)), nil
-		}
-
-		// A terminal Rejected condition (the fork engine's secret-inheritance
-		// default-deny) is recorded WITHOUT a Failed phase; surface the
-		// controller's actionable message instead of pending into a timeout.
-		// The secrets gate gets its own 403 whose remediation names the exact
-		// wire-level opt-in, so an agent can self-correct in one round trip.
-		if c := rejectedCondition(&sb); c != nil {
-			if c.Reason == v1.ReasonSecretInheritanceDenied {
-				return errResp(withStatus(apierr.Get(apierr.CodeForbidden).
-					WithMessage("the fork was rejected: the source sandbox holds secrets").
-					WithCause(c.Message).
-					WithRemediation("A live fork duplicates the source VM's memory, including delivered secret values, so it is denied by default. Re-request the fork with \"secret_inheritance\": \"inherit\" in the body to explicitly permit duplicating them into the child, or fork a sandbox that holds no secrets."), http.StatusForbidden)), nil
-			}
-			return errResp(withStatus(apierr.Get(apierr.CodeInvalidInput).
-				WithMessage("the sandbox was rejected by the controller").
-				WithCause(c.Message), http.StatusConflict)), nil
+		if resp, done := k.sandboxOutcome(ctx, &sb, startedAt); done {
+			return resp, nil
 		}
 
 		if !k.now().Before(deadline) {
-			return errResp(withStatus(apierr.Get(apierr.CodeInternal).
-				WithCause(fmt.Sprintf("the sandbox did not become ready within %s; it is still %s", k.readyTimeout, phaseOrUnknown(&sb))), http.StatusGatewayTimeout)), nil
+			return k.readyTimeoutError(phaseOrUnknown(&sb)), nil
 		}
 
 		select {
 		case <-ctx.Done():
-			return errResp(apierr.Get(apierr.CodeCanceled).
-				WithCause("the create request was canceled while waiting for the sandbox to become ready")), nil
+			return createCanceledError(), nil
 		case <-ticker.C:
 		}
 	}
+}
+
+// sandboxOutcome maps the sandbox's current state to a terminal create outcome.
+// done is false while the sandbox is still on its way to Ready. It is shared by
+// the watch and poll waits so both produce byte-identical envelopes.
+func (k *K8sControlPlane) sandboxOutcome(ctx context.Context, sb *v1.Sandbox, startedAt time.Time) (saas.ForwardResponse, bool) {
+	switch sb.Status.Phase {
+	case v1.SandboxReady:
+		resp, _ := k.readyResponse(ctx, sb, startedAt)
+		return resp, true
+	case v1.SandboxFailed:
+		return errResp(withStatus(apierr.Get(apierr.CodeInternal).
+			WithCause("the sandbox failed to start: "+failureReason(sb)), http.StatusBadGateway)), true
+	}
+
+	// A terminal Rejected condition (the fork engine's secret-inheritance
+	// default-deny) is recorded WITHOUT a Failed phase; surface the
+	// controller's actionable message instead of pending into a timeout.
+	// The secrets gate gets its own 403 whose remediation names the exact
+	// wire-level opt-in, so an agent can self-correct in one round trip.
+	if c := rejectedCondition(sb); c != nil {
+		if c.Reason == v1.ReasonSecretInheritanceDenied {
+			return errResp(withStatus(apierr.Get(apierr.CodeForbidden).
+				WithMessage("the fork was rejected: the source sandbox holds secrets").
+				WithCause(c.Message).
+				WithRemediation("A live fork duplicates the source VM's memory, including delivered secret values, so it is denied by default. Re-request the fork with \"secret_inheritance\": \"inherit\" in the body to explicitly permit duplicating them into the child, or fork a sandbox that holds no secrets."), http.StatusForbidden)), true
+		}
+		return errResp(withStatus(apierr.Get(apierr.CodeInvalidInput).
+			WithMessage("the sandbox was rejected by the controller").
+			WithCause(c.Message), http.StatusConflict)), true
+	}
+	return saas.ForwardResponse{}, false
+}
+
+// readSandboxError maps a readiness-wait Get failure to its envelope: a
+// canceled request keeps its canceled envelope (the client hung up; the Get
+// error is just the interruption surfacing), and a NotFound means the object
+// vanished mid-create (a terminate raced the wait).
+func readSandboxError(ctx context.Context, err error) saas.ForwardResponse {
+	if ctx.Err() != nil {
+		return createCanceledError()
+	}
+	if apierrors.IsNotFound(err) {
+		return sandboxRemovedError()
+	}
+	return errResp(apierr.Get(apierr.CodeInternal).
+		WithCause("could not read the sandbox status while waiting for readiness"))
+}
+
+// sandboxRemovedError is the not_found envelope for a sandbox deleted while the
+// create waited for readiness.
+func sandboxRemovedError() saas.ForwardResponse {
+	return errResp(apierr.Get(apierr.CodeNotFound).
+		WithCause("the sandbox was removed before it became ready"))
+}
+
+// readyTimeoutError is the 504 envelope for a sandbox that did not become
+// ready within the configured timeout; phase names its last observed phase.
+func (k *K8sControlPlane) readyTimeoutError(phase string) saas.ForwardResponse {
+	return errResp(withStatus(apierr.Get(apierr.CodeInternal).
+		WithCause(fmt.Sprintf("the sandbox did not become ready within %s; it is still %s", k.readyTimeout, phase)), http.StatusGatewayTimeout))
+}
+
+// createCanceledError is the envelope for a create canceled while waiting.
+func createCanceledError() saas.ForwardResponse {
+	return errResp(apierr.Get(apierr.CodeCanceled).
+		WithCause("the create request was canceled while waiting for the sandbox to become ready"))
 }
 
 // readyResponse reads the per-sandbox token Secret and returns the 201 create

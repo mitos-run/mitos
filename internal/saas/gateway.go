@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"mitos.run/mitos/internal/apierr"
 	"mitos.run/mitos/internal/telemetry"
@@ -290,16 +291,23 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	g.log.Info("gateway forward", "key_id", res.Key.ID, "key_prefix", res.Key.Prefix, "org", orgID, "op", op)
 
+	// The Forward round trip is the server-side view of the latency the SDK
+	// observes (create readiness wait, runtime proxy); it feeds the duration
+	// histogram labeled by the bounded op and status class.
+	forwardStarted := time.Now()
 	resp, err := g.cp.Forward(ctx, fwd)
 	if err != nil {
-		g.fail(w, apierr.Get(apierr.CodeInternal).
-			WithCause("the control plane could not service the request"))
+		e := apierr.Get(apierr.CodeInternal).
+			WithCause("the control plane could not service the request")
+		g.metrics.observeForwardDuration(op, e.Status, time.Since(forwardStarted))
+		g.fail(w, e)
 		return
 	}
 	status := resp.Status
 	if status == 0 {
 		status = http.StatusOK
 	}
+	g.metrics.observeForwardDuration(op, status, time.Since(forwardStarted))
 
 	// Product telemetry: a successful create emits a sandbox.created event and a
 	// successful live fork (sandbox.fork) emits sandbox.forked, so feature
