@@ -565,3 +565,112 @@ func TestHuskForkAdoptsAlreadyActiveChild(t *testing.T) {
 		return got.Status.ReadyReplicas == 2
 	})
 }
+
+// TestHuskForkChildPodInheritsSourcePodScheduling is the regression for the
+// production fork 504: the fork child pod is pinned to the source node via
+// nodeAffinity, but the hosted KVM node carries the mitos.run/dedicated
+// NoSchedule taint that warm pods tolerate via the pool's spec.placement
+// tolerations. The fork path never carried those tolerations onto the child,
+// so the child sat Pending forever with FailedScheduling "1 node(s) had
+// untolerated taint {mitos.run/dedicated}". The child must inherit the SOURCE
+// pod's own scheduling constraints (tolerations and nodeSelector; the source
+// pod's spec is the authoritative record of what it took to land on that
+// node), while keeping the exact-node affinity pin. Like the full-shape test
+// this drives the real controller opts path, not a direct builder call.
+// envtest schedules nothing (no scheduler, untainted fake nodes), so only a
+// real-cluster e2e proves scheduling against actual taints; this test pins the
+// pod SPEC the controller emits.
+func TestHuskForkChildPodInheritsSourcePodScheduling(t *testing.T) {
+	poolName := uniqueName("pool-sched")
+	srcClaimName := uniqueName("src-claim-sched")
+	forkName := uniqueName("sched")
+
+	notReadySecs := int64(60)
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.5.5", func(p *corev1.Pod) {
+		// The scheduling constraints a real warm husk pod carries on a hosted
+		// dedicated KVM node: the KVM+placement nodeSelector and the
+		// fast-node-loss pair plus the placement toleration for the node taint.
+		p.Spec.NodeSelector = map[string]string{
+			"mitos.run/kvm":    "true",
+			"mitos.run/tenant": "acme",
+		}
+		p.Spec.Tolerations = []corev1.Toleration{
+			{Key: "node.kubernetes.io/not-ready", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &notReadySecs},
+			{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &notReadySecs},
+			{Key: "mitos.run/dedicated", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+		}
+	})
+	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
+
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		return husk.ActivateResult{OK: true, VsockPath: "/run/x"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+
+	fork := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      forkName,
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcClaimName}}, Replicas: 1},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	var child corev1.Pod
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var pods corev1.PodList
+		_ = k8sClient.List(ctx, &pods, listForkChildren(forkName))
+		if len(pods.Items) == 0 {
+			return false
+		}
+		child = pods.Items[0]
+		return true
+	})
+
+	// The production failure: the child did not tolerate the source node's
+	// mitos.run/dedicated NoSchedule taint and could never schedule.
+	tolCount := map[string]int{}
+	for _, tol := range child.Spec.Tolerations {
+		tolCount[tol.Key]++
+	}
+	if tolCount["mitos.run/dedicated"] != 1 {
+		t.Errorf("fork child must carry the source pod's mitos.run/dedicated toleration exactly once, got %d; tolerations=%v", tolCount["mitos.run/dedicated"], child.Spec.Tolerations)
+	}
+	// Inheritance must not duplicate the fast node-loss pair huskTolerations
+	// adds to every husk pod.
+	for _, key := range []string{"node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable"} {
+		if tolCount[key] != 1 {
+			t.Errorf("fork child toleration %s count = %d, want exactly 1 (no duplicates from source inheritance); tolerations=%v", key, tolCount[key], child.Spec.Tolerations)
+		}
+	}
+	// The source pod's merged nodeSelector (KVM + placement) rides along too.
+	if child.Spec.NodeSelector["mitos.run/tenant"] != "acme" || child.Spec.NodeSelector["mitos.run/kvm"] != "true" {
+		t.Errorf("fork child nodeSelector = %v, want the source pod's kvm=true + tenant=acme", child.Spec.NodeSelector)
+	}
+	// The exact-node pin stays: the fork snapshot is a node-local hostPath on
+	// the source node.
+	aff := child.Spec.Affinity
+	if aff == nil || aff.NodeAffinity == nil || aff.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		t.Fatalf("fork child must keep the required nodeAffinity pin to the source node; affinity=%v", aff)
+	}
+	terms := aff.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	pinned := false
+	for _, term := range terms {
+		for _, expr := range term.MatchExpressions {
+			if expr.Key == "kubernetes.io/hostname" && len(expr.Values) == 1 && expr.Values[0] == srcPod.Spec.NodeName {
+				pinned = true
+			}
+		}
+	}
+	if !pinned {
+		t.Errorf("fork child nodeAffinity must pin to the source node %q; terms=%v", srcPod.Spec.NodeName, terms)
+	}
+}

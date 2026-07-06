@@ -48,8 +48,8 @@ func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1.SandboxPool, templa
 
 // BuildForkChildPodForTest exposes buildForkChildPod to the external
 // controller_test package so the fork child pod spec can be unit-tested.
-func BuildForkChildPodForTest(fork *v1.Sandbox, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
-	return buildForkChildPod(fork, childName, opts, scheme)
+func BuildForkChildPodForTest(fork *v1.Sandbox, srcPod *corev1.Pod, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+	return buildForkChildPod(fork, srcPod, childName, opts, scheme)
 }
 
 // SetForkSnapshotForTest installs the fork-snapshot seam (tests only).

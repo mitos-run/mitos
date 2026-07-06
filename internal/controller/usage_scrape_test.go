@@ -218,7 +218,8 @@ func TestBuildForkChildPodCarriesBillingLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 	fork := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "sb-child-1", Namespace: "mitos-org-acme", UID: "uid-fork"}}
-	pod := buildForkChildPod(fork, "sb-child-1-0", HuskPodOptions{
+	srcPod := &corev1.Pod{Spec: corev1.PodSpec{NodeName: "kvm-node-1"}}
+	pod := buildForkChildPod(fork, srcPod, "sb-child-1-0", HuskPodOptions{
 		StubImage:      "img",
 		SnapshotID:     "tmpl-a",
 		DataDir:        "/data",

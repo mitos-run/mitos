@@ -75,8 +75,10 @@ func (f *fakeActivator) callCount() int {
 
 // makeDormantHuskPod creates a husk pod and forces it Running+Ready with a
 // PodIP, simulating a warm dormant slot (envtest has no kubelet, so the test
-// drives the status directly).
-func makeDormantHuskPod(t *testing.T, poolName, podIP string) *corev1.Pod {
+// drives the status directly). Optional mutators adjust the pod spec before
+// creation (e.g. to give a fork SOURCE pod the placement nodeSelector and
+// tolerations a real warm pod carries).
+func makeDormantHuskPod(t *testing.T, poolName, podIP string, mutate ...func(*corev1.Pod)) *corev1.Pod {
 	t.Helper()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -94,6 +96,9 @@ func makeDormantHuskPod(t *testing.T, poolName, podIP string) *corev1.Pod {
 				Image: "mitos-husk-stub:test",
 			}},
 		},
+	}
+	for _, m := range mutate {
+		m(pod)
 	}
 	// reconcileHuskPods stamps a controller owner reference to the pool on every
 	// husk pod it creates, and selectDormantHuskPod now REQUIRES it before a pod
