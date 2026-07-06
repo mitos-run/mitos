@@ -2606,6 +2606,27 @@ jobs:
             /tmp/mitos-test/husk-stub/latencies.txt
           if-no-files-found: warn
 
+      # Multi-VM-per-pod L1.4 proof: with MultiVM ON, ONE husk Stub spawns TWO
+      # REAL Firecracker processes from the SAME bench template snapshot, both
+      # reach Active, and each execs INDEPENDENTLY over its OWN vsock. This is the
+      # only place a real second Firecracker in one pod is proven; the mock cannot
+      # spawn a real VMM. The per-VM tap/IP derivation that keeps their egress from
+      # crossing is proven deterministically by the mock-level unit tests in the
+      # go-test job (TestDeriveVMNetworkDistinctPerVMID,
+      # TestMultiVMActivateProgramsDistinctTapPerVMID); this test does not program
+      # the in-pod nftables datapath, which is L1.4b. The Go test GATES on /dev/kvm
+      # and MITOS_KVM_HUSK_SNAPSHOT_DIR and skips cleanly if either is absent, so a
+      # missing snapshot never turns into a false failure.
+      - name: Multi-VM husk, two real Firecrackers in one pod each exec over its own vsock
+        timeout-minutes: 10
+        env:
+          MITOS_KVM_HUSK_SNAPSHOT_DIR: /tmp/mitos-test/bench-data/templates/bench/snapshot
+          MITOS_KVM_FIRECRACKER: /usr/local/bin/firecracker
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm || true
+          go test ./internal/husk/ -run TestMultiVMTwoRealFirecrackersKVM -count=1 -v
+
       # Husk activate-correctness proof (#18). The fork-correctness phase above
       # proves the GUEST mechanism (distinct RNG + clock resync) when the host
       # sends NotifyForked directly via test-agent. THIS phase proves the same

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -11,6 +12,8 @@ import (
 
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/metering"
+	"mitos.run/mitos/internal/netconf"
+	"mitos.run/mitos/internal/vsock"
 )
 
 // validVMID is the allowlist a vmID must satisfy before it is ever used to
@@ -41,15 +44,27 @@ func checkVMID(id vmID) error {
 // any production caller exercises today (no caller sets MultiVM; the controller
 // is not wired to it).
 //
-// Increment 2 scope (this file): the map-based state-machine multiplexing proven
-// with the mock VMM: two distinct vmIDs each Prepare -> Dormant -> Activate ->
-// Active independently, Close one without disturbing the other, Metering reports
-// every active VM. The per-VM egress tap / DNS proxy programming, the fork ops
-// (ForkSnapshot / workspace dehydrate-hydrate) keyed by vmID, and spawning a
-// second VM by CoW-restoring from a live parent are DEFERRED to a later increment
-// (they need the per-VM networking and real-Firecracker spawn wiring, provable
-// only on the KVM firecracker-test suite). This increment proves the state
-// machine and multiplexing, not the second real Firecracker process.
+// Increment 2 scope: the map-based state-machine multiplexing proven with the
+// mock VMM: two distinct vmIDs each Prepare -> Dormant -> Activate -> Active
+// independently, Close one without disturbing the other, Metering reports every
+// active VM. This increment proved the state machine, not a second real
+// Firecracker process.
+//
+// Increment L1.4 scope (this file): activateInstance now programs each vmID's
+// OWN in-pod egress filter on a DISTINCT tap + guest IP + gateway + MAC derived
+// deterministically from the vmID (deriveVMNetwork / netconf.DeriveInPodSecondaryLink),
+// mirroring the single-VM Activate's networking but keyed per instance, so two
+// real Firecracker VMs sharing one pod netns never collide on a tap or IP and
+// their egress cannot cross. Combined with deriveVMConfig's per-VM socket/workdir
+// this lets a REAL second Firecracker come up in the pod. The single-VM path in
+// stub.go is byte-for-byte unchanged, and no production caller sets MultiVM (the
+// controller is not wired), so nothing shipped changes.
+//
+// DEFERRED to L1.4b (kept out of this reviewable PR): the per-VM DNS-proxy
+// fan-out (several VMs cannot share one ResolverIP:53 listener, so multi-VM
+// egress here is IP-allowlist only and name-based egress is off), the fork ops
+// (ForkSnapshot / workspace dehydrate-hydrate) keyed by vmID, and a real
+// two-tap-in-one-netns nftables egress-isolation integration test on KVM.
 
 // instanceFor returns the per-VM instance for id. It holds s.mu ONLY for the map
 // lookup (and, when create is true, the first-use insert), then releases it, so
@@ -101,6 +116,39 @@ func (s *Stub) deriveVMConfig(id vmID) firecracker.VMConfig {
 		cfg.SocketPath = filepath.Join(cfg.WorkDir, "firecracker.sock")
 	}
 	return cfg
+}
+
+// deriveVMNetwork returns the per-VM network identity activateInstance programs
+// for one vmID in a multi-VM pod. The default (primary) VM keeps the pod's base
+// guest IP, gateway, and MAC, so a multi-VM pod's primary VM programs the same
+// link the single-VM path would. Every OTHER vmID is placed on its OWN /30
+// point-to-point link within the pod netns, derived deterministically from the
+// vmID (netconf.DeriveInPodSecondaryLink), so two VMs in one pod never share a
+// guest IP, gateway, MAC, or (since the tap derives from the guest IP) tap, and
+// their egress cannot cross. A nil base (the caller programs no networking, e.g.
+// the unit path) is returned unchanged.
+//
+// The returned value is always a COPY; the caller's req.Network is never mutated.
+// ResolverIP is cleared for EVERY VM because the per-VM DNS-proxy fan-out is
+// deferred to L1.4b: several VMs cannot share one ResolverIP:53 listener, so
+// multi-VM egress is IP-allowlist only and no VM is pointed at a resolver that
+// has no proxy behind it (fail-closed for name-based egress).
+func deriveVMNetwork(id vmID, base *vsock.NotifyForkedNetwork) *vsock.NotifyForkedNetwork {
+	if base == nil {
+		return nil
+	}
+	n := *base
+	n.ResolverIP = ""
+	if id == defaultVMID {
+		return &n
+	}
+	guest, gateway, mac := netconf.DeriveInPodSecondaryLink(string(id))
+	n.GuestIP = guest.String()
+	n.GatewayIP = gateway.String()
+	n.GuestMAC = mac
+	// A secondary in-pod link is a /30 point-to-point block.
+	n.PrefixLen = 30
+	return &n
 }
 
 // prepareInstance brings up a DORMANT Firecracker VMM for one vmID and records it
@@ -208,10 +256,12 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID) error {
 // first VM's state. Fail closed: any step failing returns OK=false and leaves the
 // instance NOT active.
 //
-// The per-VM in-pod egress filter + DNS proxy (which the single-VM Activate
-// programs) are DEFERRED for multi-VM to a later increment: several VMs sharing
-// the pod netns need a per-VM tap fan-out that this state-machine increment does
-// not build. No production caller runs multi-VM yet, so nothing regresses.
+// The per-VM in-pod egress filter runs here (L1.4): each vmID's VM comes up on
+// its OWN tap + guest IP + gateway derived from the vmID (deriveVMNetwork), and
+// the snapshot's baked NIC is remapped to that per-VM tap, mirroring the
+// single-VM Activate but keyed per instance so two VMs in one pod netns never
+// collide. The per-VM DNS-proxy fan-out is DEFERRED to L1.4b: several VMs cannot
+// share one ResolverIP:53 listener, so multi-VM egress is IP-allowlist only.
 func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateRequest) (ActivateResult, error) {
 	if err := checkVMID(id); err != nil {
 		return ActivateResult{OK: false, Error: err.Error()}, err
@@ -264,9 +314,42 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		}
 	}
 
+	// Per-VM in-pod egress filter. Derive this vmID's OWN /30 (deriveVMNetwork:
+	// the primary VM keeps the base link, every secondary gets a distinct guest
+	// IP + gateway + MAC + tap), then create the tap and install its default-deny
+	// egress chain BEFORE the snapshot load, exactly as the single-VM Activate
+	// does: Firecracker requires the host tap to exist at restore time and the
+	// baked NIC is remapped to it. Binding the baked NIC to THIS VM's tap keeps
+	// the filter and the NIC remap in agreement without a shared allocator. FAIL
+	// CLOSED: a filter error means the VM would have unfiltered egress (or a NIC
+	// with no backing tap), so it is never loaded. The guest IP and tap carry no
+	// secrets. DNS-proxy fan-out is deferred (L1.4b), so no ResolverIP is bound.
+	perNet := deriveVMNetwork(id, req.Network)
+	overrides := req.NetworkOverrides
+	if s.netRunner != nil && perNet != nil {
+		tap := netconf.DeriveTapName(perNet.GuestIP)
+		// Multi-VM leaves ResolverIP unset (the per-VM DNS proxy fan-out is a later
+		// increment); the shared policy fields come from netfilterPolicyConfig.
+		cfg := netfilterPolicyConfig(req)
+		cfg.Tap = tap
+		cfg.GuestIP = net.ParseIP(perNet.GuestIP)
+		cfg.HostIP = net.ParseIP(perNet.GatewayIP)
+		if err := applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
+			werr := fmt.Errorf("husk: apply in-pod egress filter for vm %q: %w", id, err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+		// Pin the baked NIC to THIS VM's tap so the restored VM's NIC is backed by
+		// the tap the filter just created and governed by its egress chain.
+		overrides = []firecracker.NetworkOverride{{
+			IfaceID:     firecracker.NetIfaceID,
+			HostDevName: tap,
+		}}
+		inst.activeTap = tap
+	}
+
 	// Load PAUSED so the rootfs drive can be rebound before the guest runs, then
 	// resume explicitly, exactly as the single-VM path does.
-	if err := inst.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, req.NetworkOverrides); err != nil {
+	if err := inst.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
 		werr := fmt.Errorf("husk: load snapshot from %s for vm %q: %w", req.SnapshotDir, id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
@@ -296,7 +379,12 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
 	inst.generation++
-	if err := s.notify(vsockPath, inst.generation, entropy, req); err != nil {
+	// Deliver THIS VM's derived network (its own guest IP + gateway + MAC) to the
+	// guest so it re-addresses eth0 onto the /30 the host-side filter programs,
+	// keeping the guest address and the tap/masquerade in agreement per instance.
+	notifyReq := req
+	notifyReq.Network = perNet
+	if err := s.notify(vsockPath, inst.generation, entropy, notifyReq); err != nil {
 		werr := fmt.Errorf("husk: fork-correctness handshake failed for vm %q: %w", id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
