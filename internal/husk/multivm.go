@@ -405,6 +405,54 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	}, nil
 }
 
+// SpawnVM brings up an ADDITIONAL same-tenant VM (a new vmID) in a running husk
+// pod: it prepares a dormant per-VM Firecracker for req.VMID then activates it
+// from req.Activate, returning the activated guest's vsock path. It is the server
+// side of the spawn-vm control op (netcontrol.go OpSpawnVM).
+//
+// It FAILS CLOSED on the flag: a stub NOT started with --multi-vm refuses to spawn
+// a VM. The single-VM path owns exactly ONE VM and must never be driven to host a
+// second, so a spawn-vm misdirected at a single-VM pod is rejected here rather
+// than silently starting a second Firecracker. The vmID is validated with
+// checkVMID before any path is derived from it (an unsafe or empty id is refused
+// up front, before prepareInstance touches the filesystem). Any prepare or
+// activate failure returns OK=false with actionable text and leaves no
+// half-spawned VM active; prepareInstance and activateInstance are each
+// fail-closed per instance and never disturb a sibling.
+//
+// req.Activate carries the same activation inputs a plain Activate takes,
+// including SECRETS (Secrets, Token); those ride the mTLS control channel and are
+// NEVER logged here.
+func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
+	if !s.multiVM {
+		return SpawnVMResult{
+			OK:    false,
+			VMID:  req.VMID,
+			Error: "husk: spawn-vm refused: this pod is not running in multi-VM mode",
+		}
+	}
+	id := vmID(req.VMID)
+	if err := checkVMID(id); err != nil {
+		return SpawnVMResult{OK: false, VMID: req.VMID, Error: err.Error()}
+	}
+	if err := s.prepareInstance(ctx, id); err != nil {
+		return SpawnVMResult{
+			OK:    false,
+			VMID:  req.VMID,
+			Error: fmt.Errorf("husk: spawn-vm prepare vm %q: %w", req.VMID, err).Error(),
+		}
+	}
+	res, _ := s.activateInstance(ctx, id, req.Activate)
+	return SpawnVMResult{
+		OK:            res.OK,
+		VMID:          req.VMID,
+		VsockPath:     res.VsockPath,
+		LatencyMs:     res.LatencyMs,
+		Error:         res.Error,
+		AlreadyActive: res.AlreadyActive,
+	}
+}
+
 // closeInstance tears down ONE per-VM instance's VMM and per-activation artifacts
 // and returns it to StateNew, leaving every sibling instance untouched. It is the
 // per-VM analog of the single-VM Close: closing one VM in the pod must never take

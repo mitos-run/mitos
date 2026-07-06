@@ -128,6 +128,16 @@ func (s *fakeHuskServer) handle(conn net.Conn) {
 		s.calls++
 		s.mu.Unlock()
 		_ = husk.WriteForkSnapshotResult(conn, husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir, LatencyMs: 2.0})
+	case husk.OpSpawnVM:
+		req, rerr := husk.ReadSpawnVMRequestReader(br)
+		if rerr != nil {
+			return
+		}
+		s.mu.Lock()
+		s.calls++
+		s.gotSecret = req.Activate.Secrets["API_KEY"]
+		s.mu.Unlock()
+		_ = husk.WriteSpawnVMResult(conn, husk.SpawnVMResult{OK: true, VMID: req.VMID, VsockPath: "/run/husk/" + req.VMID + "/vsock.sock", LatencyMs: 3.0})
 	default:
 		req, rerr := husk.ReadActivateRequestReader(br)
 		if rerr != nil {
@@ -189,6 +199,46 @@ func TestForkSnapshotOnHuskRefusesWithoutTLS(t *testing.T) {
 	_, err := ForkSnapshotOnHusk(context.Background(), "127.0.0.1:1", nil, husk.ForkSnapshotRequest{ForkID: "f", SnapshotDir: "/d"})
 	if err == nil {
 		t.Fatalf("ForkSnapshotOnHusk must refuse a nil TLS config")
+	}
+}
+
+func TestSpawnVMOnHuskRoundTrip(t *testing.T) {
+	p := newHuskClientPKI(t)
+	s := newFakeHuskServer(t, p)
+	defer s.stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	res, err := SpawnVMOnHusk(ctx, s.addr, p.clientConf, husk.SpawnVMRequest{
+		VMID: "fork-7",
+		Activate: husk.ActivateRequest{
+			SnapshotDir: "/var/lib/mitos/forks/fork-7",
+			Secrets:     map[string]string{"API_KEY": "s3cr3t-value"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SpawnVMOnHusk: %v", err)
+	}
+	if !res.OK || res.VMID != "fork-7" || res.VsockPath != "/run/husk/fork-7/vsock.sock" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	// The spawn-vm request carried its activation secret over mTLS.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gotSecret != "s3cr3t-value" {
+		t.Fatalf("husk did not receive the spawn-vm activation secret over mTLS")
+	}
+}
+
+func TestSpawnVMOnHuskRefusesWithoutTLS(t *testing.T) {
+	// A nil TLS config must be refused so the activation secrets a spawn-vm carries
+	// never ride an unauthenticated channel; no dial is attempted.
+	_, err := SpawnVMOnHusk(context.Background(), "127.0.0.1:1", nil, husk.SpawnVMRequest{
+		VMID:     "fork-7",
+		Activate: husk.ActivateRequest{Secrets: map[string]string{"API_KEY": "leak-me"}},
+	})
+	if err == nil {
+		t.Fatalf("SpawnVMOnHusk must refuse a nil TLS config")
 	}
 }
 
