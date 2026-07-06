@@ -22,6 +22,12 @@ name: Bench (bare metal)
 
 on:
   workflow_dispatch:
+    inputs:
+      density_forks:
+        description: "Space-separated fork counts for the CoW density sweep (dispatch only; empty skips the sweep)"
+        required: false
+        type: string
+        default: "16 64"
   push:
     branches: [main]
     paths:
@@ -219,6 +225,11 @@ jobs:
       # the GATE: a crash or zero samples fails the job. We do NOT mask it and we
       # do NOT gate on any latency threshold.
       - name: Run bench harness (fork-exec, exec-rt, metering)
+        env:
+          # Pass the dispatch input as DATA via the environment, never interpolated
+          # into the script text, so a workflow_dispatch value cannot inject shell
+          # onto the bare-metal runner. Validated to digits-and-spaces below.
+          DENSITY_FORKS: ${{ github.event.inputs.density_forks }}
         run: |
           set -euo pipefail
           TPL=bench
@@ -282,6 +293,52 @@ jobs:
             cat "$RUN_DIR/bench-metering.out"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # CoW density SWEEP (dispatch only): fork at each N in density_forks and
+          # trace per-fork unique (private-dirty) as N grows. The ceiling-breaking
+          # property is that per-fork MemoryUnique stays roughly FLAT as N grows,
+          # proving the shared template pages are mapped once and a swarm's marginal
+          # cost is only its private-dirty set. This is the evidence gate for the
+          # multi-VMs-per-pod density work (mitos-run/mitos #764).
+          SWEEP="${DENSITY_FORKS:-}"
+          # Defense in depth: reject anything but digits and spaces so the values
+          # can only ever be fork counts, never shell.
+          if [ -n "$SWEEP" ] && printf '%s' "$SWEEP" | grep -qvE '^[0-9 ]+$'; then
+            echo "density_forks must be space-separated integers, got: $SWEEP" >&2
+            exit 1
+          fi
+          if [ -n "$SWEEP" ]; then
+            {
+              echo ""
+              echo "### CoW density sweep (per-fork private-dirty vs N)"
+              echo ""
+              echo "| forks (N) | UsedCoWAware | UsedNaive | CoWSavings | per-fork MemoryUnique |"
+              echo "| --- | --- | --- | --- | --- |"
+            } >> "$GITHUB_STEP_SUMMARY"
+            for N in $SWEEP; do
+              echo "================================"
+              echo "  bench --mode metering --forks $N (density sweep)"
+              echo "================================"
+              OUT="$RUN_DIR/bench-metering-$N.out"
+              JSON="$RUN_DIR/bench-metering-$N.json"
+              "$RUN_DIR/bench" \
+                --mode metering \
+                --template "$TPL" \
+                --data-dir "$BENCH_DATA" \
+                --firecracker "$FIRECRACKER" \
+                --kernel "$KERNEL" \
+                --forks "$N" --settle-ms 800 \
+                --summary --json "$JSON" | tee "$OUT"
+              # Pull byte counts for the summary. UsedCoWAware/UsedNaive/CoWSavings
+              # are top-level Report fields; per-fork unique lives only in
+              # Sandboxes[].MemoryUnique, so average it across the forks (it is flat
+              # by design, so the mean is the representative marginal cost).
+              jq -r --arg n "$N" '
+                (.Sandboxes | map(.MemoryUnique)) as $u |
+                "| \($n) | \(.UsedCoWAware) | \(.UsedNaive) | \(.CoWSavings) | \(if ($u|length) > 0 then (($u|add) / ($u|length) | floor) else "?" end) |"
+              ' "$JSON" >> "$GITHUB_STEP_SUMMARY" || echo "| $N | (json parse failed, see step log) | | | |" >> "$GITHUB_STEP_SUMMARY"
+            done
+          fi
 
           echo "================================"
           echo "  Bench harness ran (bare-metal reference numbers above)"
