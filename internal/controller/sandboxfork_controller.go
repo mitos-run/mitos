@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/husk"
@@ -35,15 +36,78 @@ type huskForkSnapshotRemover func(ctx context.Context, addr string, tlsConf *tls
 // Nil defaults to SpawnVMOnHusk; tests inject a fake.
 type huskVMSpawner func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error)
 
-// maxCoLocatedForkVMsPerPod is the CONSERVATIVE L1.7a cap on how many fork-child
-// VMs the MultiVMFork routing co-locates INSIDE one source pod before it spills
-// the remaining children back to the safe new-pod path (buildForkChildPod). It is
-// a hardcoded stand-in for the real per-pod and node MEMORY ACCOUNTING that is
-// deferred to L1.7b (guarantee A: account each added VM against a per-pod and node
-// budget, then pend or spill when the pod is full so a fork never overcommits).
-// Until that lands, the fixed cap keeps a fork from stacking an unbounded number
-// of VMs on one host pod's memory.
-const maxCoLocatedForkVMsPerPod = 4
+// coLocatedForkVMBudget reports how many ADDITIONAL fork-child VMs the MultiVMFork
+// routing may safely co-locate INSIDE the source pod alongside the source VM
+// already resident there (L1.7b, guarantee A: a fork never overcommits a pod).
+//
+// The reservation is safe at the CoW WORST case, not the CoW-typical case. A
+// co-located VM shares the parent memory image copy-on-write, so its TYPICAL
+// resident cost is only its private-dirty set (a few MiB). But it MAY dirty up to
+// its whole guest RAM, and memory is non-compressible: if the co-located guests
+// together dirty more than the pod's cgroup memory limit, a sibling OOM-kills a
+// sibling (the user's own live work). So each VM (the source plus every co-located
+// child) is reserved its FULL guest-memory footprint, not the tiny shared-page
+// floor. The honest per-VM guest RAM is the pod's memory REQUEST (Requests[memory],
+// the same no-overcommit defaultHuskMemory-class figure a new husk pod requests);
+// the hard ceiling is the pod's memory LIMIT (Limits[memory], the memory.max the
+// kubelet enforces). The pod therefore holds at most floor(limit / perVM) VMs
+// before a sibling would OOM a sibling. One slot is reserved for the source VM, so
+// the co-location budget is floor(limit / perVM) - 1, floored at 0. A budget of 0
+// means every fork child spills to a new pod.
+//
+// When the source pod does not declare BOTH a memory request and a memory limit on
+// its husk container (a malformed or resource-free pod), the budget is 0: with no
+// provable pod ceiling the fork co-locates nothing and every child spills to a new
+// pod, the conservative safe-at-worst-case default. Real husk pods always carry
+// both (buildHuskPod sets Requests[memory] and Limits[memory]).
+//
+// This replaces the former hardcoded co-location count. It governs the per-pod
+// dimension of guarantee A. The node budget is already honored by the spill path:
+// a spilled child takes buildForkChildPod, which the node scheduler and the
+// capacity-admission gate account honestly, so a fork that cannot fit the node
+// pends there exactly as an independent claim does. The node-level spill-vs-pend
+// refinement for the co-located dimension is deferred to a follow-up increment.
+//
+// SCOPE, and the honest limit today: this budget is computed PER FORK reconcile
+// from the source pod's static resources. It does NOT yet subtract co-located VMs
+// that OTHER SandboxForks targeting the SAME source pod have already placed there,
+// so N concurrent forks of one source can each independently admit up to this
+// budget and over-admit VMs into the pod. The NODE is still not overcommitted:
+// the pod's cgroup memory LIMIT is a hard ceiling the node scheduler already
+// reserved, so an over-admission is caught INSIDE the pod (a co-located guest that
+// would exceed memory.max is OOM-killed, fail-closed at the pod boundary) rather
+// than as a node overcommit. What is missing is a cross-fork SHARED RESERVATION or
+// live-occupancy check so an over-budget co-located child cleanly SPILLS to a new
+// pod instead of risking an intra-pod OOM under concurrent same-source forks. That
+// shared reservation (a race-free occupancy count across forks) is a tracked
+// follow-up; until it lands, guarantee A's per-pod dimension is enforced per fork,
+// not across concurrent forks of one source.
+func coLocatedForkVMBudget(pod *corev1.Pod) int {
+	if pod == nil {
+		return 0
+	}
+	var perVM, limit resource.Quantity
+	found := false
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		if c.Name != huskContainerName {
+			continue
+		}
+		perVM = c.Resources.Requests[corev1.ResourceMemory]
+		limit = c.Resources.Limits[corev1.ResourceMemory]
+		found = true
+		break
+	}
+	if !found || perVM.IsZero() || limit.IsZero() {
+		return 0
+	}
+	total := limit.Value() / perVM.Value()
+	coLocated := total - 1
+	if coLocated < 0 {
+		return 0
+	}
+	return int(coLocated)
+}
 
 // huskMultiVMLabel marks a husk pod whose stub was started with --multi-vm, so the
 // controller may drive a spawn-vm op against it (bring up an ADDITIONAL same-tenant
@@ -521,6 +585,15 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	// silent, safe fallback the design requires.
 	spawnInSourcePod := r.multiVMForkEnabled() && huskPodMultiVMCapable(srcPod)
 
+	// Per-pod memory budget for co-located fork VMs (L1.7b, guarantee A), computed
+	// ONCE for the whole fan-out from the source pod's ACTUAL memory accounting: the
+	// pod holds only floor(memory.max / per-VM guest RAM) VMs safely at the CoW
+	// worst case, one slot reserved for the source VM already resident in the pod.
+	// The first coLocationBudget children co-locate as ADDITIONAL VMs in the source
+	// pod; every child past the budget spills to a new pod so a fork never
+	// overcommits the pod. This replaces the former hardcoded co-location count.
+	coLocationBudget := coLocatedForkVMBudget(srcPod)
+
 	// One fork snapshot per SandboxFork, keyed by the fork name, taken EXACTLY
 	// ONCE and reused for every child across reconcile passes. Children take
 	// several passes to reach Ready; re-snapshotting on each pass would re-pause
@@ -666,15 +739,16 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 			continue
 		}
 
-		// MultiVMFork routing: for the first maxCoLocatedForkVMsPerPod slots of a
+		// MultiVMFork routing: for the first coLocationBudget slots of a
 		// multi-VM-capable source, spawn the child as an ADDITIONAL VM INSIDE the
 		// source pod (spawn-vm op) instead of creating a brand-new child pod. Slots
-		// past the cap fall through to the new-pod path below, the conservative
-		// L1.7a stand-in for the real per-pod/node memory accounting deferred to
-		// L1.7b. When the flag is off or the source is not multi-VM capable
-		// (spawnInSourcePod is false), this branch is never entered and the path
-		// below is byte-for-byte unchanged.
-		if spawnInSourcePod && i < maxCoLocatedForkVMsPerPod {
+		// past the per-pod memory budget fall through to the new-pod path below,
+		// which spills the child to a fresh, honestly node-scheduled pod so a fork
+		// never overcommits the source pod (L1.7b, guarantee A). When the flag is off
+		// or the source is not multi-VM capable (spawnInSourcePod is false), or the
+		// budget is 0, this branch is never entered and the path below is
+		// byte-for-byte unchanged.
+		if spawnInSourcePod && int(i) < coLocationBudget {
 			spawnedChild, ok := r.spawnForkChildInSourcePod(ctx, spawnForkChildArgs{
 				fork:        fork,
 				srcPod:      srcPod,

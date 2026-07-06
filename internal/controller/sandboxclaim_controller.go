@@ -122,12 +122,13 @@ type SandboxReconciler struct {
 	// SOURCE pod (SpawnVMOnHusk) instead of a brand-new child pod, when the source
 	// pod is multi-VM capable. EXPERIMENTAL, DEFAULT OFF: off is byte-for-byte the
 	// buildForkChildPod new-pod path, so nothing changes unless an operator opts in
-	// AND the source pod runs a --multi-vm husk stub (huskPodMultiVMCapable). This
-	// increment (L1.7a) is the routing + status wiring + the flag; the per-pod and
-	// node MEMORY ACCOUNTING that lets a fork pend or spill when a pod is full is
-	// deferred to L1.7b, so co-location is gated here at a small fixed cap
-	// (maxCoLocatedForkVMsPerPod) with the remainder spilled to new pods. Only used
-	// when EnableHuskPods is true.
+	// AND the source pod runs a --multi-vm husk stub (huskPodMultiVMCapable).
+	// Co-location is gated by the per-pod MEMORY ACCOUNTING (L1.7b, guarantee A,
+	// coLocatedForkVMBudget): a child co-locates only while the source pod's memory
+	// budget (floor(memory.max / per-VM guest RAM) minus the source VM's own slot)
+	// has room at the CoW worst case, and every child past the budget spills to a
+	// new pod so a fork never overcommits the pod. Only used when EnableHuskPods is
+	// true.
 	MultiVMFork bool
 
 	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
