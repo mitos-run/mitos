@@ -95,11 +95,21 @@ func envelopeFor(err error) apierr.Error {
 	case errors.Is(err, ErrRateLimited):
 		return apierr.Get(apierr.CodeRateLimited).
 			WithCause("the organization or source IP exceeded its request rate")
-	case errors.Is(err, ErrConcurrencyExceeded),
-		errors.Is(err, ErrAggregateExceeded),
-		errors.Is(err, ErrSandboxTooLarge):
+	case errors.Is(err, ErrConcurrencyExceeded):
+		// The most common denial: a create or a fork(n) that would push the org
+		// past its plan's concurrent-sandbox cap (each fork child counts). Name a
+		// concrete way forward so the caller is not at a dead end.
 		return apierr.Get(apierr.CodeQuotaExceeded).
-			WithCause("the organization exceeded a hosted-plan quota")
+			WithCause("the organization is already running the maximum number of concurrent sandboxes its plan allows").
+			WithRemediation("Terminate a running sandbox to free a slot (GET /v1/sandboxes lists them; DELETE /v1/sandboxes/<id> frees one), or upgrade the organization's plan for a higher concurrency limit. A fork counts each child against this limit, so fork fewer children or raise the limit.")
+	case errors.Is(err, ErrAggregateExceeded):
+		return apierr.Get(apierr.CodeQuotaExceeded).
+			WithCause("the organization's running sandboxes would exceed its plan's aggregate resource limit").
+			WithRemediation("Terminate a running sandbox to free resources, or upgrade the organization's plan for a higher aggregate limit.")
+	case errors.Is(err, ErrSandboxTooLarge):
+		return apierr.Get(apierr.CodeQuotaExceeded).
+			WithCause("the requested sandbox size exceeds the largest the organization's plan permits").
+			WithRemediation("Request a smaller sandbox (fewer vCPUs or less memory), or upgrade the organization's plan for larger sandboxes.")
 	default:
 		return apierr.Get(apierr.CodeQuotaExceeded).
 			WithCause("the organization quota check denied the request")
