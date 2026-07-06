@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/firecracker"
@@ -67,7 +68,7 @@ type vmID string
 // gives the scaffold instances map a stable key for the one VM a husk pod holds
 // today, so increment 2 of #764 has a well-defined slot to migrate the single-VM
 // state into. The single-VM code path does not use it.
-const defaultVMID vmID = "default"
+const defaultVMID vmID = v1.DefaultVMID
 
 // vmInstance holds the per-VM lifecycle state of one microVM: its lifecycle
 // State, the VMM handle, the fork generation counter, and the per-activation
