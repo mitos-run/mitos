@@ -222,15 +222,20 @@ func readLineReader(r *bufio.Reader, v interface{}) error {
 // ForkSnapshotRequest asks a husk stub holding a RUNNING (active) VM to snapshot
 // that VM in place: pause it, write a Full Firecracker snapshot to SnapshotDir
 // (mem + vmstate, the same layout the fork engine and the activate path use),
-// then resume it unless PauseSource is set. The result snapshot is the restore
-// image the controller activates N independent CHILD husk pods from, so a husk
-// sandbox can be live-forked even though forkd's engine does not own its VM.
+// freeze the source rootfs to SnapshotDir/rootfs.ext4, then resume it. The result
+// snapshot is the restore image the controller activates N independent CHILD husk
+// pods from, so a husk sandbox can be live-forked even though forkd's engine does
+// not own its VM.
 //
 // ForkID is the node-local fork identifier the controller mints (the SandboxFork
 // child group); it is a content/address-like value, never a secret, and is the
 // directory leaf under the node forks dir. SnapshotDir is the in-pod path the
-// node forks dir is mounted at for THIS fork; the stub writes SnapshotDir/mem
-// and SnapshotDir/vmstate.
+// node forks dir is mounted at for THIS fork; the stub writes SnapshotDir/mem,
+// SnapshotDir/vmstate, and SnapshotDir/rootfs.ext4.
+//
+// PauseSource is a compatibility field. The pause is always internal to the
+// checkpoint and the source is always resumed afterward, so PauseSource no longer
+// leaves the source stopped (leaving it paused was the v1.24.1 production bug).
 type ForkSnapshotRequest struct {
 	ForkID      string `json:"fork_id"`
 	SnapshotDir string `json:"snapshot_dir"`
@@ -238,10 +243,13 @@ type ForkSnapshotRequest struct {
 }
 
 // ForkSnapshotResult is the control reply for a ForkSnapshot op. OK is true only
-// when the VM paused, the snapshot was written, and (unless PauseSource) the VM
-// resumed. SnapshotDir echoes where the snapshot was written (it carries no
-// secret). Error carries actionable remediation text when OK is false; it never
-// carries secrets.
+// when the VM paused, the snapshot was written, the source rootfs was frozen IF a
+// per-activation rootfs clone exists, and the VM resumed. The freeze is
+// CONDITIONAL: ForkSnapshot skips it when the stub has no on-disk rootfs clone
+// (the mock/CI paths) and still returns OK=true, so OK=true means paused +
+// snapshot written + (rootfs frozen only when a clone path exists) + resumed.
+// SnapshotDir echoes where the snapshot was written (it carries no secret). Error
+// carries actionable remediation text when OK is false; it never carries secrets.
 type ForkSnapshotResult struct {
 	OK          bool    `json:"ok"`
 	SnapshotDir string  `json:"snapshot_dir,omitempty"`

@@ -365,9 +365,13 @@ the controller identity only: `internal/husk.ServeTLS` plus
 `AuthorizeControllerIdentity`; the op rides the same op-dispatched channel that
 delivers secrets on activate). The op carries NO secrets (a fork id and a
 node-local snapshot path). The stub pauses the running VM, writes a Full
-Firecracker snapshot to a node hostPath `<dataDir>/forks/<fork-id>` (read-write
-only to the source pod that owns the VM; read-only to the child pods on the SAME
-node), then resumes the source unless `pauseSource`. The fork snapshot is a LIVE,
+Firecracker snapshot plus a frozen point-in-time copy of the source rootfs to a
+node hostPath `<dataDir>/forks/<fork-id>` (read-write only to the source pod that
+owns the VM; read-only to the child pods on the SAME node), then ALWAYS resumes
+the source (the `pauseSource` field no longer leaves it paused: leaving it paused
+was the v1.24.1 bug that hung a post-fork exec against the source for 30s; the
+frozen rootfs is what keeps the children consistent once the source resumes and
+mutates its own disk). The fork snapshot is a LIVE,
 EPHEMERAL artifact created by a trusted node-local stub and consumed by child
 stubs on the same node within the same trust boundary; it is NOT content-addressed,
 so the children activate it with verify disabled (`--allow-unverified-snapshots`),
@@ -377,8 +381,9 @@ does not exist for a live fork. The child still runs the full fail-closed RNG/cl
 reseed handshake (see `docs/fork-correctness.md`, husk fork children). Per-child
 independence: each child is its own husk pod + dormant VMM + per-activation rootfs
 CoW clone, so guest writes never cross between children or back to the source; the
-children share only the read-only fork snapshot mem+vmstate as a restore image,
-exactly as warm pods share the template snapshot. Each child mints its OWN bearer
+children share only the read-only fork snapshot (mem+vmstate plus the frozen
+source rootfs) as a restore image, exactly as warm pods share the template
+snapshot. Each child mints its OWN bearer
 token (the source's token never opens a child). Lifecycle: the fork snapshot is
 owned by the forking `Sandbox` and removed by its finalizer (`RemoveForkSnapshot` op)
 on delete; the child pods are owner-ref'd to the fork and reaped by Kubernetes GC.

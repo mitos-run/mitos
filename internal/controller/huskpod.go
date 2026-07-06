@@ -147,15 +147,18 @@ const (
 // claim reconciler threads this into the activate request.
 const HuskSnapshotDir = huskSnapshotMountPath
 
-// huskSourceRootfsInPodPath returns the IN-POD path a fork child clones the
-// SOURCE sandbox's live rootfs from. The source pod wrote its own per-activation
-// rootfs clone at <huskRootfsCoWMountPath>/<source-pod-name>/rootfs.ext4 under
-// the shared husk-rootfs hostPath dir; the fork child mounts that SAME dir, so
-// the source pod's rootfs is visible to it at this path. This is the rootfs the
-// fork snapshot's vmstate was baked against, so the child's CoW clone source
-// must be it (not the pristine template rootfs).
-func huskSourceRootfsInPodPath(sourcePodName string) string {
-	return filepath.Join(huskRootfsCoWMountPath, sourcePodName, "rootfs.ext4")
+// huskForkRootfsInPodPath returns the IN-POD path a fork child clones its rootfs
+// from: the FROZEN source rootfs the source stub captured INSIDE the fork
+// snapshot's paused window, written next to mem+vmstate at
+// SnapshotDir/rootfs.ext4 and mounted read-only at huskSnapshotMountPath in the
+// child. It is a point-in-time copy paired with the memory checkpoint, so the
+// child's restored guest memory (page cache, ext4 superblock, in-flight metadata)
+// matches the disk exactly. Cloning from the source's LIVE rootfs instead would
+// let a resumed source drift the disk out of sync with the checkpoint; cloning
+// from the pristine template rootfs would lose every write the source made. The
+// frozen copy avoids both.
+func huskForkRootfsInPodPath() string {
+	return filepath.Join(huskSnapshotMountPath, "rootfs.ext4")
 }
 
 // HuskPodOptions configures the husk pod spec the controller emits.
@@ -206,20 +209,20 @@ type HuskPodOptions struct {
 	// source sandbox's node). Required when ForkSnapshotID is set, since the fork
 	// snapshot is a node-local hostPath that exists only on that node.
 	ForkSourceNode string
-	// ForkSourceRootfsPath, set on a FORK CHILD, is the IN-POD path of the SOURCE
-	// sandbox's live rootfs that the child's per-activation CoW clone is made from.
-	// It is the source pod's own per-activation rootfs clone, exposed to the child
-	// through the shared husk-rootfs hostPath dir at
-	// <huskRootfsCoWMountPath>/<source-pod-name>/rootfs.ext4. This is load-bearing
-	// for fork correctness: the fork snapshot's vmstate was baked against the
-	// SOURCE's rootfs (path_on_host), so the child's restored guest memory (page
-	// cache, ext4 superblock, in-flight metadata) reflects the SOURCE disk. Cloning
-	// from the PRISTINE TEMPLATE rootfs instead (the bug) rebinds the child to a
-	// disk that does not match its memory: any data the source wrote since boot is
-	// lost and the cached-vs-on-disk mismatch can corrupt the child fs. When set,
-	// it replaces the template rootfs as the clone SOURCE; each child still writes
-	// its OWN per-activation clone (independence), only the clone source changes.
-	// Empty (a warm pod, not a fork child) clones from the template rootfs.
+	// ForkSourceRootfsPath, set on a FORK CHILD, is the IN-POD path of the FROZEN
+	// source rootfs the child's per-activation CoW clone is made from. The source
+	// stub captured it inside the fork snapshot's paused window at
+	// SnapshotDir/rootfs.ext4, mounted read-only at huskSnapshotMountPath in the
+	// child (huskForkRootfsInPodPath). This is load-bearing for fork correctness:
+	// the fork snapshot's vmstate was baked against the source's rootfs, so the
+	// child's restored guest memory (page cache, ext4 superblock, in-flight
+	// metadata) must pair with a disk captured at the SAME instant. The frozen copy
+	// is that instant. Cloning from the source's LIVE rootfs would let the resumed
+	// source drift the disk out of sync with the checkpoint; cloning from the
+	// PRISTINE TEMPLATE rootfs would lose every write the source made. Each child
+	// still writes its OWN per-activation clone (independence); only the clone
+	// source changes. Empty (a warm pod, not a fork child) clones from the template
+	// rootfs.
 	ForkSourceRootfsPath string
 	// SnapshotNodes is the set of node hostnames the pool has materialized the
 	// template snapshot on (the registry's NodesWithTemplate). When non-empty the
@@ -658,12 +661,14 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 
 		// The clone SOURCE for this pod's per-activation rootfs CoW. A WARM pod
 		// clones from the template rootfs (a fresh boot-time disk). A FORK CHILD
-		// must clone from the SOURCE sandbox's LIVE rootfs instead: the fork
-		// snapshot's vmstate was baked against the source's rootfs, so the child's
-		// restored guest memory reflects the SOURCE disk; cloning from the template
-		// would rebind the child to a disk that does not match its memory (silent
-		// data divergence / fs corruption). ForkSourceRootfsPath is the in-pod path
-		// of the source pod's rootfs (exposed through the shared husk-rootfs dir).
+		// must clone from the FROZEN source rootfs the source stub captured inside
+		// the fork snapshot's paused window instead: the fork snapshot's vmstate was
+		// baked against the source's rootfs at that instant, so the child's restored
+		// guest memory pairs with that exact disk; cloning from the template would
+		// rebind the child to a disk that does not match its memory (silent data
+		// divergence / fs corruption). ForkSourceRootfsPath is the in-pod path of
+		// the frozen rootfs (SnapshotDir/rootfs.ext4, on the read-only snapshot
+		// mount the child also restores mem+vmstate from).
 		cloneSourceRootfs := filepath.Join(templateDir, "rootfs.ext4")
 		if opts.ForkSourceRootfsPath != "" {
 			cloneSourceRootfs = opts.ForkSourceRootfsPath
