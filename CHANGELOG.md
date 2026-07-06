@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.25.0](https://github.com/mitos-run/mitos/compare/v1.24.2...v1.25.0) (2026-07-06)
+
+
+### Features
+
+* **husk:** host two same-tenant VMs in one stub behind the multi-vm flag ([#772](https://github.com/mitos-run/mitos/issues/772)) ([380b520](https://github.com/mitos-run/mitos/commit/380b520db443ef4f239ceb556027d9a37f3559e9))
+
+
+### Bug Fixes
+
+* **controller:** fork child inherits the source pool network, egress, and resources ([#769](https://github.com/mitos-run/mitos/issues/769)) ([1bfe0b5](https://github.com/mitos-run/mitos/commit/1bfe0b5a05fa21504a27e70f6279a8a11dfa47d4))
+
 ## [1.24.2](https://github.com/mitos-run/mitos/compare/v1.24.1...v1.24.2) (2026-07-06)
 
 
