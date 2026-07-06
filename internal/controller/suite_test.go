@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
@@ -115,7 +116,14 @@ func (r *bufferingRecorder) snapshot() []string {
 // between (issue #630).
 func updateSandboxStatusWithRetry(t *testing.T, name, namespace string, mutate func(*v1.Sandbox)) {
 	t.Helper()
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	// retry.DefaultRetry is only ~5 short steps; a source claim whose reconciler
+	// churns the object continuously (it re-reconciles while pending) can conflict
+	// on every one of them, flaking the status write. A ~3s budget was measured to
+	// still flake (the churn outlasts it), so retry for about 6.7s worst case
+	// (20 steps, 40ms base, 1.3x, capped at 500ms), long enough to always catch a
+	// gap in the reconcile loop while still bounding a genuinely wedged write.
+	backoff := wait.Backoff{Steps: 20, Duration: 40 * time.Millisecond, Factor: 1.3, Cap: 500 * time.Millisecond}
+	if err := retry.RetryOnConflict(backoff, func() error {
 		var sb v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sb); err != nil {
 			return err
