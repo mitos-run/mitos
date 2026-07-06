@@ -221,6 +221,17 @@ type HuskPodOptions struct {
 	// its OWN per-activation clone (independence), only the clone source changes.
 	// Empty (a warm pod, not a fork child) clones from the template rootfs.
 	ForkSourceRootfsPath string
+	// ForkSourceTolerations and ForkSourceNodeSelector, set on a FORK CHILD,
+	// carry the SOURCE husk pod's scheduling constraints so the child can land on
+	// the same node the source runs on. A fork child is pinned to the source node
+	// (ForkSourceNode) which, for a dedicated pool, is a tainted KVM node; without
+	// the source's tolerations the child is unschedulable (Pending) and the create
+	// ready deadline elapses (issue: hosted live fork times out). buildForkChildPod
+	// otherwise builds from an empty pool template with NO placement. The source
+	// pod already schedules on that node, so its tolerations and nodeSelector are
+	// exactly the constraints the child needs.
+	ForkSourceTolerations  []corev1.Toleration
+	ForkSourceNodeSelector map[string]string
 	// SnapshotNodes is the set of node hostnames the pool has materialized the
 	// template snapshot on (the registry's NodesWithTemplate). When non-empty the
 	// husk pod carries a nodeAffinity pinning it to exactly these nodes, so its
@@ -1014,6 +1025,27 @@ func buildForkChildPod(fork *v1.Sandbox, childName string, opts HuskPodOptions, 
 	// is silently unbilled, and the claim-label pod-deletion paths (release,
 	// lifetime terminate) reap by it.
 	pod.Labels[huskClaimLabel] = fork.Name
+
+	// Inherit the source husk pod's scheduling constraints. buildHuskPod above ran
+	// with an EMPTY pool template, so the child carries no pool Placement: on a
+	// dedicated (tainted) KVM node it would sit Pending until the create ready
+	// deadline. The child is pinned to the source NODE (opts.ForkSourceNode), and
+	// the source already schedules there, so the source's tolerations and
+	// nodeSelector are exactly what the child needs. Tolerations replace (the child
+	// has none of its own); nodeSelector is merged so the kvm selector buildHuskPod
+	// set is preserved alongside any pool placement labels.
+	if len(opts.ForkSourceTolerations) > 0 {
+		pod.Spec.Tolerations = append(pod.Spec.Tolerations, opts.ForkSourceTolerations...)
+	}
+	if len(opts.ForkSourceNodeSelector) > 0 {
+		if pod.Spec.NodeSelector == nil {
+			pod.Spec.NodeSelector = map[string]string{}
+		}
+		for k, v := range opts.ForkSourceNodeSelector {
+			pod.Spec.NodeSelector[k] = v
+		}
+	}
+
 	_ = controllerutil.SetControllerReference(fork, pod, scheme)
 	return pod
 }

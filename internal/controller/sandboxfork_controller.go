@@ -518,6 +518,12 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// pod name is its Status.SandboxID; its rootfs is visible to the child
 		// through the shared husk-rootfs hostPath dir.
 		ForkSourceRootfsPath: huskSourceRootfsInPodPath(source.Status.SandboxID),
+		// Inherit the source pod's scheduling constraints so the child can land on
+		// the same (for a dedicated pool, tainted) node the source runs on. Without
+		// these the fork child builds with no placement and sits Pending on a
+		// tainted KVM node until the create ready deadline elapses.
+		ForkSourceTolerations:  srcPod.Spec.Tolerations,
+		ForkSourceNodeSelector: srcPod.Spec.NodeSelector,
 	}
 
 	// Fixed-slot, idempotent child set. The child pods are EXACTLY Replicas, with
