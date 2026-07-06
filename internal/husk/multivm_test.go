@@ -521,6 +521,19 @@ func TestMultiVMPrepareRefusedWhileClosing(t *testing.T) {
 	if err := s.prepareInstance(context.Background(), "late"); err == nil {
 		t.Fatal("prepareInstance during closing = nil error, want a closing error")
 	}
+	// Also refuse re-preparing an id that ALREADY has a map entry (Close leaves
+	// entries at StateNew), not just a brand-new id.
+	s.mu.Lock()
+	s.closing = false
+	s.instances["existing"] = newVMInstance()
+	s.closing = true
+	s.mu.Unlock()
+	if got := s.instanceFor("existing", true); got != nil {
+		t.Fatalf("instanceFor create for an existing entry during closing = %v, want nil (refused)", got)
+	}
+	if err := s.prepareInstance(context.Background(), "existing"); err == nil {
+		t.Fatal("prepareInstance of an existing entry during closing = nil error, want a closing error")
+	}
 	s.mu.Lock()
 	_, exists := s.instances["late"]
 	s.mu.Unlock()

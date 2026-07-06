@@ -61,15 +61,17 @@ func checkVMID(id vmID) error {
 func (s *Stub) instanceFor(id vmID, create bool) *vmInstance {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if create && s.closing {
+		// Refuse EVERY create once teardown has begun, whether or not a map entry
+		// already exists. Close resets an instance to StateNew rather than deleting
+		// it, so an id can still be present after a prior prepare/close cycle;
+		// re-preparing it during teardown would (re)start a VM that outlives Close.
+		// A nil return from a create call therefore means "the stub is closing"
+		// (prepareInstance maps it to an error).
+		return nil
+	}
 	inst := s.instances[id]
 	if inst == nil && create {
-		// Refuse to create a new VM once teardown has begun: a VM added after
-		// closeAllInstances snapshotted the map would outlive Close. A nil return
-		// from a create call therefore means "the stub is closing" (prepareInstance
-		// maps it to an error). This is the only reason a create=true lookup is nil.
-		if s.closing {
-			return nil
-		}
 		inst = newVMInstance()
 		s.instances[id] = inst
 	}
