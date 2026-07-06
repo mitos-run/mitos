@@ -118,6 +118,27 @@ type SandboxReconciler struct {
 	forkSnapshot       huskForkSnapshotter
 	removeForkSnapshot huskForkSnapshotRemover
 
+	// MultiVMFork routes a husk fork child into an ADDITIONAL VM spawned INSIDE the
+	// SOURCE pod (SpawnVMOnHusk) instead of a brand-new child pod, when the source
+	// pod is multi-VM capable. EXPERIMENTAL, DEFAULT OFF: off is byte-for-byte the
+	// buildForkChildPod new-pod path, so nothing changes unless an operator opts in
+	// AND the source pod runs a --multi-vm husk stub (huskPodMultiVMCapable). This
+	// increment (L1.7a) is the routing + status wiring + the flag; the per-pod and
+	// node MEMORY ACCOUNTING that lets a fork pend or spill when a pod is full is
+	// deferred to L1.7b, so co-location is gated here at a small fixed cap
+	// (maxCoLocatedForkVMsPerPod) with the remainder spilled to new pods. Only used
+	// when EnableHuskPods is true.
+	MultiVMFork bool
+
+	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
+	// Nil defaults to SpawnVMOnHusk; tests inject a fake.
+	spawnVM huskVMSpawner
+
+	// multiVMForkGate, when non-nil, overrides MultiVMFork so a test can toggle the
+	// routing race-safely on the shared reconciler (the field itself is never
+	// mutated after setup). Nil (the production default) reads MultiVMFork. Tests only.
+	multiVMForkGate func() bool
+
 	// KMS is the envelope-encryption Wrapper used to wrap a template's at-rest DEK
 	// on the fork path (an idempotent read of the controller-owned Secret created
 	// at build time). REQUIRED when any reconciled template is Encrypted;

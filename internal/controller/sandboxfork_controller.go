@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -28,6 +30,62 @@ type huskForkSnapshotter func(ctx context.Context, addr string, tlsConf *tls.Con
 // huskForkSnapshotRemover is the controller->husk remove-fork-snapshot seam. Nil
 // defaults to RemoveForkSnapshotOnHusk; tests inject a fake.
 type huskForkSnapshotRemover func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error)
+
+// huskVMSpawner is the controller->husk spawn-vm seam (the MultiVMFork routing).
+// Nil defaults to SpawnVMOnHusk; tests inject a fake.
+type huskVMSpawner func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error)
+
+// maxCoLocatedForkVMsPerPod is the CONSERVATIVE L1.7a cap on how many fork-child
+// VMs the MultiVMFork routing co-locates INSIDE one source pod before it spills
+// the remaining children back to the safe new-pod path (buildForkChildPod). It is
+// a hardcoded stand-in for the real per-pod and node MEMORY ACCOUNTING that is
+// deferred to L1.7b (guarantee A: account each added VM against a per-pod and node
+// budget, then pend or spill when the pod is full so a fork never overcommits).
+// Until that lands, the fixed cap keeps a fork from stacking an unbounded number
+// of VMs on one host pod's memory.
+const maxCoLocatedForkVMsPerPod = 4
+
+// huskMultiVMLabel marks a husk pod whose stub was started with --multi-vm, so the
+// controller may drive a spawn-vm op against it (bring up an ADDITIONAL same-tenant
+// VM in that pod). Only a pod carrying this label is a candidate for the MultiVMFork
+// routing; every other source pod falls back to the new-pod path. The label is the
+// controller-visible record that the pod is multi-VM capable, paired with the
+// --multi-vm stub arg (a single-VM stub fails a spawn-vm op closed regardless).
+const huskMultiVMLabel = "mitos.run/multi-vm"
+
+// huskPodMultiVMCapable reports whether a husk pod's stub runs with --multi-vm, so
+// a spawn-vm op against it can succeed. A nil pod or a pod without the label is not
+// capable, so the MultiVMFork routing falls back to a new child pod.
+func huskPodMultiVMCapable(pod *corev1.Pod) bool {
+	return pod != nil && pod.Labels[huskMultiVMLabel] == "true"
+}
+
+// forkChildVMID derives the node-local vmID for a fork child co-located in the
+// source pod from the child's stable slot name. The husk stub validates a spawned
+// vmID against checkVMID (^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$) and derives this VM's
+// per-VM socket, tap, and workdir from it, so the id must be a safe node-local
+// identifier and unique WITHIN the source pod. The child slot name
+// ("<fork>-fork-<i>") is already node-local-unique and uses only [a-z0-9-]; cap it
+// with a short content-hash suffix so a long source sandbox name still yields a
+// <=64-char id that never collides across forks sharing one source pod.
+func forkChildVMID(childName string) string {
+	const maxLen = 64
+	if len(childName) <= maxLen {
+		return childName
+	}
+	sum := sha256.Sum256([]byte(childName))
+	suffix := hex.EncodeToString(sum[:])[:8]
+	return childName[:maxLen-1-len(suffix)] + "-" + suffix
+}
+
+// multiVMForkEnabled reports whether the MultiVMFork routing is on, honoring the
+// test gate override so a test can toggle it race-safely on the shared reconciler.
+func (r *SandboxReconciler) multiVMForkEnabled() bool {
+	if r.multiVMForkGate != nil {
+		return r.multiVMForkGate()
+	}
+	return r.MultiVMFork
+}
 
 // huskForkFinalizer guards a husk fork so its node-local fork snapshot is
 // removed from the source pod before the Sandbox object is deleted.
@@ -451,6 +509,17 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	if activate == nil {
 		activate = ActivateHuskPod
 	}
+	spawnVM := r.spawnVM
+	if spawnVM == nil {
+		spawnVM = SpawnVMOnHusk
+	}
+
+	// MultiVMFork routing decision, computed ONCE for the whole fan-out. The
+	// spawn-in-source-pod path is taken only when the flag is on AND the source pod
+	// is multi-VM capable (its stub runs --multi-vm); otherwise every child takes
+	// the byte-for-byte-unchanged new-pod path below. A non-capable source is the
+	// silent, safe fallback the design requires.
+	spawnInSourcePod := r.multiVMForkEnabled() && huskPodMultiVMCapable(srcPod)
 
 	// One fork snapshot per SandboxFork, keyed by the fork name, taken EXACTLY
 	// ONCE and reused for every child across reconcile passes. Children take
@@ -583,18 +652,58 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	for i := int32(0); i < effectiveReplicas(fork); i++ {
 		childName := fmt.Sprintf("%s-fork-%d", fork.Name, i)
 
-		// Get-or-create the child pod for this slot (idempotent by the stable name).
-		child, err := r.ensureForkChildPod(ctx, fork, srcPod, childName, opts)
-		if err != nil {
-			logger.Error(err, "create fork child pod failed", "child", childName)
-			continue
-		}
-
-		// Already activated in a prior pass: carry the recorded info forward and
-		// skip re-activation (idempotent per slot).
+		// A slot activated in a prior pass is carried forward as-is BEFORE any
+		// routing decision, so its fate is decided once and independently of the
+		// current flag state. Without this hoist, a slot recorded via the
+		// spawn-in-source-pod path would fall to the new-pod branch after a
+		// --multi-vm-fork flip-to-off (controller restart) and ensureForkChildPod
+		// would create a brand-new pod for a childName that status never references
+		// (the carried-forward source-pod record wins), leaking a KVM slot until the
+		// fork is GC'd. Idempotent per slot; never re-activates a live child VM.
 		if info, ok := recorded[childName]; ok {
 			forks = append(forks, info)
 			ready++
+			continue
+		}
+
+		// MultiVMFork routing: for the first maxCoLocatedForkVMsPerPod slots of a
+		// multi-VM-capable source, spawn the child as an ADDITIONAL VM INSIDE the
+		// source pod (spawn-vm op) instead of creating a brand-new child pod. Slots
+		// past the cap fall through to the new-pod path below, the conservative
+		// L1.7a stand-in for the real per-pod/node memory accounting deferred to
+		// L1.7b. When the flag is off or the source is not multi-VM capable
+		// (spawnInSourcePod is false), this branch is never entered and the path
+		// below is byte-for-byte unchanged.
+		if spawnInSourcePod && i < maxCoLocatedForkVMsPerPod {
+			spawnedChild, ok := r.spawnForkChildInSourcePod(ctx, spawnForkChildArgs{
+				fork:        fork,
+				srcPod:      srcPod,
+				source:      source,
+				childName:   childName,
+				template:    template,
+				netCfg:      netCfg,
+				sandboxPort: sandboxPort,
+				controlPort: controlPort,
+				spawnVM:     spawnVM,
+			})
+			if ok {
+				forks = append(forks, spawnedChild)
+				ready++
+			}
+			// A failed spawn is NOT wedged: the slot is left not-ready with the cause
+			// logged (issue #28), and the reconcile requeues below because
+			// ReadyReplicas < Replicas. It never silently hangs and never weakens the
+			// new-pod fallback for the OFF path.
+			continue
+		}
+
+		// Get-or-create the child pod for this slot (idempotent by the stable name).
+		// The recorded-slot carry-forward is hoisted above the routing branches, so a
+		// slot already activated (in-source-pod or in its own pod) never reaches here
+		// and this only runs for a genuinely new slot on the new-pod path.
+		child, err := r.ensureForkChildPod(ctx, fork, srcPod, childName, opts)
+		if err != nil {
+			logger.Error(err, "create fork child pod failed", "child", childName)
 			continue
 		}
 
@@ -725,6 +834,103 @@ func (r *SandboxReconciler) ensureForkChildPod(ctx context.Context, fork *v1.San
 		return nil, fmt.Errorf("re-get fork child pod %s: %w", name, err)
 	}
 	return &existing, nil
+}
+
+// spawnForkChildArgs bundles the inputs for spawnForkChildInSourcePod so the
+// slot-loop call site stays readable.
+type spawnForkChildArgs struct {
+	fork        *v1.Sandbox
+	srcPod      *corev1.Pod
+	source      *v1.Sandbox
+	childName   string
+	template    *v1.PoolTemplateSpec
+	netCfg      huskNetworkConfig
+	sandboxPort int
+	controlPort int
+	spawnVM     huskVMSpawner
+}
+
+// spawnForkChildInSourcePod brings up a fork child as an ADDITIONAL VM inside the
+// SOURCE husk pod (the spawn-vm control op) rather than creating a new child pod.
+// It is the MultiVMFork routing's per-slot worker and the co-located analog of the
+// new-pod ensureForkChildPod + activate pair: it mints and persists the child's
+// stable bearer token FIRST (issue #183: a lost spawn ack must re-drive with the
+// token the VM already holds, and AlreadyActive lets us adopt it), then asks the
+// source stub to spawn a new vmID activating from the SAME fork snapshot the source
+// already produced, threading the SAME network + egress posture the new-pod fork
+// child inherits (issue #760) so a co-located child is never less isolated. The
+// spawned VM runs the same fail-closed RNG/clock reseed handshake activate runs, so
+// the fork-correctness handshake is preserved.
+//
+// It returns (child, true) with status.Pod = the source pod, status.VMID = the
+// spawned vmID, and status.Node = the source node when the VM is up (OK or the
+// idempotent AlreadyActive), and (_, false) when the spawn did not complete this
+// pass. A false is a clean not-ready-yet signal the caller requeues on; it NEVER
+// wedges and NEVER weakens the new-pod fallback. The mTLS control channel and the
+// fork-snapshot flow are unchanged; SpawnVMOnHusk refuses a nil TLS config so the
+// secret-bearing Activate never rides an unauthenticated channel.
+func (r *SandboxReconciler) spawnForkChildInSourcePod(ctx context.Context, a spawnForkChildArgs) (v1.SandboxChild, bool) {
+	logger := log.FromContext(ctx)
+
+	vmID := forkChildVMID(a.childName)
+	endpoint := net.JoinHostPort(a.srcPod.Status.PodIP, strconv.Itoa(a.sandboxPort))
+
+	// Persist a STABLE token BEFORE spawning (issue #183): a spawn ack or the
+	// post-spawn bookkeeping can be lost, leaving the VM ACTIVE while the controller
+	// did not record it. Reusing the same token on a re-drive lets AlreadyActive
+	// adopt the running VM instead of looping.
+	apiToken, err := ensureForkChildToken(ctx, r.Client, a.fork, a.childName+tokenSecretSuffix, endpoint)
+	if err != nil {
+		logger.Error(err, "fork child token secret write failed", "child", a.childName)
+		return v1.SandboxChild{}, false
+	}
+
+	addr := net.JoinHostPort(a.srcPod.Status.PodIP, strconv.Itoa(a.controlPort))
+	tlsConf, err := r.huskDialTLS(ctx, a.fork.Namespace)
+	var spRes husk.SpawnVMResult
+	if err == nil {
+		spRes, err = a.spawnVM(ctx, addr, tlsConf, husk.SpawnVMRequest{
+			VMID: vmID,
+			Activate: husk.ActivateRequest{
+				// The spawned VM reads the FORK snapshot the source already produced,
+				// mounted read-only at HuskSnapshotDir in the source pod. No
+				// ExpectedDigest: the fork snapshot is node-local, not content-addressed.
+				SnapshotDir: HuskSnapshotDir,
+				// Inherit the SAME network posture the new-pod fork child gets from the
+				// source pool template (issue #760), so a co-located child is never less
+				// isolated than a one-pod-per-child fork.
+				Network:      huskNotifyNetwork(a.template),
+				Egress:       a.netCfg.Egress,
+				Allow:        a.netCfg.Allow,
+				BlockNetwork: a.netCfg.BlockNetwork,
+				AllowCIDRs:   a.netCfg.AllowCIDRs,
+				Inbound:      a.netCfg.Inbound,
+				InboundCIDRs: a.netCfg.InboundCIDRs,
+				Token:        apiToken,
+			},
+		})
+	}
+	if err != nil {
+		logger.Info("fork child spawn-in-source-pod failed, will retry", "child", a.childName, "detail", err.Error())
+		return v1.SandboxChild{}, false
+	}
+	if !spRes.OK && !spRes.AlreadyActive {
+		// Surface WHY (issue #28 LLM-legible errors) rather than a bare retry.
+		logger.Info("fork child spawn-in-source-pod failed, will retry", "child", a.childName, "detail", spRes.Error)
+		return v1.SandboxChild{}, false
+	}
+	// OK, or AlreadyActive: a prior spawn brought this VM up but its ack or
+	// bookkeeping was lost. Either way the VM is active with the stable token
+	// persisted above, so ADOPT it as ready.
+	return v1.SandboxChild{
+		Name:      a.childName,
+		SandboxID: a.srcPod.Name,
+		Endpoint:  endpoint,
+		Node:      a.source.Status.Node,
+		Pod:       a.srcPod.Name,
+		VMID:      vmID,
+		Phase:     v1.SandboxReady,
+	}, true
 }
 
 // finalizeHuskFork removes the node-local fork snapshot from the source husk pod
