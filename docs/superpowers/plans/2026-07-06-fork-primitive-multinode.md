@@ -193,6 +193,24 @@ with a NoCapacity condition when the node budget is full (capacity_admission
 envtest). So a fork that does not fit PENDS, it never crushes the node. CPU is the
 only deliberate overcommit lever (50m request floor, burst to the cap).
 
+Why CPU may be overcommitted but memory may not: they are different kinds of
+resource. Memory is NON-compressible. Firecracker holds guest RAM resident, so a
+guest page physically exists on the node or it does not; overcommitting memory and
+having guests touch their pages exhausts physical RAM and the OOM killer kills
+processes, including LIVE sandboxes with a user's work, which is catastrophic and
+unrecoverable. CPU is COMPRESSIBLE (time-shared): a vCPU not executing costs about
+zero, and the agent workload is bursty and mostly idle, so a low request (50m)
+packs many idle husks densely while active VMs burst to the cap and the Linux CFS
+scheduler time-slices them under contention. Overcommitting CPU fails SOFT
+(throttling, slower VMs, everything still completes); overcommitting memory fails
+HARD (OOM, dead VMs). Tradeoff to be explicit about: CPU overcommit means a burst
+of N forked agents all doing heavy compute at once contend and each runs slower, so
+"N agents at once" is a density number, not N-cores-of-simultaneous-throughput; a
+latency-SLA tier dials the CPU request up toward the cap (less overcommit, less
+density) as a per-tier knob. This asymmetry is why guarantee A is about MEMORY: a
+fork must never push a node past its physical memory, but CPU contention is
+acceptable graceful degradation.
+
 Multi-VM breaks the automatic version of this: N VMs share ONE pod whose k8s
 memory request is fixed at creation, so adding a VM to a pod could overcommit
 WITHIN the pod (a sibling OOMs its siblings). CoW makes the TYPICAL footprint tiny
