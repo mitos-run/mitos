@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.24.2](https://github.com/mitos-run/mitos/compare/v1.24.1...v1.24.2) (2026-07-06)
+
+
+### Bug Fixes
+
+* **fork:** resume the source after a live fork instead of leaving it paused ([#763](https://github.com/mitos-run/mitos/issues/763)) ([34db0db](https://github.com/mitos-run/mitos/commit/34db0db60af76e6f209fac9210cbdca95813ebe3))
+* **saas:** quota denials carry a specific cause and actionable remediation ([#765](https://github.com/mitos-run/mitos/issues/765)) ([a71ae83](https://github.com/mitos-run/mitos/commit/a71ae83b39e38f0a09b7decd3600a8d5c73dbf34))
+* **sdk:** fork POST waits longer than the server ready deadline ([#756](https://github.com/mitos-run/mitos/issues/756)) ([ecb8a78](https://github.com/mitos-run/mitos/commit/ecb8a78712e8ccb4a2d8362c5bdf584d966c229b))
+
 ## [1.24.1](https://github.com/mitos-run/mitos/compare/v1.24.0...v1.24.1) (2026-07-06)
 
 
