@@ -58,6 +58,48 @@ func (s State) String() string {
 	}
 }
 
+// vmID identifies one microVM within a husk pod. On the default single-VM path
+// there is exactly one implicit instance, so this type is not exercised at
+// runtime; the multi-VM-per-pod work (#764) keys the instances map by it once a
+// later increment migrates the single-VM state onto that map.
+type vmID = string
+
+// defaultVMID is the key of the single implicit instance a stub manages. It
+// gives the scaffold instances map a stable key for the one VM a husk pod holds
+// today, so increment 2 of #764 has a well-defined slot to migrate the single-VM
+// state into. The single-VM code path does not use it.
+const defaultVMID vmID = "default"
+
+// vmInstance holds the per-VM lifecycle state of one microVM: its lifecycle
+// State, the VMM handle, the fork generation counter, and the per-activation
+// artifacts (the rootfs CoW clone, the egress tap, the DNS proxy) that Close
+// tears down. Today the stub owns exactly one implicit instance and the
+// equivalent state lives directly on Stub (the state / vm / generation /
+// prepareVerified / rootfsClonePath / activeTap / dnsProxy fields).
+//
+// This struct is the scaffold for the multi-VM-per-pod density work (#764): a
+// later increment migrates the single-VM Stub fields into a map[vmID]*vmInstance
+// so one husk pod can run many same-tenant forks. Increment 1 introduces only
+// the struct, the opt-in flag, and a guarded (default-off) instances map; it
+// does NOT migrate the runtime state, so the single-VM path is unchanged and
+// this struct is not on any runtime path when multiVM is false.
+type vmInstance struct {
+	state           State
+	vm              vmm
+	generation      uint64
+	prepareVerified bool
+	rootfsClonePath string
+	activeTap       string
+	dnsProxy        *dnsproxy.Server
+}
+
+// newVMInstance builds a fresh per-VM instance in StateNew. It is the
+// constructor increment 2 of #764 uses per spawned microVM; the default
+// single-VM path keeps its state on the Stub fields and never reaches this.
+func newVMInstance() *vmInstance {
+	return &vmInstance{state: StateNew}
+}
+
 // vmm is the subset of *firecracker.Client the stub drives. Keeping it behind an
 // interface lets the activate state machine be unit-tested with a fake, with no
 // real Firecracker process or KVM.
@@ -441,6 +483,13 @@ type Options struct {
 	// installs). Nil uses the production reader (nft -j list counter). Tests
 	// inject a fake; a deployment without networking never calls it (no tap).
 	EgressBytes func(tap string) int64
+	// MultiVM opts into the experimental multi-VM-per-pod execution mode (#764):
+	// running many same-tenant Firecracker forks inside ONE husk pod via the CoW
+	// engine instead of one pod per VM. It DEFAULTS false, and increment 1 wires
+	// only the flag plus a default-off scaffold, so a false value (every caller
+	// today) keeps the single-VM path byte-for-byte unchanged. A later increment
+	// migrates the single-VM state onto the per-vmInstance map behind this flag.
+	MultiVM bool
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -529,6 +578,16 @@ type Stub struct {
 	vm              vmm
 	generation      uint64
 	prepareVerified bool
+
+	// multiVM selects the experimental multi-VM-per-pod execution mode (#764,
+	// Options.MultiVM). It defaults false; when false the stub behaves EXACTLY as
+	// the single-VM state machine above (the state / vm / generation /
+	// prepareVerified fields), which is the only path any caller exercises today.
+	// instances is the default-off scaffold a later increment migrates that
+	// single-VM state onto (map[vmID]*vmInstance keyed per fork); it is nil unless
+	// a caller opts in, so increment 1 changes no runtime behavior.
+	multiVM   bool
+	instances map[vmID]*vmInstance
 }
 
 // NetRunner is the exported alias for the host-command runner type so callers
@@ -574,6 +633,15 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		vsockRelPath:       firecracker.VsockRelPath,
 		memStat:            opts.MemStat,
 		egressBytes:        opts.EgressBytes,
+		multiVM:            opts.MultiVM,
+	}
+	// Multi-VM scaffold (#764), default off: allocate the per-fork instance map
+	// ONLY when a caller opts in. No production caller sets MultiVM in increment
+	// 1, so this branch is unreachable on the runtime path and the single-VM
+	// fields above remain the sole state. A later increment migrates the state
+	// onto this map so one pod can hold many same-tenant forks.
+	if s.multiVM {
+		s.instances = map[vmID]*vmInstance{defaultVMID: newVMInstance()}
 	}
 	if s.start == nil {
 		s.start = productionStarter
