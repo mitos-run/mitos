@@ -697,6 +697,13 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 // the stub is already dormant or active is an error, so a husk never silently
 // leaks a second VMM.
 func (s *Stub) Prepare(ctx context.Context) error {
+	// Multi-VM mode (#764, default off): the lifecycle is multiplexed over the
+	// per-VM instances map, so a plain Prepare brings up the pod's default VM.
+	// prepareInstance locks s.mu itself, so return before taking the lock here.
+	// When multiVM is false the single-VM body below runs byte-for-byte unchanged.
+	if s.multiVM {
+		return s.prepareInstance(ctx, defaultVMID)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state != StateNew {
@@ -796,6 +803,18 @@ func (s *Stub) Prepare(ctx context.Context) error {
 // leaves the stub NOT active. A failed Activate never reports a usable VM; the
 // caller must treat the husk as unusable.
 func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResult, error) {
+	// Multi-VM mode (#764, default off): route to the instance the request names
+	// via req.VMID, defaulting to the pod's single implicit VM for compatibility.
+	// activateInstance locks s.mu itself, so return before taking the lock here.
+	// When multiVM is false the single-VM body below runs byte-for-byte unchanged
+	// and req.VMID is ignored.
+	if s.multiVM {
+		id := defaultVMID
+		if req.VMID != "" {
+			id = vmID(req.VMID)
+		}
+		return s.activateInstance(ctx, id, req)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1452,6 +1471,12 @@ func (s *Stub) State() State {
 // SECRET-FREE: the report carries ONLY the vm-id and numeric byte/second counts,
 // never argv, env, file bytes, or the per-sandbox bearer token.
 func (s *Stub) Metering() metering.Report {
+	// Multi-VM mode (#764, default off): report one sample per active VM in the
+	// pod (meteringMulti locks s.mu itself). When multiVM is false the single-VM
+	// body below runs byte-for-byte unchanged.
+	if s.multiVM {
+		return s.meteringMulti()
+	}
 	s.mu.Lock()
 	if s.state != StateActive {
 		// A dormant/warm pod meters nothing yet: the empty report keeps a scrape a
@@ -1525,6 +1550,11 @@ var ErrVMMDead = errors.New("husk: firecracker VMM is unresponsive")
 // reference under the lock and pings OUTSIDE it so a slow ping never blocks
 // Activate/Close.
 func (s *Stub) pingVMM() error {
+	// Multi-VM mode (#764, default off): ping every prepared VM in the pod. When
+	// multiVM is false the single-VM body below runs byte-for-byte unchanged.
+	if s.multiVM {
+		return s.pingInstances()
+	}
 	s.mu.Lock()
 	vm := s.vm
 	s.mu.Unlock()
@@ -1575,6 +1605,12 @@ func (s *Stub) MonitorVMM(ctx context.Context, interval time.Duration, failures 
 
 // Close tears down the VMM if one was prepared. It is safe to call in any state.
 func (s *Stub) Close() error {
+	// Multi-VM mode (#764, default off): a pod Close tears down EVERY instance
+	// (closeAllInstances locks s.mu itself). When multiVM is false the single-VM
+	// body below runs byte-for-byte unchanged.
+	if s.multiVM {
+		return s.closeAllInstances()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

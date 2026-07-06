@@ -81,6 +81,14 @@ type ActivateRequest struct {
 	// InboundCIDRs narrows an Inbound=allow to source CIDRs (Modal
 	// inbound_cidr_allowlist). Config.
 	InboundCIDRs []string `json:"inbound_cidrs,omitempty"`
+	// VMID names WHICH same-tenant VM in the pod this activate addresses, the
+	// explicit selector for the experimental multi-VM-per-pod mode (#764). It is
+	// honored ONLY when the stub runs with --multi-vm; on the default single-VM
+	// path it is ignored entirely, so the field changes no shipped behavior. Empty
+	// (every caller today, and omitempty keeps it off the wire) defaults to the
+	// pod's single implicit VM, so an existing activate stays byte-for-byte
+	// compatible. It is a node-local identifier, not a secret.
+	VMID string `json:"vm_id,omitempty"`
 }
 
 // ActivateResult is the control reply. OK is true only when the snapshot loaded

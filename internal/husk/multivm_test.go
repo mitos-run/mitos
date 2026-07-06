@@ -2,10 +2,253 @@ package husk
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"mitos.run/mitos/internal/firecracker"
 )
+
+// newMultiVMTestStub builds a stub with the multi-VM execution mode ON, using a
+// keyed starter so a test can look up the per-VM fake by the derived VMConfig ID
+// (deriveVMConfig gives each vmID a distinct ID). The other seams are the same
+// no-op fakes the single-VM unit path uses, so these tests exercise the per-VM
+// state machine multiplexing with the mock, no real Firecracker or KVM.
+func newMultiVMTestStub(t *testing.T, vms map[string]*fakeVMM) *Stub {
+	t.Helper()
+	start := func(cfg firecracker.VMConfig) (vmm, error) {
+		vm := &fakeVMM{}
+		vms[cfg.ID] = vm
+		return vm, nil
+	}
+	return New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:   start,
+		Ready:   readyOK,
+		Notify:  (&fakeNotifier{}).notify,
+		Verify:  verifyOK,
+		MultiVM: true,
+	})
+}
+
+// TestMultiVMTwoInstancesReachActiveIndependently proves the core of increment 2
+// of #764: with the flag ON the stub can Prepare+Activate TWO distinct vmIDs and
+// both reach StateActive independently, each keyed in the instances map with its
+// OWN VMM handle and generation counter. It drives the per-VM engine directly
+// (prepareInstance/activateInstance), which the public dispatch routes to.
+func TestMultiVMTwoInstancesReachActiveIndependently(t *testing.T) {
+	vms := map[string]*fakeVMM{}
+	s := newMultiVMTestStub(t, vms)
+
+	const second vmID = "vm-2"
+	for _, id := range []vmID{defaultVMID, second} {
+		if err := s.prepareInstance(context.Background(), id); err != nil {
+			t.Fatalf("prepareInstance(%s): %v", id, err)
+		}
+		res, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: "/snap"})
+		if err != nil || !res.OK {
+			t.Fatalf("activateInstance(%s): err=%v ok=%v", id, err, res.OK)
+		}
+	}
+
+	if got := s.instances[defaultVMID].state; got != StateActive {
+		t.Fatalf("default instance state = %s, want active", got)
+	}
+	if got := s.instances[second].state; got != StateActive {
+		t.Fatalf("second instance state = %s, want active", got)
+	}
+	// Distinct VMM handles: each vmID owns its own Firecracker process (its own
+	// socket/workdir), never a shared one.
+	if s.instances[defaultVMID].vm == s.instances[second].vm {
+		t.Fatal("two vmIDs must own distinct VMM handles")
+	}
+	// Each per-VM generation counter starts at 1 (one reseed per activation).
+	if g := s.instances[defaultVMID].generation; g != 1 {
+		t.Fatalf("default generation = %d, want 1", g)
+	}
+	if g := s.instances[second].generation; g != 1 {
+		t.Fatalf("second generation = %d, want 1", g)
+	}
+	// The two fakes are the two distinct derived-ID VMMs the keyed starter built.
+	if len(vms) != 2 {
+		t.Fatalf("expected 2 distinct started VMMs, got %d: %v", len(vms), vms)
+	}
+	if _, ok := vms["husk-test"]; !ok {
+		t.Fatalf("default vmID must derive the base config ID, got keys %v", vms)
+	}
+	if _, ok := vms["husk-test-vm-2"]; !ok {
+		t.Fatalf("second vmID must derive a distinct per-VM config ID, got keys %v", vms)
+	}
+}
+
+// TestMultiVMCloseOneLeavesOtherActive proves per-VM isolation: closing ONE
+// instance tears down only that VMM and returns it to StateNew, while the other
+// instance stays StateActive with its VMM untouched. This is the isolated
+// state-machine property the density work needs (a sibling dying must not take
+// its siblings down).
+func TestMultiVMCloseOneLeavesOtherActive(t *testing.T) {
+	vms := map[string]*fakeVMM{}
+	s := newMultiVMTestStub(t, vms)
+
+	const second vmID = "vm-2"
+	for _, id := range []vmID{defaultVMID, second} {
+		if err := s.prepareInstance(context.Background(), id); err != nil {
+			t.Fatalf("prepareInstance(%s): %v", id, err)
+		}
+		if _, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
+			t.Fatalf("activateInstance(%s): %v", id, err)
+		}
+	}
+
+	if err := s.closeInstance(defaultVMID); err != nil {
+		t.Fatalf("closeInstance(default): %v", err)
+	}
+
+	// The closed instance is torn down (VMM closed, back to StateNew).
+	if !vms["husk-test"].closed {
+		t.Fatal("closing the default instance must tear down its VMM")
+	}
+	if got := s.instances[defaultVMID].state; got != StateNew {
+		t.Fatalf("closed instance state = %s, want new", got)
+	}
+	// The other instance is untouched: still active, its VMM not closed.
+	if vms["husk-test-vm-2"].closed {
+		t.Fatal("closing one instance must NOT close a sibling's VMM")
+	}
+	if got := s.instances[second].state; got != StateActive {
+		t.Fatalf("sibling instance state = %s, want active (unaffected by the other's close)", got)
+	}
+}
+
+// TestMultiVMMeteringReportsBothVMs proves the metering path reports EVERY active
+// VM in the pod, one sample per vmID keyed on its derived id, so a multi-VM pod
+// meters all the same-tenant forks it hosts (not just one).
+func TestMultiVMMeteringReportsBothVMs(t *testing.T) {
+	vms := map[string]*fakeVMM{}
+	s := newMultiVMTestStub(t, vms)
+
+	for _, id := range []vmID{defaultVMID, "vm-2"} {
+		if err := s.prepareInstance(context.Background(), id); err != nil {
+			t.Fatalf("prepareInstance(%s): %v", id, err)
+		}
+		if _, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
+			t.Fatalf("activateInstance(%s): %v", id, err)
+		}
+	}
+
+	rep := s.Metering()
+	if len(rep.Sandboxes) != 2 {
+		t.Fatalf("multi-VM metering must report both VMs, got %d samples", len(rep.Sandboxes))
+	}
+	ids := map[string]bool{}
+	for _, sb := range rep.Sandboxes {
+		ids[sb.ID] = true
+	}
+	if !ids["husk-test"] || !ids["husk-test-vm-2"] {
+		t.Fatalf("metering must carry both derived vm-ids, got %v", ids)
+	}
+}
+
+// TestMultiVMSecondActivateFailClosedLeavesFirstActive proves a fail-closed
+// activate of a SECOND VM (its snapshot load fails) never disturbs an
+// already-active sibling: the first stays StateActive, the second stays
+// StateDormant and reports not-OK.
+func TestMultiVMSecondActivateFailClosedLeavesFirstActive(t *testing.T) {
+	// A starter that fails the SECOND VM's snapshot load only.
+	vms := map[string]*fakeVMM{}
+	start := func(cfg firecracker.VMConfig) (vmm, error) {
+		vm := &fakeVMM{}
+		if cfg.ID == "husk-test-vm-2" {
+			vm.loadErr = errors.New("snapshot corrupt")
+		}
+		vms[cfg.ID] = vm
+		return vm, nil
+	}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:   start,
+		Ready:   readyOK,
+		Notify:  (&fakeNotifier{}).notify,
+		Verify:  verifyOK,
+		MultiVM: true,
+	})
+
+	if err := s.prepareInstance(context.Background(), defaultVMID); err != nil {
+		t.Fatalf("prepareInstance(default): %v", err)
+	}
+	if _, err := s.activateInstance(context.Background(), defaultVMID, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
+		t.Fatalf("activateInstance(default): %v", err)
+	}
+	if err := s.prepareInstance(context.Background(), "vm-2"); err != nil {
+		t.Fatalf("prepareInstance(vm-2): %v", err)
+	}
+	res, err := s.activateInstance(context.Background(), "vm-2", ActivateRequest{SnapshotDir: "/snap"})
+	if err == nil || res.OK {
+		t.Fatal("second activate must fail closed on a bad snapshot load")
+	}
+
+	if got := s.instances["vm-2"].state; got == StateActive {
+		t.Fatalf("failed-closed second instance must not be active, got %s", got)
+	}
+	if got := s.instances[defaultVMID].state; got != StateActive {
+		t.Fatalf("first instance must stay active despite the sibling's failure, got %s", got)
+	}
+}
+
+// TestMultiVMPublicDispatchRoutesToDefault proves the public lifecycle methods
+// (Prepare/Activate/Close/Metering) dispatch to the per-VM engine under the flag:
+// a plain Prepare+Activate with no VMID selector drives the default instance, and
+// Close tears every instance down. This is the compatibility seam: an existing
+// single-entry caller keeps working, now backed by the instances map.
+func TestMultiVMPublicDispatchRoutesToDefault(t *testing.T) {
+	vms := map[string]*fakeVMM{}
+	s := newMultiVMTestStub(t, vms)
+
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if got := s.instances[defaultVMID].state; got != StateDormant {
+		t.Fatalf("after Prepare default instance = %s, want dormant", got)
+	}
+	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: "/snap"})
+	if err != nil || !res.OK {
+		t.Fatalf("Activate: err=%v ok=%v", err, res.OK)
+	}
+	if got := s.instances[defaultVMID].state; got != StateActive {
+		t.Fatalf("after Activate default instance = %s, want active", got)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := s.instances[defaultVMID].state; got != StateNew {
+		t.Fatalf("after Close default instance = %s, want new", got)
+	}
+	if !vms["husk-test"].closed {
+		t.Fatal("Close must tear the default VMM down")
+	}
+}
+
+// TestMultiVMActivateRoutesByVMID proves the explicit vmID selector on the
+// control request: with the flag on, Activate routes to the instance named by
+// req.VMID (defaulting to defaultVMID when empty), so the control API can address
+// a specific same-tenant VM in the pod.
+func TestMultiVMActivateRoutesByVMID(t *testing.T) {
+	vms := map[string]*fakeVMM{}
+	s := newMultiVMTestStub(t, vms)
+
+	const second vmID = "vm-2"
+	if err := s.prepareInstance(context.Background(), second); err != nil {
+		t.Fatalf("prepareInstance(vm-2): %v", err)
+	}
+	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: "/snap", VMID: string(second)})
+	if err != nil || !res.OK {
+		t.Fatalf("Activate(vm-2): err=%v ok=%v", err, res.OK)
+	}
+	if got := s.instances[second].state; got != StateActive {
+		t.Fatalf("VMID-selected instance = %s, want active", got)
+	}
+	// The default instance was never prepared, so it must be untouched.
+	if inst := s.instances[defaultVMID]; inst.state != StateNew {
+		t.Fatalf("unaddressed default instance = %s, want new", inst.state)
+	}
+}
 
 // TestMultiVMFlagDefaultsOff proves the multi-VM execution mode is OFF by
 // default: New(cfg, Options{}) leaves the stub on the single-VM path and
