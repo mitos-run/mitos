@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.24.0](https://github.com/mitos-run/mitos/compare/v1.23.0...v1.24.0) (2026-07-06)
+
+
+### Features
+
+* **fork:** warm the run_code kernel into the template snapshot ([#736](https://github.com/mitos-run/mitos/issues/736)) ([1849d1e](https://github.com/mitos-run/mitos/commit/1849d1e769d154bc6a9394e2428acaa492735513))
+* **saas:** complete the hosted live-fork surface (telemetry, secret opt-in, fork-child billing) ([#735](https://github.com/mitos-run/mitos/issues/735)) ([76cc54b](https://github.com/mitos-run/mitos/commit/76cc54b7fdbf586d0736fe4326ea49b35288e1c2))
+* **saas:** route hosted per-sandbox fork to the live FromSandbox path ([#710](https://github.com/mitos-run/mitos/issues/710)) ([e7a4b64](https://github.com/mitos-run/mitos/commit/e7a4b64378295d388fb60614bc1fcb361b41349f))
+
+
+### Bug Fixes
+
+* **agentcli:** live per-sandbox fork route and both sandbox list shapes for hosted ([#738](https://github.com/mitos-run/mitos/issues/738)) ([49696c1](https://github.com/mitos-run/mitos/commit/49696c10306cfe7d433bc49749b79678b13d796d))
+* **computer-use:** pin Chromium to 147, the debian-security 150 SIGTRAPs on launch ([#724](https://github.com/mitos-run/mitos/issues/724)) ([7338bc5](https://github.com/mitos-run/mitos/commit/7338bc5e2fe71f97e0c6e9661fb9e29a06270b98)), closes [#723](https://github.com/mitos-run/mitos/issues/723)
+* **husk:** report real memory, storage, and egress from the husk-pod metering endpoint ([#740](https://github.com/mitos-run/mitos/issues/740)) ([1a25f5e](https://github.com/mitos-run/mitos/commit/1a25f5e148612ad7b7d2535d92e8db531c8db2b9))
+* **saas:** refuse secretRef/workspace refs in single-tenant mode (GHSA-pgv2-9w24-j7wh) ([#739](https://github.com/mitos-run/mitos/issues/739)) ([bb2ea57](https://github.com/mitos-run/mitos/commit/bb2ea57b46c124e06676d6fc5f144523661e64ee))
+* **saas:** watch sandbox readiness instead of the 250ms poll ([#734](https://github.com/mitos-run/mitos/issues/734)) ([2f8b40c](https://github.com/mitos-run/mitos/commit/2f8b40c9a7e4e2e21e7dfc6f40eb938f10d5b890))
+
 ## [1.23.0](https://github.com/mitos-run/mitos/compare/v1.22.0...v1.23.0) (2026-07-05)
 
 
