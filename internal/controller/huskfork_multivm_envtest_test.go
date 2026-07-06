@@ -25,6 +25,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	v1 "mitos.run/mitos/api/v1"
@@ -41,6 +42,27 @@ func multiVMSource(p *corev1.Pod) {
 	p.Labels[controller.HuskMultiVMLabel] = "true"
 }
 
+// withCoLocationBudget stamps the source husk pod's memory request (the honest
+// per-VM guest RAM) and limit (the pod cgroup memory.max) so the per-pod
+// co-location budget (guarantee A) admits floor(limit/req) - 1 co-located fork
+// VMs, one slot reserved for the source VM already in the pod. The multi-VM tests
+// that exercise co-location stamp a budget large enough for their replicas; the
+// honest worst-case accounting otherwise co-locates NOTHING on a resource-free
+// pod and every child spills to a new pod.
+func withCoLocationBudget(reqMem, limitMem string) func(*corev1.Pod) {
+	return func(p *corev1.Pod) {
+		for i := range p.Spec.Containers {
+			if p.Spec.Containers[i].Name != "husk-stub" {
+				continue
+			}
+			p.Spec.Containers[i].Resources = corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(reqMem)},
+				Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(limitMem)},
+			}
+		}
+	}
+}
+
 // TestMultiVMForkRoutesToSourcePodWhenEnabled proves the core L1.7a wiring: with
 // the flag ON and a multi-VM-capable source, each fork child is spawned as an
 // additional VM INSIDE the source pod (SpawnVMOnHusk), NO new child pod is created,
@@ -51,7 +73,9 @@ func TestMultiVMForkRoutesToSourcePodWhenEnabled(t *testing.T) {
 	srcClaimName := uniqueName("src-mvm-on")
 	forkName := uniqueName("mvm-on")
 
-	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.1", multiVMSource)
+	// A generous per-pod budget (1280Mi limit / 128Mi per VM = 10 VMs, 9
+	// co-locatable) so both Replicas co-locate into the source pod.
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.1", multiVMSource, withCoLocationBudget("128Mi", "1280Mi"))
 	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
 
 	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
@@ -294,7 +318,7 @@ func TestMultiVMForkSpawnErrorDoesNotWedge(t *testing.T) {
 	srcClaimName := uniqueName("src-mvm-err")
 	forkName := uniqueName("mvm-err")
 
-	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.4", multiVMSource)
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.4", multiVMSource, withCoLocationBudget("128Mi", "1280Mi"))
 	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
 
 	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
@@ -363,17 +387,20 @@ func TestMultiVMForkSpawnErrorDoesNotWedge(t *testing.T) {
 	})
 }
 
-// TestMultiVMForkSpillsPastCapToNewPods proves the conservative L1.7a co-location
-// cap: with the flag on and a multi-VM-capable source, the first
-// MaxCoLocatedForkVMsPerPod children are spawned in the source pod and every
-// child beyond the cap SPILLS to a new child pod (the stand-in for the real
-// per-pod memory accounting deferred to L1.7b).
-func TestMultiVMForkSpillsPastCapToNewPods(t *testing.T) {
+// TestMultiVMForkSpillsPastPodBudgetToNewPods proves the L1.7b per-pod MEMORY
+// accounting (guarantee A): with the flag on and a multi-VM-capable source, fork
+// children co-locate into the source pod ONLY up to the pod's memory budget
+// (floor(memory.max / per-VM guest RAM) - 1, the source VM reserving one slot),
+// and every child beyond that budget SPILLS to a new child pod so the fork never
+// overcommits the pod. The source pod is sized 1024Mi limit / 256Mi per VM = 4
+// VMs total, so exactly 3 children co-locate and the rest spill.
+func TestMultiVMForkSpillsPastPodBudgetToNewPods(t *testing.T) {
 	poolName := uniqueName("pool-mvm-cap")
 	srcClaimName := uniqueName("src-mvm-cap")
 	forkName := uniqueName("mvm-cap")
 
-	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.5", multiVMSource)
+	// 1024Mi / 256Mi = 4 VMs total; one reserved for the source, so 3 co-locate.
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.5", multiVMSource, withCoLocationBudget("256Mi", "1024Mi"))
 	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
 
 	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
@@ -395,8 +422,9 @@ func TestMultiVMForkSpillsPastCapToNewPods(t *testing.T) {
 	setForkMultiVM(true)
 	t.Cleanup(func() { setForkMultiVM(false) })
 
-	capN := int32(controller.MaxCoLocatedForkVMsPerPod)
-	replicas := capN + 2
+	const coLocated = int32(3)
+	const spill = int32(2)
+	replicas := coLocated + spill
 
 	fork := &v1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -424,18 +452,101 @@ func TestMultiVMForkSpillsPastCapToNewPods(t *testing.T) {
 		return g.Status.ReadyReplicas == replicas
 	})
 
-	// Exactly the over-cap children spilled to new pods; the capped children stay
-	// in the source pod.
+	// Exactly the over-budget children spilled to new pods; the budgeted children
+	// stay co-located in the source pod.
 	var pods corev1.PodList
 	if err := k8sClient.List(ctx, &pods, listForkChildren(forkName)); err != nil {
 		t.Fatalf("list children: %v", err)
 	}
-	spill := int(replicas - capN)
-	if len(pods.Items) != spill {
-		t.Fatalf("expected %d spilled child pods past the cap, got %d", spill, len(pods.Items))
+	if len(pods.Items) != int(spill) {
+		t.Fatalf("expected %d spilled child pods past the pod memory budget, got %d", spill, len(pods.Items))
 	}
-	if got := atomic.LoadInt32(&spawnCalls); got < capN {
-		t.Fatalf("expected at least %d spawn-vm calls (the co-located children), got %d", capN, got)
+	if got := atomic.LoadInt32(&spawnCalls); got < coLocated {
+		t.Fatalf("expected at least %d spawn-vm calls (the co-located children), got %d", coLocated, got)
+	}
+}
+
+// TestMultiVMForkPodBudgetHoldsOneVMSpills proves the tight edge of guarantee A:
+// a source pod whose memory budget holds only ONE VM (the honest default sizing,
+// 768Mi limit / 512Mi per VM = 1 VM total) co-locates NO fork child, because the
+// single VM slot is already the source. The one fork child SPILLS to a new pod and
+// the spawn-vm seam is never called, so a second full guest is never packed into a
+// pod that cannot hold it.
+func TestMultiVMForkPodBudgetHoldsOneVMSpills(t *testing.T) {
+	poolName := uniqueName("pool-mvm-1vm")
+	srcClaimName := uniqueName("src-mvm-1vm")
+	forkName := uniqueName("mvm-1vm")
+
+	// 768Mi limit / 512Mi per VM = 1 VM total; the source takes it, so 0 co-locate.
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.10", multiVMSource, withCoLocationBudget("512Mi", "768Mi"))
+	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
+
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		return husk.ActivateResult{OK: true, VsockPath: "/run/husk/vsock.sock"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+
+	var spawnCalls int32
+	setForkVMSpawner(func(_ context.Context, _ string, _ *tls.Config, _ husk.SpawnVMRequest) (husk.SpawnVMResult, error) {
+		atomic.AddInt32(&spawnCalls, 1)
+		return husk.SpawnVMResult{OK: false, Error: "spawn-vm must not be called when the pod budget holds only the source VM"}, nil
+	})
+	t.Cleanup(func() { setForkVMSpawner(nil) })
+
+	setForkMultiVM(true)
+	t.Cleanup(func() { setForkMultiVM(false) })
+
+	fork := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      forkName,
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcClaimName}}, Replicas: 1},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var p corev1.PodList
+		_ = k8sClient.List(ctx, &p, listForkChildren(forkName))
+		for i := range p.Items {
+			forceHuskPodReady(t, &p.Items[i])
+		}
+		var g v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &g); err != nil {
+			return false
+		}
+		return g.Status.ReadyReplicas == 1
+	})
+
+	var pods corev1.PodList
+	if err := k8sClient.List(ctx, &pods, listForkChildren(forkName)); err != nil {
+		t.Fatalf("list children: %v", err)
+	}
+	if len(pods.Items) != 1 {
+		t.Fatalf("a pod budget holding only the source VM must spill the child to a new pod, got %d pods", len(pods.Items))
+	}
+	if got := atomic.LoadInt32(&spawnCalls); got != 0 {
+		t.Fatalf("spawn-vm must not be called when the pod budget holds only the source VM; got %d calls", got)
+	}
+
+	var got v1.Sandbox
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get fork: %v", err)
+	}
+	// The spilled child took the new-pod path, so it carries no source-pod VM record.
+	if len(got.Status.Children) != 1 {
+		t.Fatalf("expected 1 recorded child, got %d", len(got.Status.Children))
+	}
+	if got.Status.Children[0].Pod != "" || got.Status.Children[0].VMID != "" {
+		t.Errorf("spilled child must leave status.Pod/VMID empty, got pod=%q vmId=%q", got.Status.Children[0].Pod, got.Status.Children[0].VMID)
 	}
 }
 
@@ -450,7 +561,7 @@ func TestMultiVMForkFlagFlipOffDoesNotOrphanCoLocatedChild(t *testing.T) {
 	srcClaimName := uniqueName("src-mvm-flip")
 	forkName := uniqueName("mvm-flip")
 
-	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.9", multiVMSource)
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.9", multiVMSource, withCoLocationBudget("128Mi", "1280Mi"))
 	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
 
 	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {

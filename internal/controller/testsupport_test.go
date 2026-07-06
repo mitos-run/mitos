@@ -79,10 +79,6 @@ func (r *SandboxReconciler) SetMultiVMForkGateForTest(gate func() bool) {
 // controller_test package, so a test can stamp a source pod as multi-VM capable.
 const HuskMultiVMLabel = huskMultiVMLabel
 
-// MaxCoLocatedForkVMsPerPod exposes the L1.7a co-location cap to the external
-// controller_test package.
-const MaxCoLocatedForkVMsPerPod = maxCoLocatedForkVMsPerPod
-
 // SkipForkLabel restricts the reconciler to sandboxes WITHOUT the given label,
 // for the husk-fork harness; an alias of SkipLabel on the consolidated reconciler.
 func (r *SandboxReconciler) SkipForkLabel(label string) { r.skipLabel(label, "sandbox-fork-raw") }
