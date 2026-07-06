@@ -132,17 +132,17 @@ egress chain would be an isolation gap. Add a test asserting the fork-child
 
 ## Milestones (each a separate PR/issue, smallest first)
 
-1. Parent-resume fix (correctness, ship first). `ForkSnapshot` resumes the source
+1. Parent-resume fix (correctness, ship first) [#759]. `ForkSnapshot` resumes the source
    after capturing the checkpoint; drop the leave-paused behavior. Test: fork a
    sandbox, assert a subsequent exec against the SOURCE succeeds. Highest priority:
    today forking silently freezes the parent.
-2. Fork-child isolation + resources. Thread the resolved pool template (network,
+2. Fork-child isolation + resources [#760]. Thread the resolved pool template (network,
    egress, cpu cap) into the fork child. Test: fork-child `ActivateRequest` carries
    network + egress; child cpu cap equals the pool.
-3. Hosted fork bench (already filed). Measure `checkpoint_time_ms` vs restore vs
+3. Hosted fork bench [#753]. Measure `checkpoint_time_ms` vs restore vs
    pod-create through api.mitos.run so milestone 4's target is grounded and the
    marketing number can be reconciled honestly.
-4. Warm-husk live fork (the big one). Fork children claim a warm dormant husk and
+4. Warm-husk live fork (the big one) [#761]. Fork children claim a warm dormant husk and
    restore the checkpoint into it. Spike the cross-snapshot restore question first,
    then wire the claim path behind a flag, measure, and roll out.
 
