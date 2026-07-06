@@ -10,7 +10,6 @@ import (
 	"regexp"
 	"time"
 
-	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
@@ -329,20 +328,12 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	overrides := req.NetworkOverrides
 	if s.netRunner != nil && perNet != nil {
 		tap := netconf.DeriveTapName(perNet.GuestIP)
-		cfg := NetfilterConfig{
-			Tap:          tap,
-			GuestIP:      net.ParseIP(perNet.GuestIP),
-			HostIP:       net.ParseIP(perNet.GatewayIP),
-			Egress:       v1.EgressPolicy(req.Egress),
-			Allow:        req.Allow,
-			BlockNetwork: req.BlockNetwork,
-			AllowCIDRs:   req.AllowCIDRs,
-			Inbound:      v1.InboundPolicy(req.Inbound),
-			InboundCIDRs: req.InboundCIDRs,
-		}
-		if cfg.Egress == "" {
-			cfg.Egress = v1.EgressDeny
-		}
+		// Multi-VM leaves ResolverIP unset (the per-VM DNS proxy fan-out is a later
+		// increment); the shared policy fields come from netfilterPolicyConfig.
+		cfg := netfilterPolicyConfig(req)
+		cfg.Tap = tap
+		cfg.GuestIP = net.ParseIP(perNet.GuestIP)
+		cfg.HostIP = net.ParseIP(perNet.GatewayIP)
 		if err := applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
 			werr := fmt.Errorf("husk: apply in-pod egress filter for vm %q: %w", id, err)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
