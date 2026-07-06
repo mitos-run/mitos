@@ -36,6 +36,9 @@ spec:
             {{- if .Values.controller.enableHuskPods }}
             - --enable-husk-pods
             {{- end }}
+            {{- if .Values.controller.multiVMFork }}
+            - --multi-vm-fork
+            {{- end }}
             - --husk-stub-image={{ include "mitos.image" (dict "root" . "image" .Values.huskStub.image) }}
             - --husk-data-dir={{ .Values.controller.huskDataDir }}
             {{- if .Values.controller.huskDnsUpstream }}

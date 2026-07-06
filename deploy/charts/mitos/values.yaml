@@ -53,6 +53,12 @@ controller:
   # When true, render --enable-husk-pods so each SandboxPool maintains a warm
   # pool of pre-scheduled husk pods. When false, the flag is omitted.
   enableHuskPods: true
+  # EXPERIMENTAL, default off. When true, render --multi-vm-fork: a hosted fork
+  # child co-locates as an additional VM inside a multi-VM-capable source husk
+  # pod (the spawn-vm control op) instead of a brand-new child pod, and warm husk
+  # pods start with --multi-vm so they are co-location-capable. Off is the
+  # unchanged new-pod-per-fork path. Only meaningful with enableHuskPods.
+  multiVMFork: false
   # Value for --husk-data-dir: the node template snapshot root the husk pods
   # mount; must match forkd's --data-dir.
   huskDataDir: /var/lib/mitos
