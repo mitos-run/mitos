@@ -72,9 +72,21 @@ workloads in production on this project, and do not claim it is safe to:
 2. **Fork-correctness fail-closed on ALL engines.** The raw-forkd and
    sandbox-server paths do NOT fail closed on an un-reseeded fork; only the husk
    path does (section 6, `docs/fork-correctness.md` row 1).
-3. **Node-CAS bounds and integrity.** The node CAS is tenant-writable,
-   unbounded, and activated with `--allow-unverified-snapshots` on the fork
-   child path (section 3, W4 row).
+3. **Node-CAS bounds and integrity.** The node CAS is shared across every husk
+   pod on a node (one `<dataDir>/cas` hostPath, mounted READ-WRITE), unbounded,
+   and activated with `--allow-unverified-snapshots` on the fork child path
+   (section 3, W4 row). Content INTEGRITY is enforced by the content-addressed
+   store itself (`internal/cas`: `Materialize` verifies every chunk's sha256
+   against its digest on read, `PutChunk` gates writes on the same digest), so a
+   poisoned or overwritten blob is DETECTED on read, never silently hydrated. The
+   tenant's untrusted code runs inside the Firecracker VM and has NO direct access
+   to this mount; only the trusted husk stub reads/writes it, over vsock. The
+   RESIDUAL is a least-privilege gap: a guest-escape-compromised husk pod holds
+   raw RW access to the WHOLE node CAS, so it could DELETE or tamper another
+   tenant's committed chunks on that node (an availability/tamper surface; a
+   cross-tenant READ additionally needs the victim's manifest digest, which lives
+   only in org-scoped control-plane objects). Per-tenant CAS write isolation and
+   committed-revision pinning are the architectural mitigation, tracked in #744.
 4. **The secondary hardening** below: the raw-forkd privileged DaemonSet remains
    (the privileged-no-jailer DaemonSet is why raw-forkd is still NOT for untrusted
    multi-tenant). Four earlier secondary items are now SHIPPED: the husk pod no
@@ -409,12 +421,28 @@ the controller still owns the `WorkspaceRevision` commit + head advance. Surface
 delta vs the prior model: the node CAS is now mounted READ-WRITE into the husk
 pod (it was read-only manifests before) so the stub can persist a revision. The
 content-addressed store stays plaintext-content-addressed (or per-workspace
-encrypted at rest under `spec.store.encryptionKeyRef`, section 6). Residual: a
+encrypted at rest under `spec.store.encryptionKeyRef`, section 6). INTEGRITY on
+read is enforced by the content-addressed store: `cas.Store.Materialize` verifies
+each chunk's sha256 against its manifest digest as it hydrates and errors on a
+mismatch (removing the partial file), and `PutChunk` verifies the digest before
+writing, so a chunk that a compromised pod overwrote with non-matching bytes is
+DETECTED at the next hydrate, never silently restored into a guest. Residual: a
 compromised controller can drive a dehydrate/hydrate of any husk pod it can reach
-(the same activate/fork residual, Surface 2); a compromised husk pod already had
-write access to its node `<dataDir>` subtree (forks dir, rootfs CoW), and the CAS
-mount widens that to the content store on the same node, bounded to the node's own
-data dir.
+(the same activate/fork residual, Surface 2); and the node CAS is ONE shared
+`<dataDir>/cas` mounted READ-WRITE into EVERY husk pod on the node, so a
+guest-escape-compromised pod (which already had write access to its own
+`<dataDir>` subtree: forks dir, rootfs CoW) can also DELETE or tamper another
+tenant's committed chunks in that shared store on the same node. Integrity-on-read
+turns a tamper into a detected hydrate failure rather than a silent corruption,
+and a cross-tenant READ still needs the victim's manifest digest (held only in
+org-scoped control-plane objects, never handed to a pod), but the shared RW mount
+is a least-privilege and availability gap. Per-tenant CAS write isolation
+(per-workspace pod subpools or controller-mediated, digest-verified CAS writes so
+a pod never holds raw RW to the shared store) plus committed-revision pinning
+against eviction are the architectural fix, tracked in #744; they are a change to
+the warm-pool/shared-CAS model (a warm pod is built before a claim binds, so its
+eventual workspace is unknown at mount time) and need cluster-e2e and a named
+security reviewer, so they are deliberately not rushed here.
 
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin
 (`cmd/kvm-device-plugin`, `internal/deviceplugin`): the pod requests
