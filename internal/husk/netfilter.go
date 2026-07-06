@@ -46,6 +46,27 @@ type NetfilterConfig struct {
 	ResolverIP net.IP
 }
 
+// netfilterPolicyConfig builds the egress and inbound POLICY fields of a
+// NetfilterConfig that every husk VM shares, single-VM and multi-VM alike, and
+// applies the fail-closed deny-by-default egress. The caller fills in the
+// per-activation fields that differ (Tap, GuestIP, HostIP, and ResolverIP for
+// the single-VM DNS-proxy path), so the shared policy assembly lives in one
+// place and cannot drift between the two paths.
+func netfilterPolicyConfig(req ActivateRequest) NetfilterConfig {
+	cfg := NetfilterConfig{
+		Egress:       v1.EgressPolicy(req.Egress),
+		Allow:        req.Allow,
+		BlockNetwork: req.BlockNetwork,
+		AllowCIDRs:   req.AllowCIDRs,
+		Inbound:      v1.InboundPolicy(req.Inbound),
+		InboundCIDRs: req.InboundCIDRs,
+	}
+	if cfg.Egress == "" {
+		cfg.Egress = v1.EgressDeny
+	}
+	return cfg
+}
+
 // netfilterRunner executes one host command with optional stdin in the pod
 // netns. It is injected so the orchestration is unit-testable without root; the
 // production stub wires it to an exec-based runner.

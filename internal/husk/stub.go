@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/firecracker"
@@ -886,21 +885,11 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	overrides := req.NetworkOverrides
 	if s.netRunner != nil && req.Network != nil {
 		tap := netconf.DeriveTapName(req.Network.GuestIP)
-		cfg := NetfilterConfig{
-			Tap:          tap,
-			GuestIP:      net.ParseIP(req.Network.GuestIP),
-			HostIP:       net.ParseIP(req.Network.GatewayIP),
-			Egress:       v1.EgressPolicy(req.Egress),
-			Allow:        req.Allow,
-			BlockNetwork: req.BlockNetwork,
-			AllowCIDRs:   req.AllowCIDRs,
-			Inbound:      v1.InboundPolicy(req.Inbound),
-			InboundCIDRs: req.InboundCIDRs,
-			ResolverIP:   net.ParseIP(req.Network.ResolverIP),
-		}
-		if cfg.Egress == "" {
-			cfg.Egress = v1.EgressDeny
-		}
+		cfg := netfilterPolicyConfig(req)
+		cfg.Tap = tap
+		cfg.GuestIP = net.ParseIP(req.Network.GuestIP)
+		cfg.HostIP = net.ParseIP(req.Network.GatewayIP)
+		cfg.ResolverIP = net.ParseIP(req.Network.ResolverIP)
 		if err := applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
 			werr := fmt.Errorf("husk: apply in-pod egress filter: %w", err)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
