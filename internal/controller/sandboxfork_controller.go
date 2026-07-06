@@ -497,6 +497,33 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		}
 	}
 
+	// Resolve the SOURCE's pool template so the fork child inherits the SAME
+	// network posture, egress policy, and resource caps a warm-claimed sandbox of
+	// this pool gets (issue #760), mirroring the warm-claim activate path. The
+	// warm-claim path builds the ActivateRequest from huskNotifyNetwork(template) +
+	// huskEgressConfig(template); the fork child previously sent only SnapshotDir +
+	// Token, so a deny-all child came up NETWORKLESS (a socket connect returned an
+	// immediate OSError instead of a real deny-all sandbox's tap + nft-drop TIMEOUT)
+	// and a networked/allowlisted tier's child lost the parent's access entirely.
+	// Best-effort: a source whose pool object cannot be resolved (deleted, or a
+	// non-poolRef source) falls back to the empty template, which still yields the
+	// fail-closed default-deny network the warm path uses for a no-policy pool
+	// (huskNotifyNetwork always returns a non-nil config and huskEgressConfig
+	// defaults Egress to deny), so the child is never LESS isolated than the fix
+	// intends.
+	template := &v1.PoolTemplateSpec{}
+	if source.Spec.Source.PoolRef != nil {
+		var pool v1.SandboxPool
+		if err := r.Get(ctx, client.ObjectKey{Namespace: fork.Namespace, Name: source.Spec.Source.PoolRef.Name}, &pool); err != nil {
+			logger.Info("fork child source pool unresolved; using fail-closed default-deny network and default resources", "pool", source.Spec.Source.PoolRef.Name, "detail", err.Error())
+		} else if t, terr := r.resolvePoolTemplate(ctx, &pool); terr != nil {
+			logger.Info("fork child source pool template unresolved; using fail-closed default-deny network and default resources", "pool", source.Spec.Source.PoolRef.Name, "detail", terr.Error())
+		} else {
+			template = t
+		}
+	}
+	netCfg := huskEgressConfig(template)
+
 	opts := HuskPodOptions{
 		StubImage:       r.HuskStubImage,
 		DNSUpstream:     r.HuskDNSUpstream,
@@ -505,6 +532,10 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		DataDir:         r.DataDir,
 		ForkSnapshotID:  forkID,
 		ForkSourceNode:  source.Status.Node,
+		// The resolved source pool template: the fork child pod inherits its cpu
+		// burst cap + memory (buildForkChildPod threads it into buildHuskPod),
+		// instead of the default caps an empty PoolTemplateSpec yields (issue #760).
+		Template: template,
 		// The husk PKI Secrets the child stub mounts for its --control-listen mTLS
 		// channel (leaf at /etc/husk/tls, CA at /etc/husk/ca). buildHuskPod only
 		// adds the TLS/CA volumes when these are set; omitting them (the previous
@@ -597,7 +628,21 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 				// hostPath is mounted at HuskSnapshotDir). No ExpectedDigest: the fork
 				// snapshot is node-local, not content-addressed.
 				SnapshotDir: HuskSnapshotDir,
-				Token:       apiToken,
+				// Inherit the SAME network posture the warm-claim activate delivers
+				// (issue #760): the guest is pinned to the in-pod /30 + DNS proxy
+				// (huskNotifyNetwork, never nil), and the full egress policy (default
+				// verdict, allowlist, block_network, CIDR allows, inbound) comes from
+				// the resolved source pool template. Without these the child came up
+				// networkless / with no access; an omitted egress chain is an
+				// isolation gap if the baked NIC were ever routable.
+				Network:      huskNotifyNetwork(template),
+				Egress:       netCfg.Egress,
+				Allow:        netCfg.Allow,
+				BlockNetwork: netCfg.BlockNetwork,
+				AllowCIDRs:   netCfg.AllowCIDRs,
+				Inbound:      netCfg.Inbound,
+				InboundCIDRs: netCfg.InboundCIDRs,
+				Token:        apiToken,
 			})
 		}
 		if err != nil {
