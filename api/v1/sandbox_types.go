@@ -459,6 +459,22 @@ type SandboxChild struct {
 	// StartupLatencyMs is the child's fork latency in milliseconds.
 	// +optional
 	StartupLatencyMs int64 `json:"startupLatencyMs,omitempty"`
+
+	// Pod is the husk host pod backing this child when it was spawned as an
+	// ADDITIONAL VM inside an existing (shared) source pod rather than getting its
+	// own pod (the multi-VM fork routing, controller flag default off). Empty on
+	// the default one-pod-per-child path, where SandboxID already names the child's
+	// own pod. Together with VMID it maps a co-located child to its exact host
+	// process, mirroring SandboxStatus.Pod / SandboxStatus.VMID. NEW v2 field.
+	// +optional
+	Pod string `json:"pod,omitempty"`
+
+	// VMID is the per-VM identity of this child WITHIN Pod above when it was
+	// spawned into a shared source pod (multi-VM fork routing). Empty on the
+	// default one-pod-per-child path (the child owns its whole pod, so the pod
+	// name is its handle). NEW v2 field.
+	// +optional
+	VMID string `json:"vmId,omitempty"`
 }
 
 // SandboxBudgetSpend reports the capability-budget accounting (issue #25).
