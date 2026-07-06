@@ -919,6 +919,14 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 	claim.Status.Phase = v1.SandboxReady
 	claim.Status.Endpoint = endpoint
 	claim.Status.Node = pod.Spec.NodeName
+	// Surface the shared-host mapping on the CRD (fork-primitive-multinode plan,
+	// "the k8s interface and observability"): Pod is the husk HOST pod backing
+	// this sandbox and VMID is the intra-pod VM identity. On today's single-VM
+	// path VMID is the default primary identity, so the (Pod, VMID) pair is
+	// populated and correct for the 1:1 case; multi-VM co-location (fork routing)
+	// lands in a later increment. This is a purely additive status write.
+	claim.Status.Pod = pod.Name
+	claim.Status.VMID = v1.DefaultVMID
 	claim.Status.SandboxID = pod.Name
 	claim.Status.StartedAt = &now
 	setCondition(&claim.Status.Conditions, metav1.Condition{
