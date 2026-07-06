@@ -468,14 +468,14 @@ activate (`internal/husk/multivm.go` `SpawnVM` -> `prepareInstance` +
 The op FAILS CLOSED on the flag: a stub NOT started with `--multi-vm` refuses
 spawn-vm, so a single-VM pod is never driven to host a second VM. The spawned VM
 lands on its OWN tap + /30 + default-deny egress chain derived from the vmID (the
-per-VM network isolation in the multi-VM-per-pod row of section 7), so a
+per-VM network isolation in the multi-VM-per-pod row of Surface 2, Guest to guest), so a
 co-located VM's egress cannot cross into a sibling's. This is DEFAULT OFF and the
 controller is NOT wired to call it (the fork-routing that drives it is a later
 increment), so the shipped surface is unchanged: nothing spawns a second VM in
 production today. Residual: a compromised controller can drive a spawn-vm against
 any multi-VM husk pod it can reach, the same residual already stated for activate
 and fork-snapshot (Surface 2); and it inherits the shared-pod-netns residual of
-the multi-VM-per-pod mode (section 7), which is why it stays flag-gated behind that
+the multi-VM-per-pod mode (Surface 2, Guest to guest), which is why it stays flag-gated behind that
 mode's per-VM tap + /30 isolation and a named security review before it ships.
 
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin

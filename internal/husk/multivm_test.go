@@ -541,3 +541,53 @@ func TestMultiVMPrepareRefusedWhileClosing(t *testing.T) {
 		t.Fatal("a vm was added to the instances map during closing; it would outlive Close")
 	}
 }
+
+// TestSpawnVMActivationFailureReturnsNotOK proves the full SpawnVM path reports
+// a failure fail-closed when activation errors: the spawned VM's snapshot load
+// fails, so SpawnVM returns OK=false carrying the activation error, the instance
+// is not left Active, and an already-active sibling is undisturbed.
+func TestSpawnVMActivationFailureReturnsNotOK(t *testing.T) {
+	vms := map[string]*fakeVMM{}
+	start := func(cfg firecracker.VMConfig) (vmm, error) {
+		vm := &fakeVMM{}
+		if cfg.ID == "husk-test-fork-9" {
+			vm.loadErr = errors.New("snapshot corrupt")
+		}
+		vms[cfg.ID] = vm
+		return vm, nil
+	}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:   start,
+		Ready:   readyOK,
+		Notify:  (&fakeNotifier{}).notify,
+		Verify:  verifyOK,
+		MultiVM: true,
+	})
+	// Bring up the primary VM so we can prove it is undisturbed by the failure.
+	if err := s.prepareInstance(context.Background(), defaultVMID); err != nil {
+		t.Fatalf("prepareInstance(default): %v", err)
+	}
+	if _, err := s.activateInstance(context.Background(), defaultVMID, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
+		t.Fatalf("activateInstance(default): %v", err)
+	}
+
+	res := s.SpawnVM(context.Background(), SpawnVMRequest{
+		VMID:     "fork-9",
+		Activate: ActivateRequest{SnapshotDir: "/snap"},
+	})
+	if res.OK {
+		t.Fatal("SpawnVM must report not-OK when activation fails")
+	}
+	if res.Error == "" {
+		t.Fatal("a failed SpawnVM must carry the activation error")
+	}
+	if res.VMID != "fork-9" {
+		t.Fatalf("SpawnVM result VMID = %q, want fork-9", res.VMID)
+	}
+	if got := s.instances["fork-9"].state; got == StateActive {
+		t.Fatalf("a fail-closed spawned instance must not be active, got %s", got)
+	}
+	if got := s.instances[defaultVMID].state; got != StateActive {
+		t.Fatalf("the primary instance must stay active despite the spawn failure, got %s", got)
+	}
+}
