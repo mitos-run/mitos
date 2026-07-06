@@ -62,6 +62,27 @@ func (r *SandboxReconciler) SetForkSnapshotRemoverForTest(fn func(ctx context.Co
 	r.removeForkSnapshot = fn
 }
 
+// SetForkVMSpawnerForTest installs the spawn-vm seam the MultiVMFork routing dials
+// through (tests only).
+func (r *SandboxReconciler) SetForkVMSpawnerForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error)) {
+	r.spawnVM = fn
+}
+
+// SetMultiVMForkGateForTest installs the race-safe MultiVMFork toggle a test flips
+// per-case on the shared reconciler (tests only). A nil gate reads the MultiVMFork
+// field.
+func (r *SandboxReconciler) SetMultiVMForkGateForTest(gate func() bool) {
+	r.multiVMForkGate = gate
+}
+
+// HuskMultiVMLabel exposes the multi-VM-capable husk pod label to the external
+// controller_test package, so a test can stamp a source pod as multi-VM capable.
+const HuskMultiVMLabel = huskMultiVMLabel
+
+// MaxCoLocatedForkVMsPerPod exposes the L1.7a co-location cap to the external
+// controller_test package.
+const MaxCoLocatedForkVMsPerPod = maxCoLocatedForkVMsPerPod
+
 // SkipForkLabel restricts the reconciler to sandboxes WITHOUT the given label,
 // for the husk-fork harness; an alias of SkipLabel on the consolidated reconciler.
 func (r *SandboxReconciler) SkipForkLabel(label string) { r.skipLabel(label, "sandbox-fork-raw") }
