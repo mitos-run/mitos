@@ -48,8 +48,8 @@ func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1.SandboxPool, templa
 
 // BuildForkChildPodForTest exposes buildForkChildPod to the external
 // controller_test package so the fork child pod spec can be unit-tested.
-func BuildForkChildPodForTest(fork *v1.Sandbox, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
-	return buildForkChildPod(fork, childName, opts, scheme)
+func BuildForkChildPodForTest(fork *v1.Sandbox, srcPod *corev1.Pod, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+	return buildForkChildPod(fork, srcPod, childName, opts, scheme)
 }
 
 // SetForkSnapshotForTest installs the fork-snapshot seam (tests only).
@@ -466,7 +466,7 @@ func startFakeForkdNodeFull(registry *NodeRegistry, nodeName string, serverTLS, 
 	engine = fork.NewMockEngine()
 	engine.ForkDelay = 0
 	for _, tmpl := range templates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false, false); err != nil {
 			return nil, nil, nil, nil, err
 		}
 	}

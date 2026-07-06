@@ -1,8 +1,8 @@
 // Package telemetry is a privacy-first PRODUCT-USAGE telemetry pipeline for the
 // hosted Mitos binaries. It emits a small, curated set of product-analytics
-// events (sandbox.created, signup.started, signup.verified) through a pluggable
-// Sink so the operators of the hosted offering can measure adoption without ever
-// collecting PII.
+// events (sandbox.created, sandbox.forked, signup.started, signup.verified)
+// through a pluggable Sink so the operators of the hosted offering can measure
+// adoption without ever collecting PII.
 //
 // This is DELIBERATELY distinct from internal/observability (OpenTelemetry
 // distributed tracing). That package records spans for request-path debugging;

@@ -39,7 +39,11 @@ type fakeVMM struct {
 
 	resumeCalls int
 	resumeErr   error
-	resumed     bool
+	// resumeErrSeq scripts per-call Resume results (consumed one per call, front
+	// first); once exhausted Resume falls back to resumeErr. It lets a test model a
+	// transient resume error that clears on retry.
+	resumeErrSeq []error
+	resumed      bool
 
 	// paused / pauseErr / snapMem / snapState / snapErr support the fork-snapshot
 	// op: ForkSnapshot pauses the source VM, writes a Full snapshot, then resumes.
@@ -57,6 +61,18 @@ type fakeVMM struct {
 	// error = a dead/defunct Firecracker). Nil keeps the VMM alive, so existing
 	// tests need not care about liveness. It is called under f.mu.
 	ping func() error
+
+	// pid, when set, is what PID returns (the fake firecracker process id the
+	// metering tests key their MemStat fake on). Zero (the default) reads as no
+	// process, which the memory reader meters as (0, 0).
+	pid int
+}
+
+// PID returns the fake firecracker process id (0 = no process).
+func (f *fakeVMM) PID() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pid
 }
 
 // errSnap is a scripted CreateSnapshot failure used by the fork-snapshot
@@ -94,9 +110,18 @@ func (f *fakeVMM) Resume() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.resumeCalls++
-	f.resumed = true
 	f.callOrder = append(f.callOrder, "resume")
-	return f.resumeErr
+	err := f.resumeErr
+	if len(f.resumeErrSeq) > 0 {
+		err = f.resumeErrSeq[0]
+		f.resumeErrSeq = f.resumeErrSeq[1:]
+	}
+	// resumed reflects an ACTUAL resume: it is set only when Resume succeeds, so a
+	// test can assert a source was left NOT resumed after a persistent failure.
+	if err == nil {
+		f.resumed = true
+	}
+	return err
 }
 
 func (f *fakeVMM) Close() error {

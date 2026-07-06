@@ -69,6 +69,10 @@ type MockEngine struct {
 	// CreateTemplate call (nil if none). Tests assert the template's declared
 	// volumes were plumbed through the CreateTemplate RPC to the engine.
 	lastTemplateVolumes []volume.Spec
+	// lastWarmKernel records the warmKernel flag of the most recent
+	// CreateTemplate call. Tests assert the pool template's warmKernel opt-in
+	// was plumbed through the CreateTemplate RPC to the engine.
+	lastWarmKernel bool
 	// memoryTotalBytes is the fixed node memory budget GetCapacity reports so
 	// envtest scheduling has a non-zero capacity to bin-pack against. Defaults
 	// to 16 GiB; SetMemoryTotal overrides it (Task 3 envtests shrink it to
@@ -109,6 +113,16 @@ func (e *MockEngine) LastInitCommands() []string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.lastInitCommands
+}
+
+// LastWarmKernel reports the warmKernel flag passed to the most recent
+// CreateTemplate call (false if none has been recorded). It lets controller
+// tests assert the pool template's warmKernel opt-in reached the engine
+// through the CreateTemplate RPC.
+func (e *MockEngine) LastWarmKernel() bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.lastWarmKernel
 }
 
 // LastForkNetwork returns the NetworkOpts passed to the most recent Fork call,
@@ -254,12 +268,13 @@ func mockMountTable(specs []volume.Spec) []vsock.VolumeMountEntry {
 	return volumeMountTable(prepared)
 }
 
-func (e *MockEngine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, _ *firecracker.WorkloadSpec, _ *firecracker.VMResources, _ bool) error {
+func (e *MockEngine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, _ *firecracker.WorkloadSpec, _ *firecracker.VMResources, _ bool, warmKernel bool) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	e.lastInitCommands = initCommands
 	e.lastTemplateVolumes = volumes
+	e.lastWarmKernel = warmKernel
 	e.templates[id] = &Template{
 		ID:          id,
 		Image:       image,

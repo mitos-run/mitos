@@ -147,15 +147,18 @@ const (
 // claim reconciler threads this into the activate request.
 const HuskSnapshotDir = huskSnapshotMountPath
 
-// huskSourceRootfsInPodPath returns the IN-POD path a fork child clones the
-// SOURCE sandbox's live rootfs from. The source pod wrote its own per-activation
-// rootfs clone at <huskRootfsCoWMountPath>/<source-pod-name>/rootfs.ext4 under
-// the shared husk-rootfs hostPath dir; the fork child mounts that SAME dir, so
-// the source pod's rootfs is visible to it at this path. This is the rootfs the
-// fork snapshot's vmstate was baked against, so the child's CoW clone source
-// must be it (not the pristine template rootfs).
-func huskSourceRootfsInPodPath(sourcePodName string) string {
-	return filepath.Join(huskRootfsCoWMountPath, sourcePodName, "rootfs.ext4")
+// huskForkRootfsInPodPath returns the IN-POD path a fork child clones its rootfs
+// from: the FROZEN source rootfs the source stub captured INSIDE the fork
+// snapshot's paused window, written next to mem+vmstate at
+// SnapshotDir/rootfs.ext4 and mounted read-only at huskSnapshotMountPath in the
+// child. It is a point-in-time copy paired with the memory checkpoint, so the
+// child's restored guest memory (page cache, ext4 superblock, in-flight metadata)
+// matches the disk exactly. Cloning from the source's LIVE rootfs instead would
+// let a resumed source drift the disk out of sync with the checkpoint; cloning
+// from the pristine template rootfs would lose every write the source made. The
+// frozen copy avoids both.
+func huskForkRootfsInPodPath() string {
+	return filepath.Join(huskSnapshotMountPath, "rootfs.ext4")
 }
 
 // HuskPodOptions configures the husk pod spec the controller emits.
@@ -206,21 +209,29 @@ type HuskPodOptions struct {
 	// source sandbox's node). Required when ForkSnapshotID is set, since the fork
 	// snapshot is a node-local hostPath that exists only on that node.
 	ForkSourceNode string
-	// ForkSourceRootfsPath, set on a FORK CHILD, is the IN-POD path of the SOURCE
-	// sandbox's live rootfs that the child's per-activation CoW clone is made from.
-	// It is the source pod's own per-activation rootfs clone, exposed to the child
-	// through the shared husk-rootfs hostPath dir at
-	// <huskRootfsCoWMountPath>/<source-pod-name>/rootfs.ext4. This is load-bearing
-	// for fork correctness: the fork snapshot's vmstate was baked against the
-	// SOURCE's rootfs (path_on_host), so the child's restored guest memory (page
-	// cache, ext4 superblock, in-flight metadata) reflects the SOURCE disk. Cloning
-	// from the PRISTINE TEMPLATE rootfs instead (the bug) rebinds the child to a
-	// disk that does not match its memory: any data the source wrote since boot is
-	// lost and the cached-vs-on-disk mismatch can corrupt the child fs. When set,
-	// it replaces the template rootfs as the clone SOURCE; each child still writes
-	// its OWN per-activation clone (independence), only the clone source changes.
-	// Empty (a warm pod, not a fork child) clones from the template rootfs.
+	// ForkSourceRootfsPath, set on a FORK CHILD, is the IN-POD path of the FROZEN
+	// source rootfs the child's per-activation CoW clone is made from. The source
+	// stub captured it inside the fork snapshot's paused window at
+	// SnapshotDir/rootfs.ext4, mounted read-only at huskSnapshotMountPath in the
+	// child (huskForkRootfsInPodPath). This is load-bearing for fork correctness:
+	// the fork snapshot's vmstate was baked against the source's rootfs, so the
+	// child's restored guest memory (page cache, ext4 superblock, in-flight
+	// metadata) must pair with a disk captured at the SAME instant. The frozen copy
+	// is that instant. Cloning from the source's LIVE rootfs would let the resumed
+	// source drift the disk out of sync with the checkpoint; cloning from the
+	// PRISTINE TEMPLATE rootfs would lose every write the source made. Each child
+	// still writes its OWN per-activation clone (independence); only the clone
+	// source changes. Empty (a warm pod, not a fork child) clones from the template
+	// rootfs.
 	ForkSourceRootfsPath string
+	// Template, when set on a FORK CHILD, is the resolved SOURCE pool template.
+	// buildForkChildPod threads it into buildHuskPod so the child pod carries the
+	// SAME per-sandbox resources (cpu burst cap, memory) a warm-claimed sandbox of
+	// the source pool gets, instead of the default caps an empty template yields
+	// (issue #760). Nil (or a warm pod, which passes its template to buildHuskPod
+	// directly) leaves the child on the documented default resources.
+	Template *v1.PoolTemplateSpec
+
 	// SnapshotNodes is the set of node hostnames the pool has materialized the
 	// template snapshot on (the registry's NodesWithTemplate). When non-empty the
 	// husk pod carries a nodeAffinity pinning it to exactly these nodes, so its
@@ -235,7 +246,10 @@ type HuskPodOptions struct {
 	// husk pod's KVM nodeSelector (so the VM runs only on the tenant's dedicated
 	// nodes); the tolerations are appended so the pod schedules onto tainted
 	// dedicated nodes. Both empty/nil leave the pod unconstrained beyond KVM +
-	// snapshot-node affinity.
+	// snapshot-node affinity. For a FORK CHILD, buildForkChildPod fills both from
+	// the SOURCE husk pod's own spec (not the pool): the child must land on the
+	// source pod's exact node, so the source's scheduling constraints are the
+	// authoritative record of what it takes to get there.
 	PlacementNodeSelector map[string]string
 	PlacementTolerations  []corev1.Toleration
 }
@@ -655,12 +669,14 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 
 		// The clone SOURCE for this pod's per-activation rootfs CoW. A WARM pod
 		// clones from the template rootfs (a fresh boot-time disk). A FORK CHILD
-		// must clone from the SOURCE sandbox's LIVE rootfs instead: the fork
-		// snapshot's vmstate was baked against the source's rootfs, so the child's
-		// restored guest memory reflects the SOURCE disk; cloning from the template
-		// would rebind the child to a disk that does not match its memory (silent
-		// data divergence / fs corruption). ForkSourceRootfsPath is the in-pod path
-		// of the source pod's rootfs (exposed through the shared husk-rootfs dir).
+		// must clone from the FROZEN source rootfs the source stub captured inside
+		// the fork snapshot's paused window instead: the fork snapshot's vmstate was
+		// baked against the source's rootfs at that instant, so the child's restored
+		// guest memory pairs with that exact disk; cloning from the template would
+		// rebind the child to a disk that does not match its memory (silent data
+		// divergence / fs corruption). ForkSourceRootfsPath is the in-pod path of
+		// the frozen rootfs (SnapshotDir/rootfs.ext4, on the read-only snapshot
+		// mount the child also restores mem+vmstate from).
 		cloneSourceRootfs := filepath.Join(templateDir, "rootfs.ext4")
 		if opts.ForkSourceRootfsPath != "" {
 			cloneSourceRootfs = opts.ForkSourceRootfsPath
@@ -987,14 +1003,46 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 // then rewrites the ownership, labels, and name for the fork. The pod is pinned
 // to the source node (opts.ForkSourceNode) and activates from
 // <DataDir>/forks/<ForkSnapshotID> (opts.ForkSnapshotID), both set by the caller.
-func buildForkChildPod(fork *v1.Sandbox, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+// srcPod is that source node's SOURCE husk pod; the child inherits its
+// scheduling constraints (nodeSelector and tolerations) so it can actually
+// land next to it (see the inheritance comment in the body).
+func buildForkChildPod(fork *v1.Sandbox, srcPod *corev1.Pod, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+	// Inherit the SOURCE pod's scheduling constraints so the child can actually
+	// land on the source node. The child is pinned to that exact node by the
+	// ForkSourceNode nodeAffinity (the fork snapshot and the source rootfs are
+	// node-local hostPaths), but affinity does not clear taints: hosted KVM
+	// nodes carry mitos.run/dedicated:NoSchedule, which warm pods tolerate via
+	// the pool's spec.placement tolerations. The fork path has no pool in hand,
+	// and the pool's placement may have changed since the source scheduled, so
+	// the source pod's OWN spec is the authoritative record of what it took to
+	// land there; without this the child sits Pending forever (production
+	// FailedScheduling: "1 node(s) had untolerated taint {mitos.run/dedicated}")
+	// and the fork 504s. The pin deliberately stays scheduler-visible
+	// (nodeAffinity, NOT spec.nodeName): husk pods are scheduler-placed
+	// throughout this file, and the KVM extended-resource request must pass
+	// scheduler fit; spec.nodeName would bypass that and turn node capacity
+	// exhaustion into a terminal kubelet OutOf<kvm-resource> pod instead of a
+	// Pending pod that schedules when a slot frees.
+	if srcPod != nil {
+		opts.PlacementNodeSelector = srcPod.Spec.NodeSelector
+		opts.PlacementTolerations = forkChildInheritedTolerations(srcPod.Spec.Tolerations)
+	}
+
 	// buildHuskPod only reads r.Scheme() (for the owner ref we overwrite) and the
 	// opts, so a zero reconciler is sufficient to build the spec. A synthetic pool
 	// carrier supplies GenerateName/namespace; ownership and labels are overwritten
 	// below.
 	r := &SandboxPoolReconciler{}
 	carrier := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: fork.Name, Namespace: fork.Namespace}}
-	pod := r.buildHuskPod(carrier, &v1.PoolTemplateSpec{}, opts)
+	// Build from the resolved SOURCE pool template so the fork child inherits the
+	// SAME cpu burst cap + memory a warm-claimed sandbox of the pool gets, not the
+	// default caps an empty template yields (issue #760). Nil falls back to the
+	// empty template (default caps), which is the pre-fix behavior and safe.
+	template := opts.Template
+	if template == nil {
+		template = &v1.PoolTemplateSpec{}
+	}
+	pod := r.buildHuskPod(carrier, template, opts)
 
 	// Rewrite identity: owned by the SandboxFork (GC with it), labeled as a fork
 	// child (never a warm-pool slot), deterministic name so re-reconcile is
@@ -1008,6 +1056,12 @@ func buildForkChildPod(fork *v1.Sandbox, childName string, opts HuskPodOptions, 
 	delete(pod.Labels, huskPoolLabel)
 	pod.Labels[huskLabel] = "true"
 	pod.Labels[huskForkLabel] = fork.Name
+	// The claim label carries the hosted sandbox id for a claimed pod; a fork
+	// child is claimed by its fork Sandbox from birth. The usage scraper
+	// (HuskPodScrapeLister) selects on this label, so a fork child without it
+	// is silently unbilled, and the claim-label pod-deletion paths (release,
+	// lifetime terminate) reap by it.
+	pod.Labels[huskClaimLabel] = fork.Name
 	_ = controllerutil.SetControllerReference(fork, pod, scheme)
 	return pod
 }
@@ -1328,6 +1382,25 @@ func huskTolerations(opts HuskPodOptions) []corev1.Toleration {
 		{Key: "node.kubernetes.io/unreachable", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: ptrInt64(huskNodeLossTolerationSeconds)},
 	}
 	return append(tol, opts.PlacementTolerations...)
+}
+
+// forkChildInheritedTolerations returns the SOURCE husk pod's tolerations
+// minus the fast node-loss pair (node.kubernetes.io/not-ready and
+// node.kubernetes.io/unreachable) that huskTolerations re-adds to every husk
+// pod, so a fork child carries each toleration exactly once. Everything else
+// is copied verbatim: the pool placement tolerations the source scheduled with
+// (#172, e.g. the mitos.run/dedicated NoSchedule taint on hosted KVM nodes)
+// and anything admission injected for the source apply equally to the child,
+// which must land on the SAME node.
+func forkChildInheritedTolerations(src []corev1.Toleration) []corev1.Toleration {
+	var out []corev1.Toleration
+	for _, t := range src {
+		if t.Key == corev1.TaintNodeNotReady || t.Key == corev1.TaintNodeUnreachable {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // huskPlacementNodeSelector / huskPlacementTolerations read the pool's

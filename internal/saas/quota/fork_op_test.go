@@ -33,6 +33,36 @@ func TestForkOpUnderCapAllowed(t *testing.T) {
 	}
 }
 
+// TestForkOpOverSizeRejected asserts the per-sandbox size cap applies to a
+// fork request that carries a sandbox spec, exactly like a create: classing
+// forks as creates must cover EVERY create-path cap, not just concurrency.
+func TestForkOpOverSizeRejected(t *testing.T) {
+	e, _ := newEnforcer(t, LiveUsage{}, TierFree, clock())
+	req := Request{Op: "sandbox.fork", IP: "1.2.3.4", NewSandbox: SandboxSpec{VCPUs: 999, MemBytes: 1 << 62, StorageBytes: 1 << 62}}
+	err := e.Check(context.Background(), "org-1", req)
+	if !errors.Is(err, ErrSandboxTooLarge) {
+		t.Fatalf("over-size fork error = %v, want ErrSandboxTooLarge", err)
+	}
+}
+
+// TestForkOpSizeOfAppliesThroughAdapter asserts the gateway adapter consults
+// its SizeOf seam for sandbox.fork exactly as it does for sandbox.create, so a
+// deployment that wires SizeOf enforces the size and aggregate caps on forks
+// too instead of silently checking forks with a zero spec.
+func TestForkOpSizeOfAppliesThroughAdapter(t *testing.T) {
+	e, _ := newEnforcer(t, LiveUsage{}, TierFree, clock())
+	a := GatewayAdapter{
+		Enforcer: e,
+		SizeOf: func(_ context.Context) (SandboxSpec, bool) {
+			return SandboxSpec{VCPUs: 999, MemBytes: 1 << 62, StorageBytes: 1 << 62}, true
+		},
+	}
+	err := a.Check(context.Background(), "org-1", "sandbox.fork")
+	if !errors.Is(err, ErrSandboxTooLarge) {
+		t.Fatalf("adapter fork error = %v, want ErrSandboxTooLarge (SizeOf must apply to forks)", err)
+	}
+}
+
 // TestForkOpChargesCreationRateBucket asserts forks share the rate ladder with
 // creates: churn-forking is throttled exactly like churn-creating (mirrors
 // TestCreationRateLimited).

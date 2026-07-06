@@ -64,7 +64,7 @@ func (r *SandboxReconciler) reconcileFromSandbox(ctx context.Context, fork *v1.S
 	}
 
 	// A rejected fork is terminal: never reconcile it again.
-	if meta.IsStatusConditionTrue(fork.Status.Conditions, "Rejected") {
+	if meta.IsStatusConditionTrue(fork.Status.Conditions, v1.ConditionRejected) {
 		return ctrl.Result{}, nil
 	}
 
@@ -127,10 +127,10 @@ func (r *SandboxReconciler) reconcileFromSandbox(ctx context.Context, fork *v1.S
 		now := metav1.Now()
 		if !inherit {
 			setCondition(&fork.Status.Conditions, metav1.Condition{
-				Type:               "Rejected",
+				Type:               v1.ConditionRejected,
 				Status:             metav1.ConditionTrue,
 				LastTransitionTime: now,
-				Reason:             "SecretInheritanceDenied",
+				Reason:             v1.ReasonSecretInheritanceDenied,
 				Message:            "source sandbox holds secrets; recreate the fork with spec.secretInheritance=inherit to permit it (forks duplicate guest memory, including secret values)",
 			})
 			if err := r.Status().Update(ctx, fork); err != nil {
@@ -497,6 +497,33 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		}
 	}
 
+	// Resolve the SOURCE's pool template so the fork child inherits the SAME
+	// network posture, egress policy, and resource caps a warm-claimed sandbox of
+	// this pool gets (issue #760), mirroring the warm-claim activate path. The
+	// warm-claim path builds the ActivateRequest from huskNotifyNetwork(template) +
+	// huskEgressConfig(template); the fork child previously sent only SnapshotDir +
+	// Token, so a deny-all child came up NETWORKLESS (a socket connect returned an
+	// immediate OSError instead of a real deny-all sandbox's tap + nft-drop TIMEOUT)
+	// and a networked/allowlisted tier's child lost the parent's access entirely.
+	// Best-effort: a source whose pool object cannot be resolved (deleted, or a
+	// non-poolRef source) falls back to the empty template, which still yields the
+	// fail-closed default-deny network the warm path uses for a no-policy pool
+	// (huskNotifyNetwork always returns a non-nil config and huskEgressConfig
+	// defaults Egress to deny), so the child is never LESS isolated than the fix
+	// intends.
+	template := &v1.PoolTemplateSpec{}
+	if source.Spec.Source.PoolRef != nil {
+		var pool v1.SandboxPool
+		if err := r.Get(ctx, client.ObjectKey{Namespace: fork.Namespace, Name: source.Spec.Source.PoolRef.Name}, &pool); err != nil {
+			logger.Info("fork child source pool unresolved; using fail-closed default-deny network and default resources", "pool", source.Spec.Source.PoolRef.Name, "detail", err.Error())
+		} else if t, terr := r.resolvePoolTemplate(ctx, &pool); terr != nil {
+			logger.Info("fork child source pool template unresolved; using fail-closed default-deny network and default resources", "pool", source.Spec.Source.PoolRef.Name, "detail", terr.Error())
+		} else {
+			template = t
+		}
+	}
+	netCfg := huskEgressConfig(template)
+
 	opts := HuskPodOptions{
 		StubImage:       r.HuskStubImage,
 		DNSUpstream:     r.HuskDNSUpstream,
@@ -505,6 +532,10 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		DataDir:         r.DataDir,
 		ForkSnapshotID:  forkID,
 		ForkSourceNode:  source.Status.Node,
+		// The resolved source pool template: the fork child pod inherits its cpu
+		// burst cap + memory (buildForkChildPod threads it into buildHuskPod),
+		// instead of the default caps an empty PoolTemplateSpec yields (issue #760).
+		Template: template,
 		// The husk PKI Secrets the child stub mounts for its --control-listen mTLS
 		// channel (leaf at /etc/husk/tls, CA at /etc/husk/ca). buildHuskPod only
 		// adds the TLS/CA volumes when these are set; omitting them (the previous
@@ -512,12 +543,16 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// reading --tls-cert. They are the SAME Secrets the warm-pool path uses.
 		TLSSecretName: r.HuskTLSSecretName,
 		CASecretName:  r.HuskCASecretName,
-		// BUG 1 fix: the child's per-activation rootfs CoW clone must be sourced
-		// from the SOURCE sandbox's live rootfs (the disk the fork snapshot's
-		// vmstate was baked against), NOT the pristine template rootfs. The source
-		// pod name is its Status.SandboxID; its rootfs is visible to the child
-		// through the shared husk-rootfs hostPath dir.
-		ForkSourceRootfsPath: huskSourceRootfsInPodPath(source.Status.SandboxID),
+		// The child's per-activation rootfs CoW clone is sourced from the FROZEN
+		// source rootfs the source stub captured inside the fork snapshot's paused
+		// window (SnapshotDir/rootfs.ext4), NOT the source's LIVE rootfs and NOT the
+		// pristine template rootfs. The frozen copy is a point-in-time pair with the
+		// mem+vmstate checkpoint, so the child's restored memory matches its disk.
+		// Cloning from the source's live rootfs would let the resumed source drift
+		// the disk out of sync with the checkpoint; the template rootfs would lose
+		// every write the source made. The frozen copy rides the SAME read-only
+		// snapshot mount the child restores mem+vmstate from.
+		ForkSourceRootfsPath: huskForkRootfsInPodPath(),
 	}
 
 	// Fixed-slot, idempotent child set. The child pods are EXACTLY Replicas, with
@@ -549,7 +584,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		childName := fmt.Sprintf("%s-fork-%d", fork.Name, i)
 
 		// Get-or-create the child pod for this slot (idempotent by the stable name).
-		child, err := r.ensureForkChildPod(ctx, fork, childName, opts)
+		child, err := r.ensureForkChildPod(ctx, fork, srcPod, childName, opts)
 		if err != nil {
 			logger.Error(err, "create fork child pod failed", "child", childName)
 			continue
@@ -593,7 +628,21 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 				// hostPath is mounted at HuskSnapshotDir). No ExpectedDigest: the fork
 				// snapshot is node-local, not content-addressed.
 				SnapshotDir: HuskSnapshotDir,
-				Token:       apiToken,
+				// Inherit the SAME network posture the warm-claim activate delivers
+				// (issue #760): the guest is pinned to the in-pod /30 + DNS proxy
+				// (huskNotifyNetwork, never nil), and the full egress policy (default
+				// verdict, allowlist, block_network, CIDR allows, inbound) comes from
+				// the resolved source pool template. Without these the child came up
+				// networkless / with no access; an omitted egress chain is an
+				// isolation gap if the baked NIC were ever routable.
+				Network:      huskNotifyNetwork(template),
+				Egress:       netCfg.Egress,
+				Allow:        netCfg.Allow,
+				BlockNetwork: netCfg.BlockNetwork,
+				AllowCIDRs:   netCfg.AllowCIDRs,
+				Inbound:      netCfg.Inbound,
+				InboundCIDRs: netCfg.InboundCIDRs,
+				Token:        apiToken,
 			})
 		}
 		if err != nil {
@@ -656,8 +705,9 @@ func (r *SandboxReconciler) findHuskPod(ctx context.Context, ns, name string) (*
 
 // ensureForkChildPod creates the fork child pod if it does not exist and returns
 // the current pod object. Idempotent across requeues (a child already created is
-// fetched and returned).
-func (r *SandboxReconciler) ensureForkChildPod(ctx context.Context, fork *v1.Sandbox, name string, opts HuskPodOptions) (*corev1.Pod, error) {
+// fetched and returned). srcPod is the SOURCE husk pod whose scheduling
+// constraints the child inherits (buildForkChildPod).
+func (r *SandboxReconciler) ensureForkChildPod(ctx context.Context, fork *v1.Sandbox, srcPod *corev1.Pod, name string, opts HuskPodOptions) (*corev1.Pod, error) {
 	var existing corev1.Pod
 	err := r.Get(ctx, client.ObjectKey{Namespace: fork.Namespace, Name: name}, &existing)
 	if err == nil {
@@ -666,7 +716,7 @@ func (r *SandboxReconciler) ensureForkChildPod(ctx context.Context, fork *v1.San
 	if !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("get fork child pod %s: %w", name, err)
 	}
-	pod := buildForkChildPod(fork, name, opts, r.Scheme)
+	pod := buildForkChildPod(fork, srcPod, name, opts, r.Scheme)
 	if err := r.Create(ctx, pod); err != nil && !apierrors.IsAlreadyExists(err) {
 		return nil, fmt.Errorf("create fork child pod %s: %w", name, err)
 	}

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -111,6 +112,27 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 		if err := json.Unmarshal(req.Body, &body); err != nil {
 			return errResp(apierr.Get(apierr.CodeInvalidJSON).
 				WithCause("the create request body is not valid JSON")), nil
+		}
+	}
+
+	// Single-tenant mode shares ONE namespace across all orgs, so a client
+	// supplied secretRef or workspace name resolves by bare name into that shared
+	// namespace with no org boundary: a tenant could name a platform Secret
+	// (database DSN, mail credentials) or another tenant's Secret/Workspace and
+	// have it mounted into its own sandbox (GHSA-pgv2-9w24-j7wh). There is no safe
+	// per-org meaning for a bare object name in a shared namespace, so refuse
+	// these references here. Per-org tenancy (a namespace per org) restores the
+	// boundary and lifts this restriction.
+	if k.singleTenantNamespace != "" {
+		if len(body.Secrets) > 0 {
+			return errResp(apierr.Get(apierr.CodeInvalidInput).
+				WithCause("secret references are not permitted in single-tenant mode: a bare Secret name has no org boundary in a shared namespace").
+				WithRemediation("Pass values inline via \"env\" instead of \"secrets\", or run the control plane with per-org tenancy (a namespace per org) to use secretRef safely.")), nil
+		}
+		if body.Workspace != "" {
+			return errResp(apierr.Get(apierr.CodeInvalidInput).
+				WithCause("workspace references are not permitted in single-tenant mode: a bare Workspace name has no org boundary in a shared namespace").
+				WithRemediation("Run the control plane with per-org tenancy (a namespace per org) to use a workspace, or omit \"workspace\".")), nil
 		}
 	}
 
@@ -223,52 +245,119 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 // phase, so waiting on the phase alone would misreport it as a timeout), or the
 // readiness timeout (504-style). startedAt is when the create or fork op began;
 // it feeds the observed-latency fallback in the ready payload.
+//
+// Readiness is observed by a WATCH on the single sandbox (readywatch.go), so
+// the response returns the moment the controller flips the phase instead of on
+// a poll-tick boundary (production measured the tick quantization as the
+// dominant create/fork cost: p50 545ms client observed vs 6-40ms on-node
+// activate). When the client cannot watch or the watch cannot be established,
+// the wait fails OPEN to the legacy poll loop below.
 func (k *K8sControlPlane) pollReady(ctx context.Context, ns, name string, startedAt time.Time) (saas.ForwardResponse, error) {
 	deadline := k.now().Add(k.readyTimeout)
+	if w, ok := k.c.(client.WithWatch); ok {
+		if resp, done := k.watchReady(ctx, w, ns, name, startedAt, deadline); done {
+			return resp, nil
+		}
+		slog.Warn("sandbox ready watch unavailable; falling back to status polling",
+			"namespace", ns, "sandbox", name)
+	}
+	return k.pollReadyTicker(ctx, ns, name, startedAt, deadline)
+}
+
+// pollReadyTicker is the legacy ticker-driven readiness wait, kept as the
+// fail-open fallback when a watch cannot be established. It re-reads the
+// sandbox every pollInterval until a terminal outcome or the deadline.
+func (k *K8sControlPlane) pollReadyTicker(ctx context.Context, ns, name string, startedAt time.Time, deadline time.Time) (saas.ForwardResponse, error) {
 	ticker := time.NewTicker(k.pollInterval)
 	defer ticker.Stop()
 
 	for {
 		var sb v1.Sandbox
 		if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &sb); err != nil {
-			if apierrors.IsNotFound(err) {
-				// The object vanished mid-create (a terminate raced the poll).
-				return errResp(apierr.Get(apierr.CodeNotFound).
-					WithCause("the sandbox was removed before it became ready")), nil
-			}
-			return errResp(apierr.Get(apierr.CodeInternal).
-				WithCause("could not read the sandbox status while waiting for readiness")), nil
+			return readSandboxError(ctx, err), nil
 		}
 
-		switch sb.Status.Phase {
-		case v1.SandboxReady:
-			return k.readyResponse(ctx, &sb, startedAt)
-		case v1.SandboxFailed:
-			return errResp(withStatus(apierr.Get(apierr.CodeInternal).
-				WithCause("the sandbox failed to start: "+failureReason(&sb)), http.StatusBadGateway)), nil
-		}
-
-		// A terminal Rejected condition (the fork engine's secret-inheritance
-		// default-deny) is recorded WITHOUT a Failed phase; surface the
-		// controller's actionable message instead of pending into a timeout.
-		if msg, rejected := rejectedReason(&sb); rejected {
-			return errResp(withStatus(apierr.Get(apierr.CodeInvalidInput).
-				WithMessage("the sandbox was rejected by the controller").
-				WithCause(msg), http.StatusConflict)), nil
+		if resp, done := k.sandboxOutcome(ctx, &sb, startedAt); done {
+			return resp, nil
 		}
 
 		if !k.now().Before(deadline) {
-			return errResp(withStatus(apierr.Get(apierr.CodeInternal).
-				WithCause(fmt.Sprintf("the sandbox did not become ready within %s; it is still %s", k.readyTimeout, phaseOrUnknown(&sb))), http.StatusGatewayTimeout)), nil
+			return k.readyTimeoutError(phaseOrUnknown(&sb)), nil
 		}
 
 		select {
 		case <-ctx.Done():
-			return errResp(apierr.Get(apierr.CodeCanceled).
-				WithCause("the create request was canceled while waiting for the sandbox to become ready")), nil
+			return createCanceledError(), nil
 		case <-ticker.C:
 		}
 	}
+}
+
+// sandboxOutcome maps the sandbox's current state to a terminal create outcome.
+// done is false while the sandbox is still on its way to Ready. It is shared by
+// the watch and poll waits so both produce byte-identical envelopes.
+func (k *K8sControlPlane) sandboxOutcome(ctx context.Context, sb *v1.Sandbox, startedAt time.Time) (saas.ForwardResponse, bool) {
+	switch sb.Status.Phase {
+	case v1.SandboxReady:
+		resp, _ := k.readyResponse(ctx, sb, startedAt)
+		return resp, true
+	case v1.SandboxFailed:
+		return errResp(withStatus(apierr.Get(apierr.CodeInternal).
+			WithCause("the sandbox failed to start: "+failureReason(sb)), http.StatusBadGateway)), true
+	}
+
+	// A terminal Rejected condition (the fork engine's secret-inheritance
+	// default-deny) is recorded WITHOUT a Failed phase; surface the
+	// controller's actionable message instead of pending into a timeout.
+	// The secrets gate gets its own 403 whose remediation names the exact
+	// wire-level opt-in, so an agent can self-correct in one round trip.
+	if c := rejectedCondition(sb); c != nil {
+		if c.Reason == v1.ReasonSecretInheritanceDenied {
+			return errResp(withStatus(apierr.Get(apierr.CodeForbidden).
+				WithMessage("the fork was rejected: the source sandbox holds secrets").
+				WithCause(c.Message).
+				WithRemediation("A live fork duplicates the source VM's memory, including delivered secret values, so it is denied by default. Re-request the fork with \"secret_inheritance\": \"inherit\" in the body to explicitly permit duplicating them into the child, or fork a sandbox that holds no secrets."), http.StatusForbidden)), true
+		}
+		return errResp(withStatus(apierr.Get(apierr.CodeInvalidInput).
+			WithMessage("the sandbox was rejected by the controller").
+			WithCause(c.Message), http.StatusConflict)), true
+	}
+	return saas.ForwardResponse{}, false
+}
+
+// readSandboxError maps a readiness-wait Get failure to its envelope: a
+// canceled request keeps its canceled envelope (the client hung up; the Get
+// error is just the interruption surfacing), and a NotFound means the object
+// vanished mid-create (a terminate raced the wait).
+func readSandboxError(ctx context.Context, err error) saas.ForwardResponse {
+	if ctx.Err() != nil {
+		return createCanceledError()
+	}
+	if apierrors.IsNotFound(err) {
+		return sandboxRemovedError()
+	}
+	return errResp(apierr.Get(apierr.CodeInternal).
+		WithCause("could not read the sandbox status while waiting for readiness"))
+}
+
+// sandboxRemovedError is the not_found envelope for a sandbox deleted while the
+// create waited for readiness.
+func sandboxRemovedError() saas.ForwardResponse {
+	return errResp(apierr.Get(apierr.CodeNotFound).
+		WithCause("the sandbox was removed before it became ready"))
+}
+
+// readyTimeoutError is the 504 envelope for a sandbox that did not become
+// ready within the configured timeout; phase names its last observed phase.
+func (k *K8sControlPlane) readyTimeoutError(phase string) saas.ForwardResponse {
+	return errResp(withStatus(apierr.Get(apierr.CodeInternal).
+		WithCause(fmt.Sprintf("the sandbox did not become ready within %s; it is still %s", k.readyTimeout, phase)), http.StatusGatewayTimeout))
+}
+
+// createCanceledError is the envelope for a create canceled while waiting.
+func createCanceledError() saas.ForwardResponse {
+	return errResp(apierr.Get(apierr.CodeCanceled).
+		WithCause("the create request was canceled while waiting for the sandbox to become ready"))
 }
 
 // readyResponse reads the per-sandbox token Secret and returns the 201 create
@@ -289,15 +378,22 @@ func (k *K8sControlPlane) readyResponse(ctx context.Context, sb *v1.Sandbox, sta
 		return errResp(apierr.Get(apierr.CodeInternal).
 			WithCause("the sandbox is ready but its access token secret could not be read")), nil
 	}
+	templateID := k.templateID(ctx, sb)
 	payload := map[string]any{
 		"id":           sb.Name,
 		"endpoint":     endpoint,
 		"token":        token,
 		"phase":        string(v1.SandboxReady),
-		"template_id":  k.templateID(ctx, sb),
+		"template_id":  templateID,
 		"fork_time_ms": forkTimeMs(sb, startedAt, k.now()),
 	}
-	return jsonResp(http.StatusCreated, payload), nil
+	resp := jsonResp(http.StatusCreated, payload)
+	// Echo the non-identifying pool name so the gateway's telemetry can attach
+	// it as the pool property on sandbox.created and sandbox.forked events.
+	if templateID != "" {
+		resp.Header.Set("X-Mitos-Pool", templateID)
+	}
+	return resp, nil
 }
 
 // forkTimeMs is the honest fork latency for the ready payload: the
@@ -415,16 +511,17 @@ func (k *K8sControlPlane) readToken(ctx context.Context, ns, secretName string) 
 	return tok, nil
 }
 
-// rejectedReason reports whether the controller recorded a terminal Rejected
-// condition on the sandbox and returns its message.
-func rejectedReason(sb *v1.Sandbox) (string, bool) {
+// rejectedCondition returns the controller's terminal Rejected condition on
+// the sandbox, or nil when none is recorded. Callers branch on the Reason
+// (SecretInheritanceDenied gets its own public shape).
+func rejectedCondition(sb *v1.Sandbox) *metav1.Condition {
 	for i := range sb.Status.Conditions {
-		c := sb.Status.Conditions[i]
-		if c.Type == "Rejected" && c.Status == metav1.ConditionTrue {
-			return c.Message, true
+		c := &sb.Status.Conditions[i]
+		if c.Type == v1.ConditionRejected && c.Status == metav1.ConditionTrue {
+			return c
 		}
 	}
-	return "", false
+	return nil
 }
 
 // status returns the org-scoped sandbox status. A sandbox that does not exist OR

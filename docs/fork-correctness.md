@@ -40,7 +40,8 @@ each guest with the secret value absent from the host-side logs. See
 A husk live fork (`internal/controller/sandboxfork_controller.go` `reconcileHuskFork`)
 produces children by SNAPSHOTTING the source pod's running VM (the husk stub
 `ForkSnapshot` op: pause, Full snapshot to `<dataDir>/forks/<fork-id>/{mem,vmstate}`,
-resume unless `pauseSource`) and ACTIVATING each child husk pod from that fork
+freeze the source rootfs to `<dataDir>/forks/<fork-id>/rootfs.ext4`, then ALWAYS
+resume the source) and ACTIVATING each child husk pod from that fork
 snapshot. Each child activates through the SAME `Activate` path a warm pod uses,
 so it runs the identical RNG-reseed + clock-step `NotifyForked` fork-correctness
 handshake (`internal/husk` `productionNotifier` -> Rust agent `NotifyForkedHandler`):
@@ -56,23 +57,40 @@ Memory/disk consistency (the disk half of the fork). The fork snapshot's
 `vmstate` is baked against the SOURCE sandbox's rootfs (`path_on_host`), so a
 restored child's guest memory (page cache, ext4 superblock, in-flight metadata)
 reflects the SOURCE disk, not the pristine template disk. The child's
-per-activation rootfs CoW clone is therefore made from the SOURCE pod's live
-rootfs (`<dataDir>/husk-rootfs/<source-pod-name>/rootfs.ext4`, threaded as
-`HuskPodOptions.ForkSourceRootfsPath` and passed to the stub as
-`--template-rootfs`), NOT the template rootfs. Cloning from the template instead
-would rebind the child to a disk that does not match its restored memory: any
-data the source wrote since boot would be lost in children and the
-cached-vs-on-disk mismatch could corrupt the child fs. This mirrors the raw-forkd
-`ForkRunning` path (`internal/fork/engine.go`), which clones the child's rootfs
-from the SOURCE's OWN writable rootfs clone (`source.rootfsClone`,
-`<dataDir>/sandboxes/<source-id>/rootfs.ext4`), captured while the source is
-paused, so memory and disk stay consistent. Issue #596: before that fix the
-raw-forkd path threaded `source.rootfsPath` (the read-only TEMPLATE the source
-was cloned from), so raw-forkd children silently lost every on-disk write the
-source made; the husk path was already correct. The clone is still per-child
-(keyed by the child pod name), so children remain independent; only the clone
-SOURCE is the source rootfs. Verified by `internal/controller`
-`TestBuildHuskPodForkChildClonesFromSourceRootfs`, by `internal/fork`
+per-activation rootfs CoW clone is therefore made from a FROZEN copy of the
+source rootfs the source stub captures INSIDE the fork snapshot's paused window,
+written next to `mem`/`vmstate` at `<dataDir>/forks/<fork-id>/rootfs.ext4` and
+mounted read-only at the child's snapshot mount (threaded as
+`HuskPodOptions.ForkSourceRootfsPath` = `huskForkRootfsInPodPath()` and passed to
+the stub as `--template-rootfs`), NOT the source's LIVE rootfs and NOT the
+template rootfs. The freeze is a reflink CoW copy taken while the VM is paused, so
+it is a point-in-time PAIR with the memory checkpoint. This is what makes the
+always-resume safe: the source resumes immediately after the checkpoint (so a
+post-fork exec against the SOURCE, the fork-the-winner-and-continue loop, does not
+time out), and because children clone from the FROZEN copy rather than the live
+rootfs, the resumed source can keep writing its own disk without ever drifting a
+child's clone out of sync with the child's restored memory. Leaving the source
+paused so its live rootfs stayed frozen for the whole child fan-out was the
+implicit old mechanism and the v1.24.1 production bug: nothing resumed the source
+(`pauseSource` on the hosted path), so a post-fork exec against it hung for 30s.
+Cloning from the template instead would rebind the child to a disk that does not
+match its restored memory: any data the source wrote since boot would be lost in
+children and the cached-vs-on-disk mismatch could corrupt the child fs. This
+mirrors the raw-forkd `ForkRunning` path (`internal/fork/engine.go`), which clones
+the child's rootfs from the SOURCE's OWN writable rootfs clone
+(`source.rootfsClone`, `<dataDir>/sandboxes/<source-id>/rootfs.ext4`) captured
+while the source is paused, then resumes the source; the husk path now captures
+the same paused-window point-in-time disk explicitly as a frozen file. Issue #596:
+before that fix the raw-forkd path threaded `source.rootfsPath` (the read-only
+TEMPLATE the source was cloned from), so raw-forkd children silently lost every
+on-disk write the source made. The clone is still per-child (keyed by the child
+pod name), so children remain independent; only the clone SOURCE is the frozen
+source rootfs. Verified by `internal/husk`
+`TestForkSnapshotFreezesRootfsInsidePausedWindow` and
+`TestForkSnapshotResumesSourceOnHostedPath`, by `internal/controller`
+`TestHuskForkRootfsInPodPathIsFrozenSnapshotCopy`,
+`TestBuildHuskPodForkChildClonesFromSourceRootfs`, and
+`TestHuskForkChildPodHasFullHuskShape`, by `internal/fork`
 `TestLiveForkRootfsBaseIsSourceClone`, and end to end on KVM by
 `cmd/live-state-fork-smoke`.
 
@@ -202,17 +220,31 @@ are observed on KVM, not only unit-asserted. The N=8 variant remains a
 follow-up.
 
 **run_code kernel caveat.** A forked VM inherits the LIVE run_code kernel
-(`/opt/mitos/kernel_driver.py`, started lazily on the first `run_code`) and its
-entire Python namespace, because the kernel process is part of the snapshot. The
-post-fork `NotifyForked` reseed handles the kernel CRNG (`/dev/urandom`) and
-signals userspace, but a Python-level PRNG that was already seeded INSIDE the
-kernel before the fork (`random.seed(...)`, `numpy.random.seed(...)`, or the
-implicit module-global `random` state once drawn from) is captured in the
-snapshot and is therefore IDENTICAL across all forks until reseeded. This is the
-same class as item 1 for any already-started runtime; it is not a host boundary.
-Remediation: callers who need per-fork randomness in the kernel should reseed
-after a fork (`random.seed()`, `np.random.seed()` with no argument reseeds from
-fresh OS entropy), or avoid seeding the PRNG before the fork point.
+(`/opt/mitos/kernel_driver.py`) and its entire Python namespace, because the
+kernel process is part of the snapshot. Two ways the kernel gets into the
+snapshot: by default it starts lazily on the first `run_code` (so a template
+snapshotted before any `run_code` has NO kernel and every fork cold-starts it,
+~5s on the first call); when the pool template sets `warmKernel: true`
+(CreateTemplateRequest.warm_kernel), the template build runs one trivial cell
+(`pass`) through `Sandbox.RunCodeStream` right before the snapshot, so the
+kernel is captured ALREADY RUNNING and forks answer their first `run_code`
+warm. The warmup cell deliberately draws no randomness and imports nothing:
+CPython seeds its Mersenne Twister lazily from `os.urandom` on first use, so
+an untouched `random` (and numpy) stays UNSEEDED in the snapshot and each fork
+seeds it fresh, after the per-fork CRNG reseed, on its own first draw
+(pinned by `TestWarmKernelCode_NeverDrawsRandomness`).
+
+The post-fork `NotifyForked` reseed handles the kernel CRNG (`/dev/urandom`)
+and signals userspace, but a Python-level PRNG that was already seeded INSIDE
+the kernel before the fork (`random.seed(...)`, `numpy.random.seed(...)`, or
+the implicit module-global `random` state once drawn from, e.g. by user code
+run against the template or a pre-fork sandbox) is captured in the snapshot
+and is therefore IDENTICAL across all forks until reseeded. This is the same
+class as item 1 for any already-started runtime; it is not a host boundary,
+and the warm_kernel warmup neither causes nor fixes it. Remediation: callers
+who need per-fork randomness in the kernel should reseed after a fork
+(`random.seed()`, `np.random.seed()` with no argument reseeds from fresh OS
+entropy), or avoid seeding the PRNG before the fork point.
 
 ## 2. Clock correctness
 

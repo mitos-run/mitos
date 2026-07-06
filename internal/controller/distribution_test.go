@@ -59,7 +59,7 @@ func startFakeForkdNodeTLSDist(t *testing.T, registry *NodeRegistry, nodeName, h
 	engine.ForkDelay = 0
 	digests := make(map[string]string)
 	for _, tmpl := range heldTemplates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false, false); err != nil {
 			t.Fatal(err)
 		}
 		digests[tmpl] = engine.GetCapacity().TemplateDigests[tmpl]
@@ -98,7 +98,7 @@ func startDistForkdNode(t *testing.T, registry *NodeRegistry, nodeName, httpEndp
 	engine.ForkDelay = 0
 	digests := make(map[string]string)
 	for _, tmpl := range heldTemplates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false, false); err != nil {
 			t.Fatal(err)
 		}
 		digests[tmpl] = engine.GetCapacity().TemplateDigests[tmpl]
@@ -137,7 +137,7 @@ func TestDistributeBuildsOnceAndPulls(t *testing.T) {
 	engineA := startDistForkdNode(t, registry, "node-a", "10.0.0.1:9091", "10.0.0.1:9092", "T")
 	engineB := startDistForkdNode(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092")
 
-	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 1, nil, nil, nil)
+	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 1, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestDistributeRespectsPlacementNodeFilter(t *testing.T) {
 	engineB := startDistForkdNode(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092")
 
 	// Deficit 2, but only node-b is in the placement set.
-	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 2, map[string]bool{"node-b": true}, nil, nil)
+	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 2, map[string]bool{"node-b": true}, nil, nil, false)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestDistributeNoHolderBuildsThenPulls(t *testing.T) {
 		"node-c": startDistForkdNode(t, registry, "node-c", "10.0.0.3:9091", "10.0.0.3:9092"),
 	}
 
-	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 3, nil, nil, nil)
+	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, nil, "", 3, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestDistributeEncryptedBuildsEverywhere(t *testing.T) {
 	engineB := startFakeForkdNodeTLSDist(t, registry, "node-b", "10.0.0.2:9091", "10.0.0.2:9092", serverTLS, clientTLS)
 	_ = engineA
 
-	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, []byte("0123456789abcdef0123456789abcdef"), "local:test", 1, nil, nil, nil)
+	added, err := r.createSnapshotsOnNodes(context.Background(), "T", "img", nil, nil, []byte("0123456789abcdef0123456789abcdef"), "local:test", 1, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestSnapshotRebuildsOnHolderNodeLoss(t *testing.T) {
 	// The next deficit reconcile (desired replicas 2, one holder left) must rebuild
 	// the snapshot onto the surviving empty node-c, restoring the count to 2.
 	deficit := int32(2) - r.readySnapshotCountOn("T", nil)
-	added, err := r.createSnapshotsOnNodes(ctx, "T", "img", nil, nil, nil, "", deficit, nil, nil, nil)
+	added, err := r.createSnapshotsOnNodes(ctx, "T", "img", nil, nil, nil, "", deficit, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes after holder loss: %v", err)
 	}

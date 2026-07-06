@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/firecracker"
@@ -58,6 +57,56 @@ func (s State) String() string {
 	}
 }
 
+// vmID identifies one microVM within a husk pod. On the default single-VM path
+// there is exactly one implicit instance, so this type is not exercised at
+// runtime; the multi-VM-per-pod work (#764) keys the instances map by it once a
+// later increment migrates the single-VM state onto that map.
+type vmID string
+
+// defaultVMID is the key of the single implicit instance a stub manages. It
+// gives the scaffold instances map a stable key for the one VM a husk pod holds
+// today, so increment 2 of #764 has a well-defined slot to migrate the single-VM
+// state into. The single-VM code path does not use it.
+const defaultVMID vmID = "default"
+
+// vmInstance holds the per-VM lifecycle state of one microVM: its lifecycle
+// State, the VMM handle, the fork generation counter, and the per-activation
+// artifacts (the rootfs CoW clone, the egress tap, the DNS proxy) that Close
+// tears down. Today the stub owns exactly one implicit instance and the
+// equivalent state lives directly on Stub (the state / vm / generation /
+// prepareVerified / rootfsClonePath / activeTap / dnsProxy fields).
+//
+// This struct is the scaffold for the multi-VM-per-pod density work (#764): a
+// later increment migrates the single-VM Stub fields into a map[vmID]*vmInstance
+// so one husk pod can run many same-tenant forks. Increment 1 introduces only
+// the struct, the opt-in flag, and a guarded (default-off) instances map; it
+// does NOT migrate the runtime state, so the single-VM path is unchanged and
+// this struct is not on any runtime path when multiVM is false.
+type vmInstance struct {
+	// mu guards this ONE instance's lifecycle. The multi-VM engine holds the
+	// shared Stub.mu only briefly to look up / insert this entry in the instances
+	// map, then releases it and does the blocking per-VM work (VMM start, snapshot
+	// load, guest-ready wait, fork handshake, VMM close) under mu, so independent
+	// per-VM lifecycles never serialize on one shared lock (#772 review). Lock
+	// ordering is always Stub.mu before vmInstance.mu; the blocking work never
+	// re-takes Stub.mu while holding mu.
+	mu              sync.Mutex
+	state           State
+	vm              vmm
+	generation      uint64
+	prepareVerified bool
+	rootfsClonePath string
+	activeTap       string
+	dnsProxy        *dnsproxy.Server
+}
+
+// newVMInstance builds a fresh per-VM instance in StateNew. It is the
+// constructor increment 2 of #764 uses per spawned microVM; the default
+// single-VM path keeps its state on the Stub fields and never reaches this.
+func newVMInstance() *vmInstance {
+	return &vmInstance{state: StateNew}
+}
+
 // vmm is the subset of *firecracker.Client the stub drives. Keeping it behind an
 // interface lets the activate state machine be unit-tested with a fake, with no
 // real Firecracker process or KVM.
@@ -95,6 +144,10 @@ type vmm interface {
 	// error once the Firecracker process is gone or defunct, which the husk
 	// liveness monitor uses to detect a dead warm slot (issue #527).
 	Ping() error
+	// PID returns the Firecracker process id, or 0 when no process is running.
+	// Metering reads /proc/<pid>/smaps_rollup through it so the husk pod's
+	// single-VM report carries the real CoW-aware memory split (issue #613).
+	PID() int
 	// Close tears the VMM down.
 	Close() error
 }
@@ -427,6 +480,23 @@ type Options struct {
 	// workspace ops. Nil uses the production seam (gRPC Archive/Upload on
 	// AgentGRPCPort 53). Tests inject a fake in-memory transport.
 	WorkspaceTransport wsTransporter
+	// MemStat reads the (unique, shared) CoW-aware memory split of a pid for
+	// Metering. Nil uses the production reader (metering.ReadProcessMemory,
+	// /proc/<pid>/smaps_rollup). Tests inject a fake so the metering report is
+	// assertable without a real Firecracker process.
+	MemStat func(pid int) (unique, shared int64)
+	// EgressBytes reads the cumulative egress byte total of this VM's per-tap
+	// nftables counter (the #211 metering seam applyEgressFilter always
+	// installs). Nil uses the production reader (nft -j list counter). Tests
+	// inject a fake; a deployment without networking never calls it (no tap).
+	EgressBytes func(tap string) int64
+	// MultiVM opts into the experimental multi-VM-per-pod execution mode (#764):
+	// running many same-tenant Firecracker forks inside ONE husk pod via the CoW
+	// engine instead of one pod per VM. It DEFAULTS false, and increment 1 wires
+	// only the flag plus a default-off scaffold, so a false value (every caller
+	// today) keeps the single-VM path byte-for-byte unchanged. A later increment
+	// migrates the single-VM state onto the per-vmInstance map behind this flag.
+	MultiVM bool
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -495,11 +565,40 @@ type Stub struct {
 	// activeTap records the active VM's tap so Close can tear the filter down.
 	activeTap string
 
+	// memStat and egressBytes are the Metering seams (Options.MemStat and
+	// Options.EgressBytes): the smaps_rollup CoW memory split of the firecracker
+	// pid and the per-tap cumulative egress counter.
+	memStat     func(pid int) (unique, shared int64)
+	egressBytes func(tap string) int64
+
+	// sleep is the backoff sleep the bounded resume-retry uses; nil falls back to
+	// time.Sleep. Tests inject a no-op so the retry runs without real sleeps.
+	sleep func(time.Duration)
+	// onSourceLeftPaused fires when every resume attempt after a fork snapshot
+	// failed and the source is left paused (the v1.24.1 stuck-paused incident). It
+	// is the observability marker/metrics seam; nil is a no-op. The stub also logs
+	// a distinct error-level line in that case so a source left paused is visible.
+	onSourceLeftPaused func()
+
 	mu              sync.Mutex
 	state           State
 	vm              vmm
 	generation      uint64
 	prepareVerified bool
+
+	// multiVM selects the experimental multi-VM-per-pod execution mode (#764,
+	// Options.MultiVM). It defaults false; when false the stub behaves EXACTLY as
+	// the single-VM state machine above (the state / vm / generation /
+	// prepareVerified fields), which is the only path any caller exercises today.
+	// instances is the default-off scaffold a later increment migrates that
+	// single-VM state onto (map[vmID]*vmInstance keyed per fork); it is nil unless
+	// a caller opts in, so increment 1 changes no runtime behavior.
+	multiVM   bool
+	instances map[vmID]*vmInstance
+	// closing is set (under mu) when closeAllInstances begins teardown, so a
+	// concurrent create can no longer add a VM that would outlive Close. Guarded
+	// by mu; only meaningful on the multi-VM path.
+	closing bool
 }
 
 // NetRunner is the exported alias for the host-command runner type so callers
@@ -543,6 +642,17 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		forksDir:           opts.ForksDir,
 		wsTransport:        opts.WorkspaceTransport,
 		vsockRelPath:       firecracker.VsockRelPath,
+		memStat:            opts.MemStat,
+		egressBytes:        opts.EgressBytes,
+		multiVM:            opts.MultiVM,
+	}
+	// Multi-VM scaffold (#764), default off: allocate the per-fork instance map
+	// ONLY when a caller opts in. No production caller sets MultiVM in increment
+	// 1, so this branch is unreachable on the runtime path and the single-VM
+	// fields above remain the sole state. A later increment migrates the state
+	// onto this map so one pod can hold many same-tenant forks.
+	if s.multiVM {
+		s.instances = map[vmID]*vmInstance{defaultVMID: newVMInstance()}
 	}
 	if s.start == nil {
 		s.start = productionStarter
@@ -565,6 +675,15 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 	}
 	if s.reflink == nil {
 		s.reflink = volume.New("").ReflinkCopy
+	}
+	if s.memStat == nil {
+		s.memStat = metering.ReadProcessMemory
+	}
+	if s.egressBytes == nil {
+		s.egressBytes = readEgressCounterBytes
+	}
+	if s.sleep == nil {
+		s.sleep = time.Sleep
 	}
 	if s.wsTransport == nil {
 		s.wsTransport = productionWorkspaceTransport
@@ -589,6 +708,13 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 // the stub is already dormant or active is an error, so a husk never silently
 // leaks a second VMM.
 func (s *Stub) Prepare(ctx context.Context) error {
+	// Multi-VM mode (#764, default off): the lifecycle is multiplexed over the
+	// per-VM instances map, so a plain Prepare brings up the pod's default VM.
+	// prepareInstance locks s.mu itself, so return before taking the lock here.
+	// When multiVM is false the single-VM body below runs byte-for-byte unchanged.
+	if s.multiVM {
+		return s.prepareInstance(ctx, defaultVMID)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.state != StateNew {
@@ -688,6 +814,18 @@ func (s *Stub) Prepare(ctx context.Context) error {
 // leaves the stub NOT active. A failed Activate never reports a usable VM; the
 // caller must treat the husk as unusable.
 func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResult, error) {
+	// Multi-VM mode (#764, default off): route to the instance the request names
+	// via req.VMID, defaulting to the pod's single implicit VM for compatibility.
+	// activateInstance locks s.mu itself, so return before taking the lock here.
+	// When multiVM is false the single-VM body below runs byte-for-byte unchanged
+	// and req.VMID is ignored.
+	if s.multiVM {
+		id := defaultVMID
+		if req.VMID != "" {
+			id = vmID(req.VMID)
+		}
+		return s.activateInstance(ctx, id, req)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -747,21 +885,11 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	overrides := req.NetworkOverrides
 	if s.netRunner != nil && req.Network != nil {
 		tap := netconf.DeriveTapName(req.Network.GuestIP)
-		cfg := NetfilterConfig{
-			Tap:          tap,
-			GuestIP:      net.ParseIP(req.Network.GuestIP),
-			HostIP:       net.ParseIP(req.Network.GatewayIP),
-			Egress:       v1.EgressPolicy(req.Egress),
-			Allow:        req.Allow,
-			BlockNetwork: req.BlockNetwork,
-			AllowCIDRs:   req.AllowCIDRs,
-			Inbound:      v1.InboundPolicy(req.Inbound),
-			InboundCIDRs: req.InboundCIDRs,
-			ResolverIP:   net.ParseIP(req.Network.ResolverIP),
-		}
-		if cfg.Egress == "" {
-			cfg.Egress = v1.EgressDeny
-		}
+		cfg := netfilterPolicyConfig(req)
+		cfg.Tap = tap
+		cfg.GuestIP = net.ParseIP(req.Network.GuestIP)
+		cfg.HostIP = net.ParseIP(req.Network.GatewayIP)
+		cfg.ResolverIP = net.ParseIP(req.Network.ResolverIP)
 		if err := applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
 			werr := fmt.Errorf("husk: apply in-pod egress filter: %w", err)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
@@ -896,15 +1024,67 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 // the owning stub to snapshot it.
 //
 // It pauses the VM (CreateSnapshot requires a paused VM), writes a Full snapshot
-// to req.SnapshotDir/{mem,vmstate} (the same layout Activate reads), then resumes
-// it UNLESS req.PauseSource is set, in which case it leaves the source paused.
-// The stub stays StateActive throughout: it still owns its one VM.
+// to req.SnapshotDir/{mem,vmstate} (the same layout Activate reads), freezes the
+// source rootfs to req.SnapshotDir/rootfs.ext4 (a point-in-time CoW copy paired
+// with the memory checkpoint, so a resumed source cannot drift a child's rootfs
+// clone), then ALWAYS resumes the source. The stub stays StateActive throughout:
+// it still owns its one VM.
+//
+// req.PauseSource is a compatibility field: the pause is always internal to the
+// checkpoint and the source is always resumed afterward. Leaving the source
+// paused (the old PauseSource behavior) was the production bug on v1.24.1: the
+// hosted fork-the-winner-and-continue loop POSTs pause_source=true and then execs
+// against the SOURCE, which timed out at 30s because nothing resumed it.
 //
 // FAIL CLOSED: it requires StateActive (else error, no snapshot); a pause,
-// snapshot-create, or resume failure returns OK=false plus an error. On a
-// snapshot failure it still attempts to resume the source so a transient
-// snapshot error does not leave a live sandbox frozen. The fork id and snapshot
-// paths carry no secrets.
+// snapshot-create, rootfs-freeze, or resume failure returns OK=false plus an
+// error. On a snapshot or freeze failure it still attempts to resume the source
+// so a transient error does not leave a live sandbox frozen. The fork id and
+// snapshot paths carry no secrets.
+// resumeMaxAttempts and resumeRetryBackoff bound the resume-retry the fork
+// snapshot uses to keep its "never leave the source paused" guarantee: a
+// transient Resume error is retried a few times a short interval apart before we
+// give up, so a blip does not recreate the v1.24.1 stuck-paused incident.
+const (
+	resumeMaxAttempts  = 3
+	resumeRetryBackoff = 20 * time.Millisecond
+)
+
+// backoffSleep sleeps for the resume-retry backoff using the injected sleep seam
+// when present, else time.Sleep. It keeps the retry testable without real sleeps.
+func (s *Stub) backoffSleep(d time.Duration) {
+	if s.sleep != nil {
+		s.sleep(d)
+		return
+	}
+	time.Sleep(d)
+}
+
+// resumeSourceAfterFork resumes the source VM after a fork snapshot with a
+// bounded retry: a TRANSIENT resume error must not leave a tenant's live source
+// frozen (the v1.24.1 stuck-paused incident, where a post-fork exec against the
+// source timed out at 30s). It retries resumeMaxAttempts times, resumeRetryBackoff
+// apart, and returns nil as soon as one resume succeeds. When every attempt fails
+// it emits a distinct error-level log and fires the onSourceLeftPaused marker so a
+// source left paused is observable, then returns the last error. The caller under
+// s.mu owns the VM.
+func (s *Stub) resumeSourceAfterFork() error {
+	var err error
+	for attempt := 0; attempt < resumeMaxAttempts; attempt++ {
+		if attempt > 0 {
+			s.backoffSleep(resumeRetryBackoff)
+		}
+		if err = s.vm.Resume(); err == nil {
+			return nil
+		}
+	}
+	fmt.Fprintf(os.Stderr, "husk: source left paused after fork snapshot: resume failed after %d attempts: %v\n", resumeMaxAttempts, err)
+	if s.onSourceLeftPaused != nil {
+		s.onSourceLeftPaused()
+	}
+	return err
+}
+
 func (s *Stub) ForkSnapshot(ctx context.Context, req ForkSnapshotRequest) (ForkSnapshotResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -947,13 +1127,42 @@ func (s *Stub) ForkSnapshot(ctx context.Context, req ForkSnapshotRequest) (ForkS
 		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 	}
 
-	// Resume the source UNLESS the fork asked to keep it paused. PauseSource
-	// trades a brief source interruption for a colder, quiescent snapshot.
-	if !req.PauseSource {
-		if err := s.vm.Resume(); err != nil {
-			werr := fmt.Errorf("husk: resume source VM after fork snapshot: %w", err)
+	// Freeze the source rootfs INSIDE the paused window, as a point-in-time pair
+	// with the mem+vmstate checkpoint just written. Child husk pods clone from
+	// THIS frozen copy (the controller points their per-activation CoW clone at
+	// SnapshotDir/rootfs.ext4), never the source's live rootfs, so once the source
+	// resumes below and keeps writing its own disk it can NEVER drift a child's
+	// rootfs clone out of sync with that child's restored memory. reflink makes
+	// the freeze a copy-on-write clone (cheap on a reflink filesystem, a full copy
+	// otherwise), the same primitive the activate path uses for the per-activation
+	// clone. Skipped when this stub has no per-activation clone (the mock/CI paths
+	// with no on-disk rootfs), which leaves those paths unchanged. The path
+	// carries no secret. On failure the source is resumed (never leave a tenant's
+	// live sandbox frozen) before we fail closed.
+	if s.rootfsClonePath != "" {
+		frozenRootfs := filepath.Join(req.SnapshotDir, "rootfs.ext4")
+		if err := s.reflink(s.rootfsClonePath, frozenRootfs); err != nil {
+			// Invariant: the source must not be left paused. Resume it (bounded
+			// retry) before failing closed on the freeze error.
+			_ = s.resumeSourceAfterFork()
+			werr := fmt.Errorf("husk: freeze source rootfs for fork snapshot: %w", err)
 			return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 		}
+	}
+
+	// ALWAYS resume the source after the checkpoint. The pause above is only the
+	// brief quiescence CreateSnapshot requires; the memory checkpoint AND the
+	// frozen rootfs are a consistent point-in-time pair captured entirely inside
+	// that paused window, so the source is safe to run and mutate its live disk
+	// again. PauseSource stays a wire field for compatibility, but it no longer
+	// leaves the source stopped: the hosted fork-the-winner-and-continue loop
+	// POSTs pause_source=true and then execs against the SOURCE, which MUST be
+	// running. Leaving the source paused was the production bug (v1.24.1): a
+	// post-fork exec against the source timed out at 30s. The resume is retried a
+	// few times so a transient blip does not recreate that stuck-paused incident.
+	if err := s.resumeSourceAfterFork(); err != nil {
+		werr := fmt.Errorf("husk: resume source VM after fork snapshot: %w", err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 	}
 
 	latency := time.Since(start)
@@ -1240,23 +1449,97 @@ func (s *Stub) State() State {
 // label, so the collector can attribute the usage. Template is empty: a husk pod
 // holds exactly one VM, so there is no intra-report CoW group to amortize.
 //
+// MEMORY (CoW-aware): the sample's MemoryUnique/MemoryShared are the live
+// smaps_rollup split of the pod's own Firecracker process (Private_* vs
+// Shared_*), the same split the fork engine reports (docs/metering.md), so the
+// shared template snapshot pages stay distinguishable from the pages this VM
+// alone dirtied. A dead or recycled pid reads back (0, 0), which is correct for
+// a VM going away.
+//
+// DISK (honest v1, apparent sizes): the rootfs template seed counts as
+// DiskShared (it is the reflink source shared with the template's other husk
+// pods on the node) and the per-activation clone's divergence is approximated
+// as max(0, cloneApparentSize - seedApparentSize) DiskUnique, mirroring the
+// fork engine's Snapshot-volume rule. Without a per-activation clone (the
+// legacy shared-rootfs mode) only the seed is counted.
+//
+// EGRESS: the cumulative per-tap nftables egress counter applyEgressFilter
+// installs (#211/#219); zero when networking is disabled (no tap).
+//
+// The IO (proc read, file stat, nft exec) runs OUTSIDE the stub lock, like the
+// fork engine's Metering, so a slow stat can never block Activate/Close.
+//
 // SECRET-FREE: the report carries ONLY the vm-id and numeric byte/second counts,
 // never argv, env, file bytes, or the per-sandbox bearer token.
 func (s *Stub) Metering() metering.Report {
+	// Multi-VM mode (#764, default off): report one sample per active VM in the
+	// pod (meteringMulti locks s.mu itself). When multiVM is false the single-VM
+	// body below runs byte-for-byte unchanged.
+	if s.multiVM {
+		return s.meteringMulti()
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.state != StateActive {
 		// A dormant/warm pod meters nothing yet: the empty report keeps a scrape a
 		// clean empty body rather than an error.
+		s.mu.Unlock()
 		return metering.Report{}
 	}
-	// TODO(#613): memory sampling. The firecracker child PID is reachable (the
-	// production vmm promotes firecracker.Client.PID, so a type assertion could
-	// read it) and internal/fork.readMemoryStats reads /proc/<pid>/smaps_rollup,
-	// but reusing that reader would mean exporting it from the security-sensitive
-	// internal/fork package. vCPU-seconds (billed from the Sample's presence over
-	// time) is the priority; memory bytes are a fast-follow, reported as 0 for now.
-	return metering.Aggregate([]metering.Sample{{ID: s.cfg.ID}})
+	id := s.cfg.ID
+	var pid int
+	if s.vm != nil {
+		pid = s.vm.PID()
+	}
+	tap := s.activeTap
+	seedPath := s.rootfsTemplatePath
+	clonePath := s.rootfsClonePath
+	s.mu.Unlock()
+
+	memUnique, memShared := s.memStat(pid)
+
+	var diskUnique, diskShared int64
+	if seedPath != "" {
+		seedSize := apparentSize(seedPath)
+		diskShared = seedSize
+		if clonePath != "" {
+			if div := apparentSize(clonePath) - seedSize; div > 0 {
+				diskUnique = div
+			}
+		}
+	} else if clonePath != "" {
+		// No known seed to share against: the whole clone is this VM's own.
+		diskUnique = apparentSize(clonePath)
+	}
+
+	var egress int64
+	if tap != "" && s.egressBytes != nil {
+		egress = s.egressBytes(tap)
+	}
+
+	// Template stays empty: a husk pod holds exactly ONE VM, so within this
+	// report the sample is its own group and Aggregate counts its shared set
+	// once. Cross-pod amortization of the same template's shared pages is an
+	// open item (docs/metering.md).
+	return metering.Aggregate([]metering.Sample{{
+		ID:           id,
+		MemoryUnique: memUnique,
+		MemoryShared: memShared,
+		DiskUnique:   diskUnique,
+		DiskShared:   diskShared,
+		EgressBytes:  egress,
+	}})
+}
+
+// apparentSize returns the apparent (logical) size of path, or 0 when it does
+// not exist or cannot be statted. Apparent size matches the fork engine's disk
+// metering rule; precise reflink block accounting is an open item
+// (docs/metering.md).
+func apparentSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
 }
 
 // ErrVMMDead is returned by MonitorVMM when the Firecracker VMM has been
@@ -1268,6 +1551,11 @@ var ErrVMMDead = errors.New("husk: firecracker VMM is unresponsive")
 // reference under the lock and pings OUTSIDE it so a slow ping never blocks
 // Activate/Close.
 func (s *Stub) pingVMM() error {
+	// Multi-VM mode (#764, default off): ping every prepared VM in the pod. When
+	// multiVM is false the single-VM body below runs byte-for-byte unchanged.
+	if s.multiVM {
+		return s.pingInstances()
+	}
 	s.mu.Lock()
 	vm := s.vm
 	s.mu.Unlock()
@@ -1318,6 +1606,12 @@ func (s *Stub) MonitorVMM(ctx context.Context, interval time.Duration, failures 
 
 // Close tears down the VMM if one was prepared. It is safe to call in any state.
 func (s *Stub) Close() error {
+	// Multi-VM mode (#764, default off): a pod Close tears down EVERY instance
+	// (closeAllInstances locks s.mu itself). When multiVM is false the single-VM
+	// body below runs byte-for-byte unchanged.
+	if s.multiVM {
+		return s.closeAllInstances()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
