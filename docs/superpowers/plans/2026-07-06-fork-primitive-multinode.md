@@ -230,6 +230,21 @@ push a pod (or node) past its memory budget PENDS or spills, never overcommits.
 Metering already reports CoW-aware MemoryUnique/MemoryShared, which feeds the
 sizing; the reservation must still be safe at worst case, not the CoW-typical case.
 
+Status (L1.7b, admit-and-spill): the per-pod dimension is implemented. The
+MultiVMFork co-location routing (internal/controller/sandboxfork_controller.go,
+coLocatedForkVMBudget) admits a co-located fork VM only while the source pod's
+memory budget has room at the CoW worst case: the pod holds floor(memory.max /
+per-VM guest RAM) VMs, one slot reserved for the source VM already resident, so at
+most floor(limit / request) - 1 children co-locate. This reserves each co-located
+VM its FULL guest memory, not the CoW-typical dirty set, so a sibling can never OOM
+a sibling. A child past the budget spills to a NEW pod via buildForkChildPod, which
+the node scheduler and the capacity-admission gate account honestly, so the node
+budget is kept by the existing per-pod admission on the spill path (a spill that
+does not fit the node PENDS exactly as an independent claim does). This replaces
+the earlier hardcoded co-location count. Deferred to a follow-up: a dedicated
+node-budget check for the co-located dimension and the grow-the-pod-with-in-place-
+resize option; the current increment lands admit-and-spill on the per-pod budget.
+
 ### Guarantee B: a swarm always survives node loss by reconstructing from durable state
 
 Today Mitos has real multi-node resilience for independent sandboxes: node registry
