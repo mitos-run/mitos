@@ -163,8 +163,24 @@ def _resolve_auth(
     return key, url.rstrip("/")
 
 
+# The control plane polls a fork to Ready for up to its ready deadline (the
+# gateway --ready-timeout, 120s by default) before returning. A hosted LIVE fork
+# (snapshot the running source VM, schedule the child pod, restore, wait for the
+# guest agent) can take much longer than a warm pool claim, especially cold. The
+# per-request fork deadline must therefore EXCEED the server's own deadline, so a
+# slow-but-succeeding fork surfaces the server's real answer rather than a
+# premature client-side fork_unavailable. The default DirectSandbox client
+# timeout (30s) is far too short for this and would spuriously fail a fork the
+# server completes in, say, 45s.
+FORK_CLIENT_TIMEOUT_SECONDS = 130.0
+
+
 def _fork_post(
-    http: httpx.Client, url: str, json_body: dict, headers: dict
+    http: httpx.Client,
+    url: str,
+    json_body: dict,
+    headers: dict,
+    timeout: float = FORK_CLIENT_TIMEOUT_SECONDS,
 ) -> httpx.Response:
     """POST to the fork endpoint, mapping a transport timeout to a structured,
     LLM-legible AgentRunError instead of a raw ``httpx.ReadTimeout``.
@@ -174,9 +190,13 @@ def _fork_post(
     Surfacing that as a typed ``fork_unavailable`` error with retry guidance (not
     an opaque transport exception) is the boring-failure-behavior contract: the
     caller can branch on the type and back off rather than parse a stack trace.
+
+    timeout overrides the client's default deadline for THIS request only, so a
+    live fork gets room to complete without lengthening the other lifecycle
+    calls (see FORK_CLIENT_TIMEOUT_SECONDS).
     """
     try:
-        return http.post(url, json=json_body, headers=headers)
+        return http.post(url, json=json_body, headers=headers, timeout=timeout)
     except httpx.TimeoutException as exc:
         raise AgentRunError(
             "fork did not complete before the client deadline",
