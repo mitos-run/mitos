@@ -6,11 +6,31 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/metering"
 )
+
+// validVMID is the allowlist a vmID must satisfy before it is ever used to
+// derive a Firecracker id, workdir, or socket path (deriveVMConfig). It is
+// intentionally identical to huskVMIDPattern in cmd/husk-stub (and firecracker's
+// internal vmIDPattern): a leading alphanumeric then up to 63 of
+// [alphanumeric _ -], which cannot contain "/", "..", or a NUL, so a vmID can
+// never traverse out of the pod workdir. defaultVMID satisfies it. Increment 2's
+// only live caller passes defaultVMID, but a later increment will thread a vmID
+// from the control plane, so the path-traversal gate is closed here now.
+var validVMID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
+
+// checkVMID rejects a vmID that is not on the validVMID allowlist, so it can
+// never be interpolated into a filesystem path unsafely.
+func checkVMID(id vmID) error {
+	if !validVMID.MatchString(string(id)) {
+		return fmt.Errorf("husk: invalid vm id %q: must match %s", string(id), validVMID.String())
+	}
+	return nil
+}
 
 // This file holds the EXPERIMENTAL multi-VM-per-pod execution mode (#764, Layer
 // 1 of docs/superpowers/plans/2026-07-06-fork-primitive-multinode.md), gated
@@ -63,6 +83,9 @@ func (s *Stub) deriveVMConfig(id vmID) firecracker.VMConfig {
 // never touches the first. Fail closed: any error tears the dormant VMM down and
 // leaves the instance out of StateDormant.
 func (s *Stub) prepareInstance(ctx context.Context, id vmID) error {
+	if err := checkVMID(id); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -158,6 +181,9 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID) error {
 // the pod netns need a per-VM tap fan-out that this state-machine increment does
 // not build. No production caller runs multi-VM yet, so nothing regresses.
 func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateRequest) (ActivateResult, error) {
+	if err := checkVMID(id); err != nil {
+		return ActivateResult{}, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

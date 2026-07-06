@@ -347,3 +347,18 @@ func TestSingleVMRoundtripUnchangedWithFlagOff(t *testing.T) {
 		t.Fatal("Close must tear the VMM down")
 	}
 }
+
+// TestMultiVMRejectsUnsafeVMID proves a vmID that could traverse out of the pod
+// workdir is refused before any path is derived from it (issue #772 review).
+func TestMultiVMRejectsUnsafeVMID(t *testing.T) {
+	for _, bad := range []vmID{"../evil", "a/b", "", "with space", "..", ".", "x/../../y"} {
+		if err := checkVMID(bad); err == nil {
+			t.Errorf("checkVMID(%q) = nil, want an error (unsafe vm id must be rejected)", string(bad))
+		}
+	}
+	for _, ok := range []vmID{defaultVMID, "vm1", "fork-0", "a_b-9", "A0"} {
+		if err := checkVMID(ok); err != nil {
+			t.Errorf("checkVMID(%q) = %v, want nil (valid vm id)", string(ok), err)
+		}
+	}
+}
