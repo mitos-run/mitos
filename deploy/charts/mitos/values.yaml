@@ -4,10 +4,11 @@
 # posture is reproduced verbatim in the templates and is NOT loosely
 # configurable: privileged stays false, capabilities drop ALL and add back only
 # the fixed builder set, hostPath, the KVM resource, and NET_ADMIN are fixed. The
-# two NARROW exceptions, added for hardened container runtimes (issue #525), are
-# forkd.seccompProfile and forkd.extraCapabilities: the seccomp profile can be
-# swapped (RuntimeDefault by default) and capabilities can only be ADDED to the
-# base set. They default to the CI-proven hardened values; see values/talos.yaml.
+# three NARROW securityContext exceptions are forkd.seccompProfile,
+# forkd.appArmorProfile, and forkd.extraCapabilities. The seccomp and AppArmor
+# profiles can be configured, while capabilities can only be ADDED to the base
+# set. Seccomp defaults to RuntimeDefault; AppArmor is left to the runtime
+# unless configured. See values/talos.yaml for the hardened seccomp profile.
 
 # Image settings. The full reference for each component is composed as
 # image.registry / <component>.image.repository : <tag>, where the tag is the
@@ -203,6 +204,15 @@ forkd:
   #     localhostProfile: profiles/mitos-forkd.json
   seccompProfile:
     type: RuntimeDefault
+
+  # forkd AppArmor profile. On platforms where the runtime default profile blocks
+  # the Firecracker jailer's mount setup, configure a Localhost profile loaded on
+  # every KVM node. See docs/platforms/hardened-runtimes.md and
+  # docs/platforms/examples/mitos-forkd.apparmor:
+  #   appArmorProfile:
+  #     type: Localhost
+  #     localhostProfile: mitos-forkd
+
   # Extra Linux capabilities ADDED to forkd's hardened base set (the base set is
   # drop ALL plus the fixed builder capabilities and is NOT removable here). Empty
   # by default. On hardened runtimes add FOWNER so the jailer's chmod of the
