@@ -42,6 +42,10 @@ const (
 	// huskLabel marks a pod as a husk pod (vs any other pod the controller may
 	// touch). Both labels together form the warm-pool selector.
 	huskLabel = "mitos.run/husk"
+	// huskMultiVMLabelValue is the value huskMultiVMLabel carries on a pod whose
+	// stub runs --multi-vm (defined in sandboxfork_controller.go), so
+	// huskPodMultiVMCapable can recognize a co-location-capable source pod.
+	huskMultiVMLabelValue = "true"
 	// huskContainerName is the single container in a husk pod.
 	huskContainerName = "husk-stub"
 
@@ -163,6 +167,14 @@ func huskForkRootfsInPodPath() string {
 
 // HuskPodOptions configures the husk pod spec the controller emits.
 type HuskPodOptions struct {
+	// MultiVM starts the husk stub with --multi-vm and labels the pod
+	// mitos.run/multi-vm=true, so the pod can host ADDITIONAL fork-child VMs in
+	// place (the MultiVMFork co-location routing) instead of every fork getting its
+	// own pod. Default off: the stub runs single-VM and huskPodMultiVMCapable
+	// reports false, so a fork always spills to a new pod. Enabling it does not
+	// change a normal claim: Stub.Activate routes a claim with no VMID to the pod's
+	// default VM, byte-for-byte as the single-VM path does.
+	MultiVM bool
 	// StubImage is the container image that runs cmd/husk-stub.
 	StubImage string
 	// DNSUpstream is the comma-separated host:port resolver list (failover order)
@@ -323,6 +335,20 @@ func huskMemoryLimit(memReq, floor resource.Quantity, percent int) resource.Quan
 }
 
 // buildHuskPod builds the warm-pool husk pod for a pool. The pod is
+// huskPodLabels builds a husk pod's label set: the warm-pool selector
+// (huskPoolLabel + huskLabel), plus huskMultiVMLabel when the stub runs
+// --multi-vm so huskPodMultiVMCapable recognizes the pod as a co-location source.
+func huskPodLabels(poolName string, multiVM bool) map[string]string {
+	labels := map[string]string{
+		huskPoolLabel: poolName,
+		huskLabel:     "true",
+	}
+	if multiVM {
+		labels[huskMultiVMLabel] = huskMultiVMLabelValue
+	}
+	return labels
+}
+
 // GenerateName <pool>-husk- in the pool namespace, owner-referenced to the pool
 // for garbage collection, labeled for the warm-pool selector, and runs the
 // dormant stub with a non-privileged securityContext.
@@ -443,6 +469,14 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		// node, so each pod gets its own clone. $(POD_NAME) is substituted by the
 		// kubelet from the env var, not the shell.
 		"--vm-id", "$(POD_NAME)",
+	}
+
+	// Multi-VM mode: the stub accepts spawn-vm ops to host ADDITIONAL fork-child
+	// VMs in this pod (the MultiVMFork co-location routing). Default off leaves the
+	// stub single-VM. A normal claim is unaffected either way (Activate routes a
+	// VMID-less claim to the pod's default VM).
+	if opts.MultiVM {
+		args = append(args, "--multi-vm")
 	}
 
 	// Name-based egress: when the operator configured DNS upstream(s), pass them
@@ -760,10 +794,7 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: pool.Name + "-husk-",
 			Namespace:    pool.Namespace,
-			Labels: map[string]string{
-				huskPoolLabel: pool.Name,
-				huskLabel:     "true",
-			},
+			Labels: huskPodLabels(pool.Name, opts.MultiVM),
 			Annotations: annotations,
 		},
 		Spec: corev1.PodSpec{
@@ -1253,6 +1284,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 			}
 		}
 		opts := HuskPodOptions{
+			MultiVM:         r.MultiVM,
 			StubImage:       r.HuskStubImage,
 			DNSUpstream:     r.HuskDNSUpstream,
 			KVMResourceName: r.KVMResourceName,
