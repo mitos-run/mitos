@@ -51,6 +51,24 @@ func checkVMID(id vmID) error {
 // only on the KVM firecracker-test suite). This increment proves the state
 // machine and multiplexing, not the second real Firecracker process.
 
+// instanceFor returns the per-VM instance for id. It holds s.mu ONLY for the map
+// lookup (and, when create is true, the first-use insert), then releases it, so
+// the caller can take the returned instance's OWN lock for the blocking per-VM
+// work without holding the shared Stub lock. Instances are never removed from the
+// map (Close resets an entry to StateNew rather than deleting it), so the returned
+// pointer stays valid after s.mu is released. When create is false and no entry
+// exists it returns nil. Map access is ALWAYS under s.mu.
+func (s *Stub) instanceFor(id vmID, create bool) *vmInstance {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	inst := s.instances[id]
+	if inst == nil && create {
+		inst = newVMInstance()
+		s.instances[id] = inst
+	}
+	return inst
+}
+
 // deriveVMConfig returns the firecracker.VMConfig for one VM in a multi-VM pod.
 // The default (primary) VM keeps the pod's base config unchanged, so a multi-VM
 // pod with a single default VM is configured exactly like a single-VM pod. Every
@@ -86,14 +104,14 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID) error {
 	if err := checkVMID(id); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Short critical section on s.mu (inside instanceFor): allocate/insert this
+	// vmID's map entry, then release s.mu. The blocking VMM start + snapshot verify
+	// + rootfs clone below run under THIS instance's own lock, so preparing a second
+	// VM never waits behind the first's blocking I/O.
+	inst := s.instanceFor(id, true)
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
 
-	inst := s.instances[id]
-	if inst == nil {
-		inst = newVMInstance()
-		s.instances[id] = inst
-	}
 	if inst.state != StateNew {
 		return fmt.Errorf("husk: prepare vm %q in state %s: already prepared", id, inst.state)
 	}
@@ -184,21 +202,30 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	if err := checkVMID(id); err != nil {
 		return ActivateResult{OK: false, Error: err.Error()}, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	inst := s.instances[id]
-	if inst == nil || inst.state != StateDormant {
-		state := StateNew
-		if inst != nil {
-			state = inst.state
-		}
+	// Short critical section on s.mu (inside instanceFor): look up this vmID's map
+	// entry, then release s.mu. Activate does NOT create an instance, so a missing
+	// entry reads as StateNew. The blocking snapshot load + guest-ready wait + fork
+	// handshake below run under THIS instance's own lock, so activating a second VM
+	// never waits behind the first's blocking I/O.
+	inst := s.instanceFor(id, false)
+	if inst == nil {
 		return ActivateResult{
 				OK:            false,
-				AlreadyActive: inst != nil && inst.state == StateActive,
-				Error:         fmt.Sprintf("activate vm %q in state %s: must be dormant", id, state),
+				AlreadyActive: false,
+				Error:         fmt.Sprintf("activate vm %q in state %s: must be dormant", id, StateNew),
 			},
-			fmt.Errorf("husk: activate vm %q in state %s: must be dormant", id, state)
+			fmt.Errorf("husk: activate vm %q in state %s: must be dormant", id, StateNew)
+	}
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+
+	if inst.state != StateDormant {
+		return ActivateResult{
+				OK:            false,
+				AlreadyActive: inst.state == StateActive,
+				Error:         fmt.Sprintf("activate vm %q in state %s: must be dormant", id, inst.state),
+			},
+			fmt.Errorf("husk: activate vm %q in state %s: must be dormant", id, inst.state)
 	}
 	if err := ctx.Err(); err != nil {
 		return ActivateResult{OK: false, Error: err.Error()}, err
@@ -281,19 +308,23 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 // per-VM analog of the single-VM Close: closing one VM in the pod must never take
 // a sibling down.
 func (s *Stub) closeInstance(id vmID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.closeInstanceLocked(id)
-}
-
-// closeInstanceLocked is the s.mu-held body of closeInstance, reused by the pod
-// teardown that closes every instance under one lock acquisition.
-func (s *Stub) closeInstanceLocked(id vmID) error {
-	inst := s.instances[id]
+	// Short critical section on s.mu (inside instanceFor): look up the entry, then
+	// release s.mu so the blocking VMM Close below runs under this instance's own
+	// lock and never blocks a sibling's lifecycle. The entry stays in the map
+	// (reset to StateNew), matching the single-VM Close which keeps the Stub alive.
+	inst := s.instanceFor(id, false)
 	if inst == nil {
 		return nil
 	}
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	return s.closeInstanceBody(id, inst)
+}
 
+// closeInstanceBody tears one instance down. The caller holds inst.mu (never
+// s.mu across the blocking VMM Close). It reaps the per-activation artifacts and
+// closes the VMM, returning the instance to StateNew.
+func (s *Stub) closeInstanceBody(id vmID, inst *vmInstance) error {
 	// Best effort: reap this instance's rootfs CoW clone so it does not outlive the
 	// VM. Path only is logged on failure; the clone carries no secrets.
 	if inst.rootfsClonePath != "" {
@@ -329,11 +360,26 @@ func (s *Stub) closeInstanceLocked(id vmID) error {
 // acquisition and returns the first teardown error, having still attempted every
 // instance so one stuck VM cannot leak the rest.
 func (s *Stub) closeAllInstances() error {
+	// Snapshot the (id, instance) pairs under s.mu, then release it so each VMM
+	// Close runs under only that instance's own lock. Holding s.mu across the
+	// blocking closes would serialize teardown and block every other map operation.
+	type entry struct {
+		id   vmID
+		inst *vmInstance
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	entries := make([]entry, 0, len(s.instances))
+	for id, inst := range s.instances {
+		entries = append(entries, entry{id: id, inst: inst})
+	}
+	s.mu.Unlock()
+
 	var firstErr error
-	for id := range s.instances {
-		if err := s.closeInstanceLocked(id); err != nil && firstErr == nil {
+	for _, e := range entries {
+		e.inst.mu.Lock()
+		err := s.closeInstanceBody(e.id, e.inst)
+		e.inst.mu.Unlock()
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -358,25 +404,43 @@ func (s *Stub) meteringMulti() metering.Report {
 		tap   string
 	}
 
+	// Snapshot the (id, instance) pairs under s.mu, then release it. Each
+	// instance's fields are read under its OWN lock, briefly, so metering never
+	// holds s.mu while an instance lock is contended by a blocking lifecycle op
+	// (which would re-serialize the whole map). The heavy IO (proc read, file
+	// stat) runs afterwards under no lock at all.
+	type instPair struct {
+		id   vmID
+		inst *vmInstance
+	}
 	s.mu.Lock()
-	var inputs []meterInput
+	pairs := make([]instPair, 0, len(s.instances))
 	for id, inst := range s.instances {
-		if inst.state != StateActive {
+		pairs = append(pairs, instPair{id: id, inst: inst})
+	}
+	s.mu.Unlock()
+
+	var inputs []meterInput
+	for _, p := range pairs {
+		p.inst.mu.Lock()
+		if p.inst.state != StateActive {
+			p.inst.mu.Unlock()
 			continue
 		}
 		pid := 0
-		if inst.vm != nil {
-			pid = inst.vm.PID()
+		if p.inst.vm != nil {
+			pid = p.inst.vm.PID()
 		}
-		inputs = append(inputs, meterInput{
-			id:    s.deriveVMConfig(id).ID,
+		in := meterInput{
+			id:    s.deriveVMConfig(p.id).ID,
 			pid:   pid,
 			seed:  s.rootfsTemplatePath,
-			clone: inst.rootfsClonePath,
-			tap:   inst.activeTap,
-		})
+			clone: p.inst.rootfsClonePath,
+			tap:   p.inst.activeTap,
+		}
+		p.inst.mu.Unlock()
+		inputs = append(inputs, in)
 	}
-	s.mu.Unlock()
 
 	if len(inputs) == 0 {
 		return metering.Report{}
@@ -422,14 +486,25 @@ func (s *Stub) meteringMulti() metering.Report {
 // pod NotReady) or when no VM is prepared yet. The pings run under the lock's
 // snapshot of the handles taken and released quickly, like the single-VM ping.
 func (s *Stub) pingInstances() error {
+	// Snapshot the instance pointers under s.mu, read each vm handle under its OWN
+	// lock, then ping OUTSIDE every lock, so a slow ping never blocks s.mu or a
+	// sibling's lifecycle.
 	s.mu.Lock()
-	vms := make([]vmm, 0, len(s.instances))
+	insts := make([]*vmInstance, 0, len(s.instances))
 	for _, inst := range s.instances {
-		if inst.vm != nil {
-			vms = append(vms, inst.vm)
-		}
+		insts = append(insts, inst)
 	}
 	s.mu.Unlock()
+
+	vms := make([]vmm, 0, len(insts))
+	for _, inst := range insts {
+		inst.mu.Lock()
+		vm := inst.vm
+		inst.mu.Unlock()
+		if vm != nil {
+			vms = append(vms, vm)
+		}
+	}
 
 	if len(vms) == 0 {
 		return fmt.Errorf("husk: no VMM prepared")

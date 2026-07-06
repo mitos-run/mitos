@@ -3,7 +3,9 @@ package husk
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"mitos.run/mitos/internal/firecracker"
 )
@@ -345,6 +347,146 @@ func TestSingleVMRoundtripUnchangedWithFlagOff(t *testing.T) {
 	}
 	if !vm.closed {
 		t.Fatal("Close must tear the VMM down")
+	}
+}
+
+// TestMultiVMPrepareRunsConcurrentlyPerInstance proves the per-instance-lock fix
+// from the #772 review: two distinct vmIDs Prepare CONCURRENTLY, neither waiting
+// on the other's blocking VMM start. The injected starter signals when it has
+// begun and then blocks on a channel, so if the stub held one shared lock across
+// the blocking start (the pre-fix behavior) the second Prepare could never even
+// enter start until the first returned, and the barrier below would time out.
+// With a lock per vmInstance both starts reach the blocked state at once; we then
+// release them and assert both instances reach StateDormant.
+func TestMultiVMPrepareRunsConcurrentlyPerInstance(t *testing.T) {
+	const barrier = 2
+	entered := make(chan struct{}, barrier)
+	release := make(chan struct{})
+
+	var mu sync.Mutex
+	vms := map[string]*fakeVMM{}
+	start := func(cfg firecracker.VMConfig) (vmm, error) {
+		// Announce this start has begun, then block until released. Two starts
+		// blocked here simultaneously is the concurrency the fix delivers.
+		entered <- struct{}{}
+		<-release
+		vm := &fakeVMM{}
+		mu.Lock()
+		vms[cfg.ID] = vm
+		mu.Unlock()
+		return vm, nil
+	}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:   start,
+		Ready:   readyOK,
+		Notify:  (&fakeNotifier{}).notify,
+		Verify:  verifyOK,
+		MultiVM: true,
+	})
+
+	ids := []vmID{defaultVMID, "vm-2"}
+	errs := make([]error, len(ids))
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func(i int, id vmID) {
+			defer wg.Done()
+			errs[i] = s.prepareInstance(context.Background(), id)
+		}(i, id)
+	}
+
+	// Both starts must reach the blocked state before either is released. A
+	// shared lock held across the blocking start would let only one goroutine in,
+	// so the second receive would time out.
+	for i := 0; i < barrier; i++ {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of %d prepares reached the blocking start; per-instance lifecycles are serialized", i, barrier)
+		}
+	}
+
+	// Both are blocked concurrently: release and let both finish.
+	close(release)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("prepareInstance(%s): %v", ids[i], err)
+		}
+	}
+	if got := s.instances[defaultVMID].state; got != StateDormant {
+		t.Fatalf("default instance state = %s, want dormant", got)
+	}
+	if got := s.instances["vm-2"].state; got != StateDormant {
+		t.Fatalf("vm-2 instance state = %s, want dormant", got)
+	}
+}
+
+// TestMultiVMActivateRunsConcurrentlyPerInstance proves the same for the activate
+// hot path: two already-dormant vmIDs Activate CONCURRENTLY, each blocking in its
+// own guest-ready wait, without one serializing behind the other. The injected
+// readiness seam signals entry then blocks; a shared lock held across the ready
+// wait (the pre-fix behavior) would let only one activate reach it.
+func TestMultiVMActivateRunsConcurrentlyPerInstance(t *testing.T) {
+	const barrier = 2
+	entered := make(chan struct{}, barrier)
+	release := make(chan struct{})
+
+	vms := map[string]*fakeVMM{}
+	start := func(cfg firecracker.VMConfig) (vmm, error) {
+		vm := &fakeVMM{}
+		vms[cfg.ID] = vm
+		return vm, nil
+	}
+	ready := func(context.Context, string, time.Duration) error {
+		entered <- struct{}{}
+		<-release
+		return nil
+	}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:   start,
+		Ready:   ready,
+		Notify:  (&fakeNotifier{}).notify,
+		Verify:  verifyOK,
+		MultiVM: true,
+	})
+
+	ids := []vmID{defaultVMID, "vm-2"}
+	for _, id := range ids {
+		if err := s.prepareInstance(context.Background(), id); err != nil {
+			t.Fatalf("prepareInstance(%s): %v", id, err)
+		}
+	}
+
+	results := make([]ActivateResult, len(ids))
+	errs := make([]error, len(ids))
+	var wg sync.WaitGroup
+	for i, id := range ids {
+		wg.Add(1)
+		go func(i int, id vmID) {
+			defer wg.Done()
+			results[i], errs[i] = s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: "/snap"})
+		}(i, id)
+	}
+
+	for i := 0; i < barrier; i++ {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of %d activates reached the blocking guest-ready wait; per-instance lifecycles are serialized", i, barrier)
+		}
+	}
+	close(release)
+	wg.Wait()
+
+	for i, id := range ids {
+		if errs[i] != nil || !results[i].OK {
+			t.Fatalf("activateInstance(%s): err=%v ok=%v", id, errs[i], results[i].OK)
+		}
+		if got := s.instances[id].state; got != StateActive {
+			t.Fatalf("instance %s state = %s, want active", id, got)
+		}
 	}
 }
 

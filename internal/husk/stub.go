@@ -84,6 +84,14 @@ const defaultVMID vmID = "default"
 // does NOT migrate the runtime state, so the single-VM path is unchanged and
 // this struct is not on any runtime path when multiVM is false.
 type vmInstance struct {
+	// mu guards this ONE instance's lifecycle. The multi-VM engine holds the
+	// shared Stub.mu only briefly to look up / insert this entry in the instances
+	// map, then releases it and does the blocking per-VM work (VMM start, snapshot
+	// load, guest-ready wait, fork handshake, VMM close) under mu, so independent
+	// per-VM lifecycles never serialize on one shared lock (#772 review). Lock
+	// ordering is always Stub.mu before vmInstance.mu; the blocking work never
+	// re-takes Stub.mu while holding mu.
+	mu              sync.Mutex
 	state           State
 	vm              vmm
 	generation      uint64
