@@ -130,6 +130,55 @@ The winning claim is not "faster than forkd" (parity same-node); it is "the only
 one that gives you cheap live forks AND scales the swarm past one machine, managed,
 isolated, on your own k8s."
 
+## The k8s interface and observability (load-bearing decision)
+
+Layer 1 decouples the sandbox abstraction from the pod: one pod hosts many
+same-tenant VMs, so `kubectl get pods` no longer maps one pod to one sandbox. This
+is a deliberate design choice, and it must not be a footnote. The rule:
+
+- The Sandbox custom resource (`mitos.run/v1 Sandbox`), NOT the pod, is and always
+  was the k8s-native handle for a sandbox. This is already the project's stated
+  posture (CLAUDE.md operating principle 3: "Sandboxes are not pods; never imply
+  pod-scoped mechanisms govern them"). Today's one-pod-per-VM makes the pod LOOK
+  like the interface; it never was.
+- The Sandbox CRD stays 1:1 with a VM. Fork 100 sandboxes and `kubectl get
+  sandboxes` still shows 100 Sandbox objects and the SDK returns 100 handles; the
+  pod is a shared runtime host BELOW the CRD, invisible to the user. For the user
+  this is simpler, not weirder: fork returns a cheap sandbox and they never reason
+  about pods, exactly the laptop-simple bar.
+- Operator traceability is preserved by surfacing the mapping on the CRD:
+  `Sandbox.status` gains `hostPod` (the session pod name) and `vmId` (the intra-pod
+  Firecracker VM id), so `kubectl get sandbox X -o yaml` still traces a sandbox to
+  its host process even though `kubectl get pods` does not. The session pod also
+  carries a label listing (or a count of) the sandboxes it hosts for reverse
+  lookup. Debugging entry point moves from pods to Sandboxes; the CRD carries what
+  an operator needs.
+
+What genuinely changes, stated honestly (each acceptable ONLY because a session
+pod holds ONE tenant's VMs):
+
+- Pod-scoped k8s primitives act per-session-pod, not per-sandbox: NetworkPolicy,
+  `ResourceQuota count/pods`, and the pod cgroup `memory.max`. Per-sandbox network
+  policy granularity is lost (all VMs in a pod share one netns + one egress
+  filter); per-sandbox hard memory isolation is lost (a sibling can OOM its
+  siblings, the user's own workload). Per-org NetworkPolicy and quota still hold at
+  the pod/namespace level.
+- Per-sandbox scheduling is gone: the sibling VMs live and die with the pod's node.
+  Already true for forks (live fork is node-local), so no new constraint there.
+- Billing must count per-VM inside a shared pod (the metering already reports
+  per-VM `MemoryUnique`/`MemoryShared`, so the accounting seam exists; the labels
+  that route usage to a sandbox move from the pod to the intra-pod VM id).
+
+Precedent: deeplethe/forkd markets exactly this (one controller pod hosts N
+children, "the scheduler runs once at pod creation regardless of fan-out") as a
+feature. The accepted pattern is that the product's own API is the interface and
+the pod is plumbing. Mitos's product API is the Sandbox CRD plus the gateway/SDK;
+keeping the CRD 1:1 and the pod a shared host is consistent with that, not a break.
+
+Non-goal: cross-TENANT VMs in one pod. A session pod is one org/one fork-tree. The
+moment two tenants would share a pod, all of the above stops being acceptable, so
+the pod-per-session boundary is a hard invariant, enforced at claim time.
+
 ## Milestones (each its own PR/issue; correctness first, then density, then reach)
 
 1. [#759] Parent-resume. Correctness; in flight (PR #763).
@@ -139,7 +188,9 @@ isolated, on your own k8s."
    (feeds #753).
 4. NEW: multi-same-tenant-VMs-per-pod (Layer 1). The density win. Flagged,
    default off. Largest change; needs its own design review as a new execution
-   mode.
+   mode. Includes the Sandbox.status host mapping (hostPod + vmId) and the
+   session-pod reverse-lookup label, so the CRD stays the 1:1 k8s-native handle
+   while the pod is a shared host (see "The k8s interface and observability").
 5. NEW: cheap live fork (Layer 2): UFFD-served live-parent memory + UFFD_WP async
    resume. Prefer the no-vendoring route first.
 6. NEW: cross-node post-copy fork (Layer 3): the memory-page server + network UFFD
