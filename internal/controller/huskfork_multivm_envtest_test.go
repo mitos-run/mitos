@@ -438,3 +438,97 @@ func TestMultiVMForkSpillsPastCapToNewPods(t *testing.T) {
 		t.Fatalf("expected at least %d spawn-vm calls (the co-located children), got %d", capN, got)
 	}
 }
+
+// TestMultiVMForkFlagFlipOffDoesNotOrphanCoLocatedChild proves the CodeRabbit
+// Major fix: a slot already spawned INSIDE the source pod is carried forward on a
+// later reconcile even after --multi-vm-fork is flipped OFF (a controller
+// restart with the flag off), and does NOT fall to the new-pod branch and create
+// an orphan pod that status never references. Without hoisting the recorded-slot
+// check above the routing branches, that flip would leak a KVM device slot.
+func TestMultiVMForkFlagFlipOffDoesNotOrphanCoLocatedChild(t *testing.T) {
+	poolName := uniqueName("pool-mvm-flip")
+	srcClaimName := uniqueName("src-mvm-flip")
+	forkName := uniqueName("mvm-flip")
+
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.9", multiVMSource)
+	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
+
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		return husk.ActivateResult{OK: false, Error: "activate must not be called for an already-recorded co-located child"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+	setForkVMSpawner(func(_ context.Context, _ string, _ *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error) {
+		return husk.SpawnVMResult{OK: true, VMID: req.VMID, VsockPath: "/run/husk/" + req.VMID + ".sock"}, nil
+	})
+	t.Cleanup(func() { setForkVMSpawner(nil) })
+
+	// Phase 1: flag ON, the child co-locates in the source pod (no child pod).
+	setForkMultiVM(true)
+	fork := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      forkName,
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcClaimName}}, Replicas: 1},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var got v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &got); err != nil {
+			return false
+		}
+		return got.Status.ReadyReplicas == 1
+	})
+	var afterOn v1.Sandbox
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &afterOn); err != nil {
+		t.Fatalf("get fork: %v", err)
+	}
+	if len(afterOn.Status.Children) != 1 || afterOn.Status.Children[0].Pod != srcPod.Name {
+		t.Fatalf("phase 1: child must be recorded in the source pod, got %+v", afterOn.Status.Children)
+	}
+
+	// Phase 2: flip the flag OFF and force a reconcile (annotation bump). The
+	// already-co-located slot must be carried forward, NOT re-routed to a new pod.
+	setForkMultiVM(false)
+	var live v1.Sandbox
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &live); err != nil {
+		t.Fatalf("re-get fork: %v", err)
+	}
+	if live.Annotations == nil {
+		live.Annotations = map[string]string{}
+	}
+	live.Annotations["test.mitos.run/rereconcile"] = "1"
+	if err := k8sClient.Update(ctx, &live); err != nil {
+		t.Fatalf("bump fork to force reconcile: %v", err)
+	}
+
+	// Give the reconcile loop time to run; assert NO child pod was ever created and
+	// the child record still points at the source pod (never re-routed).
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) {
+		var pods corev1.PodList
+		if err := k8sClient.List(ctx, &pods, listForkChildren(forkName)); err != nil {
+			t.Fatalf("list children: %v", err)
+		}
+		if len(pods.Items) != 0 {
+			t.Fatalf("flag-flip-off must NOT create an orphan child pod for an already-co-located slot; got %d", len(pods.Items))
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	var afterFlip v1.Sandbox
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &afterFlip); err != nil {
+		t.Fatalf("get fork after flip: %v", err)
+	}
+	if len(afterFlip.Status.Children) != 1 || afterFlip.Status.Children[0].Pod != srcPod.Name || afterFlip.Status.Children[0].VMID == "" {
+		t.Fatalf("after flip, the co-located child record must be unchanged (source pod + vmID), got %+v", afterFlip.Status.Children)
+	}
+}

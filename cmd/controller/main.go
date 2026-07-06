@@ -294,6 +294,14 @@ func main() {
 		logger.Info("workspace memory snapshots: disabled (default); a checkpoint-on-terminate fails loud. Pass --workspace-memory-snapshots to enable resumable heads")
 	}
 
+	if multiVMFork && !enableHuskPods {
+		logger.Info("WARNING: --multi-vm-fork is on but --enable-husk-pods is off; multi-vm fork routing only applies to husk pods, so the flag is a no-op on the raw-forkd path")
+	} else if multiVMFork {
+		logger.Info("multi-vm fork routing: ENABLED (experimental); a fork child co-locates as an additional VM inside a multi-VM-capable source pod (spawn-vm op) instead of a new pod, capped conservatively until per-pod memory accounting lands; a non-capable source falls back to a new pod")
+	} else {
+		logger.Info("multi-vm fork routing: disabled (default); every fork child gets its own pod. Pass --multi-vm-fork to co-locate fork children in a multi-VM-capable source pod")
+	}
+
 	if enableHuskPods {
 		logger.Info("workspace transport: husk delegation ENABLED; a sandbox's /workspace hydrate/dehydrate is delegated to the husk-stub control op (the node owns the VM vsock + node CAS); the controller commits the revision and advances the head")
 	}

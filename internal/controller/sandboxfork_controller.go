@@ -652,6 +652,20 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	for i := int32(0); i < effectiveReplicas(fork); i++ {
 		childName := fmt.Sprintf("%s-fork-%d", fork.Name, i)
 
+		// A slot activated in a prior pass is carried forward as-is BEFORE any
+		// routing decision, so its fate is decided once and independently of the
+		// current flag state. Without this hoist, a slot recorded via the
+		// spawn-in-source-pod path would fall to the new-pod branch after a
+		// --multi-vm-fork flip-to-off (controller restart) and ensureForkChildPod
+		// would create a brand-new pod for a childName that status never references
+		// (the carried-forward source-pod record wins), leaking a KVM slot until the
+		// fork is GC'd. Idempotent per slot; never re-activates a live child VM.
+		if info, ok := recorded[childName]; ok {
+			forks = append(forks, info)
+			ready++
+			continue
+		}
+
 		// MultiVMFork routing: for the first maxCoLocatedForkVMsPerPod slots of a
 		// multi-VM-capable source, spawn the child as an ADDITIONAL VM INSIDE the
 		// source pod (spawn-vm op) instead of creating a brand-new child pod. Slots
@@ -661,13 +675,6 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// (spawnInSourcePod is false), this branch is never entered and the path
 		// below is byte-for-byte unchanged.
 		if spawnInSourcePod && i < maxCoLocatedForkVMsPerPod {
-			// Already activated in a prior pass: carry it forward, do not re-spawn a
-			// non-dormant VM (idempotent per slot, mirroring the new-pod path).
-			if info, ok := recorded[childName]; ok {
-				forks = append(forks, info)
-				ready++
-				continue
-			}
 			spawnedChild, ok := r.spawnForkChildInSourcePod(ctx, spawnForkChildArgs{
 				fork:        fork,
 				srcPod:      srcPod,
@@ -691,17 +698,12 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		}
 
 		// Get-or-create the child pod for this slot (idempotent by the stable name).
+		// The recorded-slot carry-forward is hoisted above the routing branches, so a
+		// slot already activated (in-source-pod or in its own pod) never reaches here
+		// and this only runs for a genuinely new slot on the new-pod path.
 		child, err := r.ensureForkChildPod(ctx, fork, srcPod, childName, opts)
 		if err != nil {
 			logger.Error(err, "create fork child pod failed", "child", childName)
-			continue
-		}
-
-		// Already activated in a prior pass: carry the recorded info forward and
-		// skip re-activation (idempotent per slot).
-		if info, ok := recorded[childName]; ok {
-			forks = append(forks, info)
-			ready++
 			continue
 		}
 
