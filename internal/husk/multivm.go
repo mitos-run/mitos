@@ -761,9 +761,11 @@ func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapsh
 
 	if err := inst.vm.CreateSnapshot(memFile, vmStateFile); err != nil {
 		// Best effort: resume the source so a transient snapshot error does not leave
-		// a tenant's live sandbox frozen. Here the snapshot already failed, so the
-		// resume error is not surfaced.
-		_ = inst.vm.Resume()
+		// a tenant's live sandbox frozen. The snapshot already failed, so the resume
+		// error is not surfaced, but the bounded retry + stuck-paused marker still
+		// apply here (a transient resume blip on this branch must not silently leave
+		// the source paused, the v1.24.1 incident class).
+		_ = s.resumeInstanceAfterFork(id, inst)
 		werr := fmt.Errorf("husk: create fork snapshot in %s for vm %q: %w", req.SnapshotDir, id, err)
 		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 	}
