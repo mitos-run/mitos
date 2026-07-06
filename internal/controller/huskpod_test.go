@@ -1376,4 +1376,44 @@ func TestReconcileHuskPodsThreadsMultiVM(t *testing.T) {
 			t.Fatalf("MultiVM reconciler must stamp %s=true on warm husk pods, got labels %v", label, p.Labels)
 		}
 	}
+
+	// Negative case: a MultiVM-OFF reconciler must NOT stamp the label. This
+	// catches an inverted-condition regression (label always applied) that the
+	// positive case alone would miss.
+	offPool := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "husk-pool-mvm-off", Namespace: "default"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
+	}
+	if err := c.Create(ctx, offPool); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, p := range listHuskPods(t, c, "husk-pool-mvm-off") {
+			_ = c.Delete(ctx, &p)
+		}
+		_ = c.Delete(ctx, offPool)
+	})
+	var gotOff v1.SandboxPool
+	if err := c.Get(ctx, client.ObjectKeyFromObject(offPool), &gotOff); err != nil {
+		t.Fatal(err)
+	}
+	rOff := &controller.SandboxPoolReconciler{
+		Client:          c,
+		NodeRegistry:    controller.NewNodeRegistry(),
+		EnableHuskPods:  true,
+		MultiVM:         false,
+		HuskStubImage:   "mitos-husk-stub:test",
+		KVMResourceName: "mitos.run/kvm",
+	}
+	if _, err := rOff.ReconcileHuskPodsForTest(ctx, &gotOff, gotOff.Spec.Template); err != nil {
+		t.Fatalf("reconcileHuskPods (multi-vm off): %v", err)
+	}
+	for _, p := range waitHuskPodCount(t, c, "husk-pool-mvm-off", 1) {
+		if _, ok := p.Labels[label]; ok {
+			t.Fatalf("MultiVM-off reconciler must NOT stamp %s, got labels %v", label, p.Labels)
+		}
+	}
 }
