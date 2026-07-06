@@ -102,10 +102,28 @@ fork bench) so the target is grounded, not asserted.
 The checkpoint is a point-in-time copy; once `CreateSnapshot` has written mem and
 vmstate and the rootfs clone is captured, the source can resume with no loss of
 consistency. `ForkSnapshot` should pause, snapshot, capture the rootfs clone, then
-ALWAYS resume, regardless of an inbound `pause_source`. Reframe `pause_source` as
-"pause for a consistent checkpoint" (an implementation detail that is always true),
-not "leave the source paused" (a caller-visible state that no caller wants on the
-hosted path).
+resume.
+
+Compatibility gate (do this analysis before writing the fix, it is milestone
+[#759]'s first step): `pause_source=true` is today's wire contract on the fork
+route, and its current meaning is "leave the source paused after the checkpoint".
+We must NOT silently reinterpret that field in place if any consumer relies on
+leave-paused. Enumerate every consumer: the hosted SDKs (`direct.py`, `aio.py`,
+the TS/Go SDKs), the control-plane fork handler, the raw-forkd `ForkRunning` path
+(`internal/fork/engine.go`), and the forksnapshot tests. Two outcomes:
+
+- If NO consumer actually depends on leave-paused (the hosted path sends
+  `pause_source=true` only to get a consistent checkpoint and every caller wants a
+  usable source back), then leave-paused is a latent bug, not a contract, and
+  `ForkSnapshot` resuming after the checkpoint is a fix, not a break. Document the
+  audit that shows no dependency.
+- If a consumer (e.g. a snapshot-and-hold or snapshot-and-terminate flow) genuinely
+  needs the source to stay paused, do NOT overload `pause_source`. Add an explicit
+  field (for example `resume_source`, defaulting to true, or a separate
+  `leave_paused`) and migrate callers, keeping the old behavior reachable.
+
+The default outward behavior after this milestone must be: a fork leaves the source
+running. Which mechanism (reinterpret vs new field) is chosen by the audit above.
 
 Verify the rootfs clone is captured atomically within the paused window; if the
 clone currently happens outside the pause, move it inside so mem and disk are a
