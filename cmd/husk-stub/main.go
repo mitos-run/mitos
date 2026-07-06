@@ -413,7 +413,12 @@ func run() error {
 		// from it. Empty disables the workspace ops (fail-closed).
 		CASDir: *casDir,
 		// EXPERIMENTAL multi-VM-per-pod mode (#764), default off: false keeps the
-		// single-VM behavior byte-for-byte. Increment 1 wires only the scaffold.
+		// single-VM behavior byte-for-byte. When on, the stub multiplexes the
+		// lifecycle over its per-VM instance map and derives each non-default VM's
+		// OWN workdir + Firecracker/vsock socket nested under this base --workdir
+		// (deriveVMConfig), so several Firecracker processes coexist in one pod
+		// without colliding on the single fixed socket the single-VM path uses. No
+		// production caller sets this yet; the controller is not wired to it.
 		MultiVM: *multiVM,
 	})
 	// Publish the constructed stub to the already-serving metering source.
