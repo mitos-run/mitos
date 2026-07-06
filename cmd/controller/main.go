@@ -222,6 +222,7 @@ func main() {
 		NodeRegistry:              nodeRegistry,
 		PeerToken:                 peerToken,
 		EnableHuskPods:            enableHuskPods,
+		MultiVM:                   multiVMFork,
 		HuskStubImage:             huskStubImage,
 		HuskDNSUpstream:           huskDNSUpstream,
 		KVMResourceName:           "mitos.run/kvm",
