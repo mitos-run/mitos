@@ -177,6 +177,35 @@ print(sb.exec("cat /workspace/notes.md").stdout)
 sb = c.sandbox("python").wait_until_ready()      # chainable; raises on Failed/timeout
 ```
 
+### Durable workspaces and spec.git
+
+A `Workspace` is a durable, forkable checkout. Declare the repo paths that get
+version history and the fork-and-merge rendezvous remote first-class with
+`mitos.git(...)`, instead of patching the CRD by hand:
+
+```python
+import mitos
+
+c = mitos.AgentRun()
+ws = c.create_workspace(
+    "feature-x",
+    git=mitos.git(paths=["/workspace/repo"]),
+)
+
+# To authenticate a rendezvous push to an external remote, reference a Secret
+# key holding the token (never the token value itself):
+ws2 = c.create_workspace(
+    "feature-y",
+    git=mitos.git(
+        paths=["/workspace/repo"],
+        credentials_secret=("git-creds", "token"),
+    ),
+)
+
+# Or set it on an existing workspace:
+ws.set_git(["/workspace/repo", "/workspace/docs"])
+```
+
 ### Streaming exec
 
 ```python

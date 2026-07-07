@@ -12,6 +12,7 @@ from mitos.errors import (
     TimeoutTooLargeError,
     UnauthorizedError,
 )
+from mitos.git import GitSpec, git
 from mitos.sandbox import Sandbox
 from mitos.template import Template
 from mitos.workspace import ServedWorkspace
@@ -42,6 +43,8 @@ __all__ = [
     "AsyncSandbox",
     "Sandbox",
     "Template",
+    "git",
+    "GitSpec",
     "ServedWorkspace",
     "ExecResult",
     "Execution",
