@@ -1100,6 +1100,10 @@ func (in *SandboxStatus) DeepCopyInto(out *SandboxStatus) {
 		in, out := &in.CheckpointTime, &out.CheckpointTime
 		*out = (*in).DeepCopy()
 	}
+	if in.ForkStartedAt != nil {
+		in, out := &in.ForkStartedAt, &out.ForkStartedAt
+		*out = (*in).DeepCopy()
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]metav1.Condition, len(*in))
