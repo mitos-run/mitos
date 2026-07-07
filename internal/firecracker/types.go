@@ -52,6 +52,15 @@ type VMConfig struct {
 	// with the same page size without a per-fork API call. The field is config
 	// (no secrets), safe to log.
 	HugePages string
+	// Env carries EXTRA environment entries ("KEY=VALUE") appended to the
+	// Firecracker (or jailer) process environment at launch, on top of the
+	// inherited environment. Empty (every caller today) keeps the stock inherited
+	// environment. It exists for the live copy-on-write fork path (issue: husk
+	// live-cow fork), which launches the PARENT Firecracker with the
+	// FIRECRACKER_MITOS_* vars that switch the patched binary onto the memfd-share
+	// + write-protect offer; the patched binary is behavior-identical to stock
+	// until those are set. Values are config, not secrets, and are safe to log.
+	Env []string
 }
 
 // VolumeDrive is one placeholder block device a template build attaches before

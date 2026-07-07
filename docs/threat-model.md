@@ -522,6 +522,68 @@ shared-pod-netns residual of the multi-VM-per-pod mode (Surface 2, Guest to gues
 which is why it stays flag-gated behind that mode's per-VM tap + /30 isolation and a
 named security review before it ships.
 
+### Husk live copy-on-write fork (parent memory share, milestone m4b)
+
+The live-cow fork path (`--live-cow-fork`, `SandboxReconciler.LiveCowFork` ->
+warm husk pod `--live-cow-fork` -> `husk.Options.LiveCowFork`) lets a CO-LOCATED
+fork child share the PARENT's resident guest memory through the Mitos-patched
+Firecracker (a `MAP_SHARED` memfd backing plus a userfaultfd write-protect offer,
+`mitos-run/firecracker` branch `mitos/uffd-wp-v1.15.0`) instead of restoring the
+child from the disk fork snapshot, driving the hosted fork toward sub-100ms. It is
+DEFAULT OFF and SEPARATE from `--multi-vm-fork` so it canaries independently; off
+is byte-for-byte the disk co-location (Husk fork snapshot row above). The patched
+Firecracker binary is behavior-identical to stock UNLESS the `FIRECRACKER_MITOS_*`
+env is set, and only the live-cow path sets it, so a pod with the flag off runs the
+stock VMM.
+
+The new component is the parent-side write-protect fork handler on the forkd/husk
+side (`internal/fork/wpfork*.go`, a Go port of the m2 reference C handler). At a
+fork point the patched parent Firecracker creates a userfaultfd over ITS OWN live
+guest mapping (requesting `UFFD_FEATURE_PAGEFAULT_FLAG_WP`), registers every region
+write-protect, and hands the uffd plus the region layout to this handler over a
+PRIVATE per-VM unix socket (`FIRECRACKER_MITOS_WP_UDS`) via `SCM_RIGHTS`. The
+handler FREEZES the guest (write-protects the whole region), the parent resumes,
+and on each write-protect fault the handler copies the page's pre-write (fork-time)
+bytes into a PRIVATE frozen memfd BEFORE it unprotects and wakes the parent's
+writer. That copy-before-unprotect ordering is the correctness invariant: a resumed
+parent can no longer leak a post-fork write forward into a child (see
+`docs/fork-correctness.md` and the KVM-tested inheritance + no-leak assertion in
+`internal/fork/wpfork_kvm_test.go`).
+
+Trust and residual, stated honestly:
+
+- The handler owns NO policy. The uffd is created BY the parent Firecracker over
+  the parent's own address space (userfaultfd registers ranges in the CREATING
+  process's mm, so an external process cannot register the parent's pages). The
+  handler RECEIVES that uffd and only write-protects / unprotects and copies
+  pre-write pages into a memfd IT created. It reads the parent's guest memory
+  READ-ONLY through `/proc/<pid>/fd/<fd>` (the m1 export the parent itself
+  published), and writes NOWHERE on the host filesystem.
+- The handler's only external input is the region layout the parent Firecracker
+  itself sends over the private per-VM socket, plus the parent's own memfd export
+  coordinates. It adds NO new tenant-facing input surface: the socket is host-local
+  and per-VM, not reachable by the guest.
+- The parent and every co-located child see a point-in-time-T image: a child reads a
+  clobbered page from the frozen memfd (fork-time bytes) and an untouched page live
+  from the shared memfd (cheap CoW), so per-VM memory independence holds exactly as
+  the disk-fork path guarantees it (each fork still runs the full fail-closed
+  RNG/clock/secret re-seed of the Husk fork snapshot row; live-cow changes only the
+  MEMORY SOURCE, not the fork-correctness re-seed).
+- Fail-closed: if the WP handler is not listening, the kernel lacks WP
+  (`CONFIG_HAVE_ARCH_USERFAULTFD_WP`), or the platform is non-Linux, the parent
+  Firecracker logs and stays on the paused-parent (m1) contract, and the husk falls
+  back to the disk snapshot restore. Turning the flag on therefore never breaks a
+  fork; where the child-side memfd import is not yet complete it simply keeps
+  restoring the child from disk.
+- Residual: a compromised controller can drive a live-cow-enabled spawn against a
+  reachable warm husk pod, the SAME residual already stated for activate,
+  fork-snapshot, and spawn-vm; and the path inherits the shared-pod-netns residual of
+  the multi-VM-per-pod mode it co-locates within. The uffd is confined to the
+  parent's own guest RAM (it cannot register another VM's pages), so it opens no
+  cross-VM memory read. This path is security-sensitive (`internal/fork`,
+  `internal/daemon`, `internal/husk`) and carries a named human review before it
+  ships on by default.
+
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin
 (`cmd/kvm-device-plugin`, `internal/deviceplugin`): the pod requests
 `mitos.run/kvm` like any extended resource and the kubelet bind-mounts
