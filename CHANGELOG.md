@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.26.3](https://github.com/mitos-run/mitos/compare/v1.26.2...v1.26.3) (2026-07-07)
+
+
+### Bug Fixes
+
+* **husk:** co-located fork restores from the parent snapshot so the child inherits ([#812](https://github.com/mitos-run/mitos/issues/812)) ([10d6981](https://github.com/mitos-run/mitos/commit/10d69816bfa6b683e67b76d4b3921bd02abf9b46))
+
 ## [1.26.2](https://github.com/mitos-run/mitos/compare/v1.26.1...v1.26.2) (2026-07-07)
 
 
