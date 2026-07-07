@@ -137,15 +137,18 @@ func sendUffd(t *testing.T, conn *net.UnixConn, body []byte, uffd int) {
 //	    (both the marker page and an untouched page).
 //	NO LEAK: the resumed parent OVERWRITES the marker page, and the child still
 //	    reads the ORIGINAL fork-time bytes, not the parent's post-fork write.
-// requireKVMCIRunner skips a WP-handler test outside the KVM CI runner. These
-// tests exercise the real userfaultfd write-protect handshake and need the KVM CI
-// environment (the firecracker-test job). The plain go-test ubuntu runner lacks
-// it and cannot complete the handshake reliably, so gate on /dev/kvm exactly as
-// engine_pause_kvm_test.go does. They still RUN and are proven in firecracker-test.
+// requireKVMCIRunner skips a WP-handler test under the race detector. These tests
+// drive the real userfaultfd write-protect handshake across a live goroutine (the
+// handler Receive) and a concurrent SCM_RIGHTS send; the extra scheduling latency
+// the race detector injects perturbs that handshake and the connection tears down
+// mid-send (sendmsg broken pipe). The firecracker-test job runs these WITHOUT
+// -race (go test ./internal/fork/... -v) so they are fully exercised and proven
+// there; the go-test job runs ./... -race, where they skip. raceDetectorEnabled
+// is set by the build-tagged sibling files (raceenabled_test.go / racedisabled_test.go).
 func requireKVMCIRunner(t *testing.T) {
 	t.Helper()
-	if _, err := os.Stat("/dev/kvm"); err != nil {
-		t.Skip("skipping WP-handler KVM test: /dev/kvm not available (runs in the firecracker-test KVM job)")
+	if raceDetectorEnabled {
+		t.Skip("skipping WP-handler KVM handshake test under -race (timing-sensitive; run without -race in the firecracker-test job)")
 	}
 }
 
