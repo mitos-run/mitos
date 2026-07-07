@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.26.1](https://github.com/mitos-run/mitos/compare/v1.26.0...v1.26.1) (2026-07-06)
+
+
+### Bug Fixes
+
+* **husk:** route ForkSnapshot through the default instance state under multi-vm ([#807](https://github.com/mitos-run/mitos/issues/807)) ([00c7cde](https://github.com/mitos-run/mitos/commit/00c7cdec7c57dd38a0093c7a18fca8593262c274))
+
 ## [1.26.0](https://github.com/mitos-run/mitos/compare/v1.25.0...v1.26.0) (2026-07-06)
 
 
