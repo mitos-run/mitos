@@ -78,6 +78,12 @@ type wpForkHandler struct {
 	pageSize uint64
 	closed   bool
 
+	// stopR/stopW are a self-pipe that unblocks Serve's poll on Close. Closing the
+	// uffd alone does NOT interrupt a concurrent blocking read(2) on it, so Serve
+	// polls the uffd AND stopR together and Close writes stopW to wake it.
+	stopR int
+	stopW int
+
 	// served counts write-protect faults the handler has copied-and-unprotected.
 	served int64
 
@@ -106,7 +112,15 @@ func newWPForkHandler(cfg WPForkConfig) (*wpForkHandler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wpfork: listen %s: %w", cfg.UDSPath, err)
 	}
-	return &wpForkHandler{cfg: cfg, ln: ln, uffd: -1, frozenFd: -1}, nil
+	// Self-pipe so Close can wake Serve's poll (a closed uffd does not interrupt a
+	// blocking read on it). CLOEXEC so the pipe never leaks into a child VM.
+	var sp [2]int
+	if err := unix.Pipe2(sp[:], unix.O_CLOEXEC); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(cfg.UDSPath)
+		return nil, fmt.Errorf("wpfork: stop pipe: %w", err)
+	}
+	return &wpForkHandler{cfg: cfg, ln: ln, uffd: -1, frozenFd: -1, stopR: sp[0], stopW: sp[1]}, nil
 }
 
 // StartWPForkHandler binds the write-protect handshake socket for a live-cow fork
@@ -316,6 +330,7 @@ func (h *wpForkHandler) writeprotect(addr, length uint64, protect bool) error {
 func (h *wpForkHandler) Serve() error {
 	h.mu.Lock()
 	uffd := h.uffd
+	stopR := h.stopR
 	h.mu.Unlock()
 	if uffd < 0 {
 		return fmt.Errorf("wpfork: Serve before handshake")
@@ -323,9 +338,34 @@ func (h *wpForkHandler) Serve() error {
 	var msg uffdMsg
 	msgBuf := (*[unsafe.Sizeof(msg)]byte)(unsafe.Pointer(&msg))[:]
 	for {
+		// Poll the uffd and the stop pipe together: closing the uffd does not
+		// interrupt a blocking read on it, so Close writes stopR's peer to wake us.
+		pfds := []unix.PollFd{
+			{Fd: int32(uffd), Events: unix.POLLIN},
+			{Fd: int32(stopR), Events: unix.POLLIN},
+		}
+		if _, err := unix.Poll(pfds, -1); err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			h.mu.Lock()
+			closed := h.closed
+			h.mu.Unlock()
+			if closed {
+				return nil
+			}
+			return fmt.Errorf("wpfork: poll uffd: %w", err)
+		}
+		if pfds[1].Revents != 0 {
+			// Close signaled the stop pipe: clean shutdown.
+			return nil
+		}
+		if pfds[0].Revents&unix.POLLIN == 0 {
+			continue
+		}
 		nread, err := unix.Read(uffd, msgBuf)
 		if err != nil {
-			if err == unix.EINTR {
+			if err == unix.EINTR || err == unix.EAGAIN {
 				continue
 			}
 			// A closed uffd (Close) returns EBADF/errno; treat as clean shutdown.
@@ -405,8 +445,8 @@ func (h *wpForkHandler) FreezeDuration() time.Duration {
 	return time.Duration(atomic.LoadInt64(&h.freezeNanos))
 }
 
-// Close tears down the handler: it closes the uffd (unblocking Serve), munmaps
-// the memory views, and removes the socket. Idempotent.
+// Close tears down the handler: it wakes Serve's poll via the stop pipe, closes
+// the uffd, munmaps the memory views, and removes the socket. Idempotent.
 func (h *wpForkHandler) Close() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -414,6 +454,17 @@ func (h *wpForkHandler) Close() error {
 		return nil
 	}
 	h.closed = true
+	// Wake Serve's poll FIRST (a closed uffd does not interrupt a blocked poll/read
+	// on it), then close both pipe ends. The single byte is enough to signal POLLIN.
+	if h.stopW >= 0 {
+		_, _ = unix.Write(h.stopW, []byte{0})
+		_ = unix.Close(h.stopW)
+		h.stopW = -1
+	}
+	if h.stopR >= 0 {
+		_ = unix.Close(h.stopR)
+		h.stopR = -1
+	}
 	if h.ln != nil {
 		_ = h.ln.Close()
 	}
