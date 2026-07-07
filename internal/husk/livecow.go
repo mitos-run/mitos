@@ -2,6 +2,7 @@ package husk
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -163,12 +164,91 @@ func liveCowParentPaths(workDir string) (wpUDS, memExport string) {
 // liveCowParentEnv returns the FIRECRACKER_MITOS_* environment a live-cow PARENT
 // Firecracker under workDir must be launched with (empty when the flag is off or
 // the workdir is empty). It is only meaningful paired with an armed WP handler on
-// the same socket; the launch wiring that pairs them lands with the child-import
-// increment (see the file header).
+// the same socket; armLiveCowSource pairs them.
 func (s *Stub) liveCowParentEnv(workDir string) []string {
 	if !s.liveCowFork {
 		return nil
 	}
 	wpUDS, memExport := liveCowParentPaths(workDir)
 	return fork.LiveCowParentEnv(wpUDS, memExport)
+}
+
+// armLiveCowSource arms the PARENT side of the live-cow fork for the SOURCE VM
+// (milestone m6b), the final wiring step that makes forkSnapshotInstance reach the
+// vmstate-only snapshot path (issue #832): it BINDS the write-protect handshake
+// socket the patched source Firecracker connects to during guest-memory setup and
+// returns the FIRECRACKER_MITOS_* env the source Firecracker must be LAUNCHED with
+// so it exports its guest memfd (m1) and offers the write-protect uffd (m2). A
+// background goroutine (serveLiveCowSource) completes the handshake once Firecracker
+// connects, arms the freezer (SetLiveCowParent, so liveCowSnapshotFreezer stops
+// returning nil), and runs the copy-before-unprotect fault loop for the life of the
+// source, so a resumed source cannot leak a post-fork write into a co-located child.
+//
+// It returns the parent env to append to the source Firecracker launch, or nil.
+// The handler is retained on the Stub (liveCowHandle) for teardown.
+//
+// FAIL-SAFE (a fork NEVER breaks): it arms ONLY when --live-cow-fork is on AND a
+// real per-VM workdir exists (the production Firecracker launch). The unit/mock path
+// (empty workdir), a bind failure, or a non-Linux host (StartWPForkHandler returns
+// ErrLiveCowUnsupported) all return nil env and arm nothing, so the source launches
+// stock and forkSnapshotInstance takes the Full CreateSnapshot(mem, vmstate) path.
+// Turning the flag on can therefore never break a fork; it only opts a patched pod
+// into the vmstate-only capture where the whole path is present.
+func (s *Stub) armLiveCowSource(workDir string) []string {
+	if !s.liveCowFork || workDir == "" {
+		return nil
+	}
+	wpUDS, memExport := liveCowParentPaths(workDir)
+	handle, err := fork.StartWPForkHandler(fork.WPForkConfig{UDSPath: wpUDS, MemExportPath: memExport})
+	if err != nil {
+		// No handler bound (off Linux, or a socket-bind failure): launch the source
+		// stock so every fork takes the Full-snapshot fallback. Not fatal. The workdir
+		// is a pod-local path, not a secret.
+		slog.Warn("live-cow source arm skipped: WP handler did not bind; forks use the Full snapshot fallback",
+			"workdir", workDir, "err", err)
+		return nil
+	}
+	s.mu.Lock()
+	s.liveCowHandle = handle
+	s.mu.Unlock()
+	go s.serveLiveCowSource(handle)
+	return fork.LiveCowParentEnv(wpUDS, memExport)
+}
+
+// serveLiveCowSource completes the write-protect handshake with the patched source
+// Firecracker and, on success, arms the freezer and runs the fault loop for the life
+// of the source VM. It runs in its own goroutine (armLiveCowSource starts it) so the
+// blocking Receive/Serve never sit on a lifecycle lock.
+//
+// FAIL-SAFE: if the source Firecracker never offers the write-protect handshake (an
+// unpatched binary, or it fell back to the paused-parent contract), Receive errors
+// and the freezer is never armed, so liveCowSnapshotFreezer stays nil and every fork
+// takes the Full-snapshot path. Serve is only started AFTER a successful handshake;
+// it blocks harmlessly until the first Freeze write-protects the region, then serves
+// copy-before-unprotect faults, and returns when the handler is Closed at teardown.
+func (s *Stub) serveLiveCowSource(handle fork.WPForkHandle) {
+	if err := handle.Receive(); err != nil {
+		slog.Warn("live-cow source arm incomplete: write-protect handshake not received; forks use the Full snapshot fallback",
+			"err", err)
+		return
+	}
+	// Arm the freezer BEFORE Serve: forkSnapshotInstance can now take the vmstate-only
+	// path (Freeze + CreateSnapshotVMStateOnly) instead of the 364ms Full mem write.
+	s.SetLiveCowParent(handle)
+	if err := handle.Serve(); err != nil {
+		slog.Warn("live-cow source fault loop ended with error", "err", err)
+	}
+}
+
+// closeLiveCowSource tears down the armed source-side WP handler at teardown,
+// unblocking a stuck Receive (AcceptUnix returns) and stopping the Serve fault loop.
+// A no-op when the source was never armed. Safe to call once, under no lock.
+func (s *Stub) closeLiveCowSource() {
+	s.mu.Lock()
+	handle := s.liveCowHandle
+	s.liveCowHandle = nil
+	s.mu.Unlock()
+	if handle != nil {
+		_ = handle.Close()
+	}
 }

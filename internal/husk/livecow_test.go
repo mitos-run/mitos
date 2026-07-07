@@ -78,6 +78,84 @@ func TestLiveCowForkGateOn(t *testing.T) {
 	}
 }
 
+// TestArmLiveCowSourceGatedOff proves the source-arm wiring (m6b) is a no-op when
+// the flag is off or no real workdir exists: it binds no handler, arms no freezer,
+// and emits no env, so a fork takes the Full-snapshot fallback byte-for-byte. This
+// is the fail-safe that keeps turning the flag off (and the mock/unit path) exactly
+// the current behavior.
+func TestArmLiveCowSourceGatedOff(t *testing.T) {
+	// Flag OFF: never arms, even with a real workdir.
+	off := New(firecracker.VMConfig{}, Options{MultiVM: true})
+	if env := off.armLiveCowSource(t.TempDir()); env != nil {
+		t.Errorf("flag off must arm nothing; got env %v", env)
+	}
+	if off.liveCowSnapshotFreezer() != nil {
+		t.Error("flag off must leave the freezer nil (Full-snapshot fallback)")
+	}
+	if off.liveCowHandle != nil {
+		t.Error("flag off must bind no WP handler")
+	}
+
+	// Flag ON but EMPTY workdir (the unit/mock launch): still arms nothing, since
+	// there is no real Firecracker to hand a socket to.
+	on := New(firecracker.VMConfig{}, Options{MultiVM: true, LiveCowFork: true})
+	if env := on.armLiveCowSource(""); env != nil {
+		t.Errorf("empty workdir must arm nothing; got env %v", env)
+	}
+	if on.liveCowHandle != nil {
+		t.Error("empty workdir must bind no WP handler")
+	}
+}
+
+// TestArmLiveCowSourceBindsAndEmitsEnv proves that with the flag on and a real
+// workdir the source-arm wiring (m6b) BINDS the write-protect handshake socket and
+// returns the FIRECRACKER_MITOS_* env the source Firecracker must launch with, so
+// the patched source can export its memfd + offer the WP uffd. It does NOT need KVM
+// (only a unix-socket bind), so it runs in the ordinary go-test job on Linux; off
+// Linux StartWPForkHandler is unsupported and the arm is a fail-safe no-op, which the
+// test also accepts. The Receive goroutine is unblocked by closeLiveCowSource.
+func TestArmLiveCowSourceBindsAndEmitsEnv(t *testing.T) {
+	s := New(firecracker.VMConfig{}, Options{MultiVM: true, LiveCowFork: true})
+	workDir := t.TempDir()
+	env := s.armLiveCowSource(workDir)
+	defer s.closeLiveCowSource()
+
+	if env == nil {
+		// Off Linux (or a kernel/socket that cannot bind) the arm fails closed to no
+		// env and no handler: the source launches stock and forks use the Full path.
+		if s.liveCowHandle != nil {
+			t.Fatal("a nil-env arm must retain no handler (fail-safe)")
+		}
+		t.Skip("live-cow source arm unsupported on this host (StartWPForkHandler); Full-snapshot fallback")
+	}
+
+	want := []string{
+		"FIRECRACKER_MITOS_SHARED_MEM=1",
+		"FIRECRACKER_MITOS_SHARED_MEM_EXPORT=" + filepath.Join(workDir, "mitos-memfd.export"),
+		"FIRECRACKER_MITOS_WP_UDS=" + filepath.Join(workDir, "mitos-wp.sock"),
+	}
+	if len(env) != len(want) {
+		t.Fatalf("arm env = %v, want %d entries", env, len(want))
+	}
+	for i := range want {
+		if env[i] != want[i] {
+			t.Errorf("env[%d] = %q, want %q", i, env[i], want[i])
+		}
+	}
+	// The handler is bound and retained for teardown; the socket exists on disk.
+	if s.liveCowHandle == nil {
+		t.Error("a successful arm must retain the WP handler for teardown")
+	}
+	if _, err := os.Stat(filepath.Join(workDir, "mitos-wp.sock")); err != nil {
+		t.Errorf("arm must bind the WP handshake socket: %v", err)
+	}
+	// The freezer is NOT armed until the handshake completes (no Firecracker connected
+	// in this unit test), so a fork here would still take the Full-snapshot fallback.
+	if s.liveCowSnapshotFreezer() != nil {
+		t.Error("freezer must stay nil until the WP handshake completes")
+	}
+}
+
 // TestLiveCowChildImportEnvNoParent proves that with no armed live-cow parent the
 // child-import env is empty (nil, nil), so SpawnVM restores the child from the
 // disk fork snapshot. This is today's production wiring until the parent-arm +
