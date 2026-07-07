@@ -42,6 +42,18 @@ type Client struct {
 	allocator   *UIDAllocator
 }
 
+// launchEnv returns the process environment for a Firecracker (or jailer)
+// launch: the inherited environment with any extra "KEY=VALUE" entries appended.
+// nil extra (every stock launch) returns nil so exec uses the inherited
+// environment unchanged (byte-for-byte the prior behavior); a non-empty extra is
+// the live-cow fork path arming the parent (VMConfig.Env).
+func launchEnv(extra []string) []string {
+	if len(extra) == 0 {
+		return nil
+	}
+	return append(os.Environ(), extra...)
+}
+
 // StartVM launches a Firecracker process and returns a client connected
 // to it. With cfg.Jailer enabled the process is launched through the
 // jailer binary inside a per-VM chroot under a dedicated uid/gid; with
@@ -98,6 +110,10 @@ func StartVM(cfg VMConfig) (*Client, error) {
 	cmd.Dir = cfg.WorkDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Append any live-fork env (FIRECRACKER_MITOS_*) on top of the inherited
+	// environment. Empty for every stock launch, so this is a no-op unless the
+	// live-cow fork path armed the parent (VMConfig.Env).
+	cmd.Env = launchEnv(cfg.Env)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start firecracker: %w", err)
@@ -206,6 +222,10 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 	cmd := exec.Command(cfg.Jailer.JailerBin, jArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// The jailer passes its environment through to the jailed firecracker, so the
+	// live-fork env reaches the VMM the same way as the direct-exec path. Empty
+	// for every stock launch.
+	cmd.Env = launchEnv(cfg.Env)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start jailer: %w", err)
