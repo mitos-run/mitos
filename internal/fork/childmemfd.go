@@ -2,6 +2,7 @@ package fork
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -123,11 +124,44 @@ func ParseChildMemfdImport(s string) (ChildMemfdImport, error) {
 		}
 		v[i] = u
 	}
+	// The pid/fd fields land in int; bound-check before the narrowing conversion so a
+	// value above the platform int range cannot wrap to a negative pid/fd (a real pid
+	// or fd is far below this, so a larger value is malformed input, rejected).
+	pidFD := func(idx int) (int, error) {
+		if v[idx] > uint64(math.MaxInt) {
+			return 0, fmt.Errorf("parse child memfd import %q: field %d (%d) exceeds int range", s, idx, v[idx])
+		}
+		return int(v[idx]), nil
+	}
+	parentPID, err := pidFD(0)
+	if err != nil {
+		return ChildMemfdImport{}, err
+	}
+	parentFD, err := pidFD(1)
+	if err != nil {
+		return ChildMemfdImport{}, err
+	}
+	frozenPID, err := pidFD(5)
+	if err != nil {
+		return ChildMemfdImport{}, err
+	}
+	frozenFD, err := pidFD(6)
+	if err != nil {
+		return ChildMemfdImport{}, err
+	}
+	bitmapPID, err := pidFD(9)
+	if err != nil {
+		return ChildMemfdImport{}, err
+	}
+	bitmapFD, err := pidFD(10)
+	if err != nil {
+		return ChildMemfdImport{}, err
+	}
 	c := ChildMemfdImport{
-		ParentPID: int(v[0]), ParentFD: int(v[1]), ParentIno: v[2], ParentDev: v[3],
+		ParentPID: parentPID, ParentFD: parentFD, ParentIno: v[2], ParentDev: v[3],
 		Bytes:     v[4],
-		FrozenPID: int(v[5]), FrozenFD: int(v[6]), FrozenIno: v[7], FrozenDev: v[8],
-		BitmapPID: int(v[9]), BitmapFD: int(v[10]), BitmapIno: v[11], BitmapDev: v[12],
+		FrozenPID: frozenPID, FrozenFD: frozenFD, FrozenIno: v[7], FrozenDev: v[8],
+		BitmapPID: bitmapPID, BitmapFD: bitmapFD, BitmapIno: v[11], BitmapDev: v[12],
 		PageSize:  v[13],
 	}
 	if err := c.validate(); err != nil {
