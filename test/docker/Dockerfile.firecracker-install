@@ -1,8 +1,10 @@
 # Fixture image for the firecracker+jailer install smoke test
 # (hack/test-firecracker-install.sh). It exercises the SAME hack/install-firecracker.sh
-# that Dockerfile.forkd and Dockerfile.husk-stub use, in a minimal image so the
-# test runs without the Go/Rust toolchain build. Guards #425: the image must ship
-# the jailer alongside firecracker, with matching versions.
+# AND hack/install-firecracker-patched.sh that Dockerfile.forkd and Dockerfile.husk-stub
+# use, in a minimal image so the test runs without the Go/Rust toolchain build.
+# Guards #425: the image must ship the jailer alongside firecracker, with matching
+# versions; and asserts the patched-FC swap keeps the stock jailer while pinning the
+# Mitos-patched firecracker by sha256.
 FROM ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d
 
 RUN apt-get update -qq && \
@@ -13,4 +15,7 @@ ARG FC_VERSION=v1.15.0
 ENV FC_VERSION=${FC_VERSION}
 
 COPY hack/install-firecracker.sh /usr/local/bin/install-firecracker.sh
-RUN chmod +x /usr/local/bin/install-firecracker.sh && /usr/local/bin/install-firecracker.sh
+COPY hack/install-firecracker-patched.sh /usr/local/bin/install-firecracker-patched.sh
+RUN chmod +x /usr/local/bin/install-firecracker.sh /usr/local/bin/install-firecracker-patched.sh && \
+    /usr/local/bin/install-firecracker.sh && \
+    /usr/local/bin/install-firecracker-patched.sh

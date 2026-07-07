@@ -792,3 +792,242 @@ func TestMultiVMForkCoLocatesRealisticWarmPod(t *testing.T) {
 		t.Errorf("child status.VMID is empty, want the spawned vmID")
 	}
 }
+
+// TestMultiVMForkSpawnActivatesFromParentSnapshotNotTemplate is the wiring guard for
+// the prod-canary co-located-fork correctness bug. A co-located child spawned via the
+// spawn-vm op MUST activate from the PARENT FORK SNAPSHOT (the dir the source stub
+// wrote mem + vmstate + the frozen source rootfs to), NOT from the pool template
+// mounted at HuskSnapshotDir. On origin/main the spawn-vm ActivateRequest carried
+// SnapshotDir = HuskSnapshotDir (the template) with no ForkSnapshot flag, so the
+// co-located child booted a fresh template VM that inherited neither the parent's
+// memory nor its disk. This test captures the exact dir the source wrote its fork
+// snapshot to (the ForkSnapshotter fake echoes req.SnapshotDir) and asserts the
+// spawn-vm activate targets that SAME dir with ForkSnapshot=true, so a regression that
+// reverts the wiring to the template is caught in go-test, not only on real KVM.
+func TestMultiVMForkSpawnActivatesFromParentSnapshotNotTemplate(t *testing.T) {
+	poolName := uniqueName("pool-mvm-snap")
+	srcClaimName := uniqueName("src-mvm-snap")
+	forkName := uniqueName("mvm-snap")
+
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.30", multiVMSource, withCoLocationBudget("128Mi", "1280Mi"))
+	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
+
+	// Capture the dir the source stub was asked to WRITE the fork snapshot to. The
+	// co-located child must later ACTIVATE from exactly this dir.
+	var mu sync.Mutex
+	var writtenSnapDir string
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		mu.Lock()
+		writtenSnapDir = req.SnapshotDir
+		mu.Unlock()
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+	var activateCalls int32
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		atomic.AddInt32(&activateCalls, 1)
+		return husk.ActivateResult{OK: false, Error: "activate must not be called on the co-location path"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+
+	var gotSnapDir string
+	var gotForkSnapshot bool
+	var spawnCalls int32
+	setForkVMSpawner(func(_ context.Context, _ string, _ *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error) {
+		atomic.AddInt32(&spawnCalls, 1)
+		mu.Lock()
+		gotSnapDir = req.Activate.SnapshotDir
+		gotForkSnapshot = req.Activate.ForkSnapshot
+		mu.Unlock()
+		return husk.SpawnVMResult{OK: true, VMID: req.VMID, VsockPath: "/run/husk/" + req.VMID + ".sock"}, nil
+	})
+	t.Cleanup(func() { setForkVMSpawner(nil) })
+
+	setForkMultiVM(true)
+	t.Cleanup(func() { setForkMultiVM(false) })
+
+	fork := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      forkName,
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcClaimName}}, Replicas: 1},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var got v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &got); err != nil {
+			return false
+		}
+		return got.Status.ReadyReplicas == 1
+	})
+
+	if got := atomic.LoadInt32(&activateCalls); got != 0 {
+		t.Fatalf("single-VM activate must never be called on the co-location path, got %d calls (a spawn-vm + activate double path would corrupt the fork)", got)
+	}
+	if got := atomic.LoadInt32(&spawnCalls); got < 1 {
+		t.Fatalf("expected at least one spawn-vm call, got %d", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !gotForkSnapshot {
+		t.Errorf("spawn-vm ActivateRequest.ForkSnapshot = false, want true (co-located child must restore the node-local fork snapshot, not the content-addressed template)")
+	}
+	if gotSnapDir == controller.HuskSnapshotDir {
+		t.Errorf("spawn-vm activated from HuskSnapshotDir %q (the pool TEMPLATE mount); the co-located child must activate from the PARENT fork snapshot dir instead (the prod-canary bug)", controller.HuskSnapshotDir)
+	}
+	if gotSnapDir == "" || gotSnapDir != writtenSnapDir {
+		t.Errorf("spawn-vm activated from %q, want the dir the source wrote the fork snapshot to %q (mem + vmstate + the frozen source rootfs live there)", gotSnapDir, writtenSnapDir)
+	}
+}
+
+// TestMultiVMForkConcurrentSameSourceReservesAcrossForks proves the cross-fork
+// reservation (guarantee A across CONCURRENT same-source forks): TWO SandboxForks
+// targeting the SAME source pod, whose per-pod budget holds only ONE co-located VM,
+// together co-locate NO MORE than that one VM. The over-budget fork's child SPILLS
+// to a new pod (a sandbox-<id>-fork-0 pod appears) instead of packing a second full
+// guest into a pod sized for one.
+//
+// This FAILS on origin/main: there the co-location budget is computed PER FORK from
+// the source pod's static resources and does NOT subtract the VMs another fork
+// already placed, so BOTH forks independently see budget 1 and BOTH co-locate: two
+// spawn-vm calls, zero spilled pods, an over-admission into a pod whose memory.max
+// holds one. After the fix each fork subtracts the live cross-fork occupancy, so the
+// second fork sees a remaining budget of 0 and spills.
+func TestMultiVMForkConcurrentSameSourceReservesAcrossForks(t *testing.T) {
+	poolName := uniqueName("pool-mvm-xfork")
+	srcClaimName := uniqueName("src-mvm-xfork")
+	forkAName := uniqueName("mvm-xfork-a")
+	forkBName := uniqueName("mvm-xfork-b")
+
+	// 512Mi limit / 256Mi per VM = 2 VMs total; one reserved for the source VM, so
+	// the pod holds exactly ONE co-located fork VM across ALL forks of it.
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.40", multiVMSource, withCoLocationBudget("256Mi", "512Mi"))
+	if got := controller.CoLocatedForkVMBudgetForTest(srcPod); got != 1 {
+		t.Fatalf("test fixture precondition: source pod budget = %d, want exactly 1 co-located VM", got)
+	}
+	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
+
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+	// The SPILLED child legitimately takes the new-pod path and activates, so the
+	// activator must succeed. Only the co-located child uses spawn-vm.
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		return husk.ActivateResult{OK: true, VsockPath: "/run/husk/vsock.sock"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+
+	var spawnCalls int32
+	setForkVMSpawner(func(_ context.Context, _ string, _ *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error) {
+		atomic.AddInt32(&spawnCalls, 1)
+		return husk.SpawnVMResult{OK: true, VMID: req.VMID, VsockPath: "/run/husk/" + req.VMID + ".sock"}, nil
+	})
+	t.Cleanup(func() { setForkVMSpawner(nil) })
+
+	setForkMultiVM(true)
+	t.Cleanup(func() { setForkMultiVM(false) })
+
+	newFork := func(name string) *v1.Sandbox {
+		return &v1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+			},
+			Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcClaimName}}, Replicas: 1},
+		}
+	}
+	forkA := newFork(forkAName)
+	forkB := newFork(forkBName)
+	if err := k8sClient.Create(ctx, forkA); err != nil {
+		t.Fatalf("create fork A: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, forkA) })
+	if err := k8sClient.Create(ctx, forkB); err != nil {
+		t.Fatalf("create fork B: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, forkB) })
+
+	// Drive both forks to ReadyReplicas == 1, forcing any spilled child pod Ready so
+	// the new-pod path converges.
+	waitUntilForkReady(t, 25*time.Second, func() bool {
+		var pa, pb corev1.PodList
+		_ = k8sClient.List(ctx, &pa, listForkChildren(forkAName))
+		_ = k8sClient.List(ctx, &pb, listForkChildren(forkBName))
+		for i := range pa.Items {
+			forceHuskPodReady(t, &pa.Items[i])
+		}
+		for i := range pb.Items {
+			forceHuskPodReady(t, &pb.Items[i])
+		}
+		var ga, gb v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkAName, Namespace: "default"}, &ga); err != nil {
+			return false
+		}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkBName, Namespace: "default"}, &gb); err != nil {
+			return false
+		}
+		return ga.Status.ReadyReplicas == 1 && gb.Status.ReadyReplicas == 1
+	})
+
+	// Count the co-located VMs and the spilled pods across BOTH forks. A co-located
+	// child records status.Pod == the source pod + a non-empty VMID; a spilled child
+	// leaves both empty and has its own child pod.
+	var coLocated, spilled int
+	for _, name := range []string{forkAName, forkBName} {
+		var got v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: "default"}, &got); err != nil {
+			t.Fatalf("get fork %s: %v", name, err)
+		}
+		for _, c := range got.Status.Children {
+			if c.Pod == srcPod.Name && c.VMID != "" {
+				coLocated++
+			} else if c.Pod == "" && c.VMID == "" {
+				spilled++
+			} else {
+				t.Fatalf("fork %s child %s has an inconsistent placement record: pod=%q vmId=%q", name, c.Name, c.Pod, c.VMID)
+			}
+		}
+	}
+
+	// The core guarantee: the two forks together NEVER over-admit past the pod budget.
+	if coLocated > 1 {
+		t.Fatalf("cross-fork over-admission: %d co-located VMs in a source pod whose budget holds 1 (concurrent same-source forks must not each admit up to the per-fork budget)", coLocated)
+	}
+	// The pod's one co-location slot IS used (the fix must not regress single-fork
+	// co-location into spilling everything), and the overflow spills.
+	if coLocated != 1 {
+		t.Fatalf("expected exactly 1 co-located VM (the pod's single budgeted slot), got %d", coLocated)
+	}
+	if spilled != 1 {
+		t.Fatalf("expected exactly 1 spilled child (the over-budget fork), got %d", spilled)
+	}
+
+	// The spilled child materialized as a real new pod across the two forks.
+	var pa, pb corev1.PodList
+	if err := k8sClient.List(ctx, &pa, listForkChildren(forkAName)); err != nil {
+		t.Fatalf("list fork A children: %v", err)
+	}
+	if err := k8sClient.List(ctx, &pb, listForkChildren(forkBName)); err != nil {
+		t.Fatalf("list fork B children: %v", err)
+	}
+	if total := len(pa.Items) + len(pb.Items); total != 1 {
+		t.Fatalf("expected exactly 1 spilled child pod across both forks, got %d", total)
+	}
+	// Co-location actually engaged for the one budgeted slot (the fix must not
+	// regress single-fork co-location into spilling everything). The exact spawn-call
+	// count is not asserted: an idempotent re-drive (a lost status write) may re-spawn
+	// the SAME vmID without adding a second VM, so the authoritative over-admission
+	// ceiling is the co-located/spilled record counts above, not the raw call count.
+	if got := atomic.LoadInt32(&spawnCalls); got < 1 {
+		t.Fatalf("expected co-location to engage for the budgeted slot (at least 1 spawn-vm call), got %d", got)
+	}
+}

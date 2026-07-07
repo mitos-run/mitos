@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.27.0](https://github.com/mitos-run/mitos/compare/v1.26.3...v1.27.0) (2026-07-07)
+
+
+### Features
+
+* **controller:** cross-fork co-location reservation so concurrent same-source forks never over-admit ([#814](https://github.com/mitos-run/mitos/issues/814)) ([106f150](https://github.com/mitos-run/mitos/commit/106f15070e7e6ef2c5636505a1c7f8e3e756518c))
+
+## [1.26.3](https://github.com/mitos-run/mitos/compare/v1.26.2...v1.26.3) (2026-07-07)
+
+
+### Bug Fixes
+
+* **husk:** co-located fork restores from the parent snapshot so the child inherits ([#812](https://github.com/mitos-run/mitos/issues/812)) ([10d6981](https://github.com/mitos-run/mitos/commit/10d69816bfa6b683e67b76d4b3921bd02abf9b46))
+
 ## [1.26.2](https://github.com/mitos-run/mitos/compare/v1.26.1...v1.26.2) (2026-07-07)
 
 

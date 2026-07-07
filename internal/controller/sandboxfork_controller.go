@@ -83,20 +83,24 @@ type huskVMSpawner func(ctx context.Context, addr string, tlsConf *tls.Config, r
 // pends there exactly as an independent claim does. The node-level spill-vs-pend
 // refinement for the co-located dimension is deferred to a follow-up increment.
 //
-// SCOPE, and the honest limit today: this budget is computed PER FORK reconcile
-// from the source pod's static resources. It does NOT yet subtract co-located VMs
-// that OTHER SandboxForks targeting the SAME source pod have already placed there,
-// so N concurrent forks of one source can each independently admit up to this
-// budget and over-admit VMs into the pod. The NODE is still not overcommitted:
-// the pod's cgroup memory LIMIT is a hard ceiling the node scheduler already
-// reserved, so an over-admission is caught INSIDE the pod (a co-located guest that
-// would exceed memory.max is OOM-killed, fail-closed at the pod boundary) rather
-// than as a node overcommit. What is missing is a cross-fork SHARED RESERVATION or
-// live-occupancy check so an over-budget co-located child cleanly SPILLS to a new
-// pod instead of risking an intra-pod OOM under concurrent same-source forks. That
-// shared reservation (a race-free occupancy count across forks) is a tracked
-// follow-up; until it lands, guarantee A's per-pod dimension is enforced per fork,
-// not across concurrent forks of one source.
+// SCOPE: this budget is the PER-POD ceiling computed from the source pod's static
+// resources. It is the WHOLE-POD count, not a per-fork slice: the reconcile loop
+// subtracts the co-located VMs OTHER SandboxForks targeting the SAME source pod
+// have ALREADY placed there (coLocatedVMsInPodByOtherForks) before admitting this
+// fork's own children, so the effective budget for a fork is this ceiling minus the
+// live cross-fork occupancy. That closes the former per-fork gap where N concurrent
+// forks of one source each independently admitted up to this ceiling and
+// over-admitted VMs into the pod: the sum across all forks now stays within the
+// ceiling and an over-budget child SPILLS to a new pod (buildForkChildPod) instead
+// of risking an intra-pod OOM. The occupancy read is uncached (APIReader) and the
+// controller reconciles Sandbox objects serially (default MaxConcurrentReconciles
+// 1), so two same-source forks never evaluate occupancy against a stale view; the
+// read is also conservative on error (treat the pod as full and spill), and rounds
+// toward spilling so the guarantee is UNDER-admit, never over-admit. Even had the
+// NODE stayed safe without this (the pod cgroup memory LIMIT is a hard ceiling the
+// scheduler reserved, so an over-admission fails closed as an intra-pod OOM, not a
+// node overcommit), spilling the over-budget child is the correct outcome and is
+// now what happens.
 func coLocatedForkVMBudget(pod *corev1.Pod) int {
 	if pod == nil {
 		return 0
@@ -629,10 +633,37 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	// ONCE for the whole fan-out from the source pod's ACTUAL memory accounting: the
 	// pod holds only floor(memory.max / per-VM guest RAM) VMs safely at the CoW
 	// worst case, one slot reserved for the source VM already resident in the pod.
-	// The first coLocationBudget children co-locate as ADDITIONAL VMs in the source
-	// pod; every child past the budget spills to a new pod so a fork never
-	// overcommits the pod. This replaces the former hardcoded co-location count.
+	// This replaces the former hardcoded co-location count.
 	coLocationBudget := coLocatedForkVMBudget(srcPod)
+
+	// Cross-fork reservation (guarantee A across CONCURRENT same-source forks): the
+	// per-pod budget above is the WHOLE-POD ceiling, so a fork may only co-locate up
+	// to the ceiling MINUS the VMs OTHER SandboxForks already placed in this source
+	// pod. Without this subtraction N concurrent forks of one source each admit up to
+	// the full ceiling and over-admit VMs into the pod (an intra-pod OOM risk under
+	// memory.max). Reading the live occupancy here and admitting this fork's children
+	// only against the REMAINING room makes the sum across all forks stay within the
+	// ceiling; the overflow spills to a new pod exactly as an over-budget single fork
+	// already does. Computed ONCE for the fan-out. Only consulted when this fork is
+	// actually a co-location candidate (flag on, source capable, ceiling > 0); the
+	// flag-off / non-capable / zero-budget paths never list and stay byte-for-byte
+	// unchanged.
+	coLocationBudgetRemaining := coLocationBudget
+	if spawnInSourcePod && coLocationBudget > 0 {
+		otherOccupancy, occErr := r.coLocatedVMsInPodByOtherForks(ctx, fork, srcPod)
+		if occErr != nil {
+			// Conservative on error: treat the pod as full and co-locate nothing this
+			// pass (spill), never over-admit. The children take the honestly
+			// node-scheduled new-pod path and the reconcile requeues.
+			logger.Info("cross-fork co-location occupancy unavailable; co-locating nothing this pass (conservative spill)", "source", srcPod.Name, "detail", occErr.Error())
+			coLocationBudgetRemaining = 0
+		} else {
+			coLocationBudgetRemaining = coLocationBudget - otherOccupancy
+			if coLocationBudgetRemaining < 0 {
+				coLocationBudgetRemaining = 0
+			}
+		}
+	}
 
 	// One fork snapshot per SandboxFork, keyed by the fork name, taken EXACTLY
 	// ONCE and reused for every child across reconcile passes. Children take
@@ -779,16 +810,19 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 			continue
 		}
 
-		// MultiVMFork routing: for the first coLocationBudget slots of a
+		// MultiVMFork routing: for the first coLocationBudgetRemaining slots of a
 		// multi-VM-capable source, spawn the child as an ADDITIONAL VM INSIDE the
-		// source pod (spawn-vm op) instead of creating a brand-new child pod. Slots
-		// past the per-pod memory budget fall through to the new-pod path below,
-		// which spills the child to a fresh, honestly node-scheduled pod so a fork
-		// never overcommits the source pod (L1.7b, guarantee A). When the flag is off
-		// or the source is not multi-VM capable (spawnInSourcePod is false), or the
-		// budget is 0, this branch is never entered and the path below is
-		// byte-for-byte unchanged.
-		if spawnInSourcePod && int(i) < coLocationBudget {
+		// source pod (spawn-vm op) instead of creating a brand-new child pod. The
+		// budget is the whole-pod ceiling MINUS the VMs other same-source forks
+		// already placed there (the cross-fork reservation), so concurrent forks of
+		// one source never over-admit past the pod's memory budget. Slots past the
+		// remaining budget fall through to the new-pod path below, which spills the
+		// child to a fresh, honestly node-scheduled pod so a fork never overcommits
+		// the source pod (L1.7b, guarantee A). When the flag is off or the source is
+		// not multi-VM capable (spawnInSourcePod is false), or the remaining budget is
+		// 0, this branch is never entered and the path below is byte-for-byte
+		// unchanged.
+		if spawnInSourcePod && int(i) < coLocationBudgetRemaining {
 			spawnedChild, ok := r.spawnForkChildInSourcePod(ctx, spawnForkChildArgs{
 				fork:        fork,
 				srcPod:      srcPod,
@@ -803,6 +837,34 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 			if ok {
 				forks = append(forks, spawnedChild)
 				ready++
+				// Persist the co-located child to status IMMEDIATELY, before spawning the
+				// next slot or returning. The cross-fork reservation
+				// (coLocatedVMsInPodByOtherForks) counts co-located VMs from RECORDED
+				// status, so a live VM that exists in srcPod but is not yet recorded would
+				// let a concurrent same-source fork read stale occupancy and over-admit.
+				// Writing after each spawn shrinks that window from the whole fan-out to a
+				// single spawn-then-write. The persisted set is the full child ledger, not
+				// the prefix processed so far: `forks` only holds slots 0..i, so any
+				// already-recorded HIGHER-index child (carried forward, appended later in
+				// this loop) must be merged in or an early exit would persist a TRUNCATED
+				// ledger and cross-fork occupancy would under-count.
+				persisted := append([]v1.SandboxChild(nil), forks...)
+				inForks := make(map[string]bool, len(forks))
+				for _, f := range forks {
+					inForks[f.Name] = true
+				}
+				for name, rec := range recorded {
+					if !inForks[name] {
+						persisted = append(persisted, rec)
+					}
+				}
+				fork.Status.Children = persisted
+				if err := r.Status().Update(ctx, fork); err != nil {
+					// A conflict means a concurrent writer advanced the fork; returning the
+					// error requeues so the next pass re-reads and recounts occupancy fresh,
+					// never over-admitting.
+					return ctrl.Result{}, err
+				}
 			}
 			// A failed spawn is NOT wedged: the slot is left not-ready with the cause
 			// logged (issue #28), and the reconcile requeues below because
@@ -915,6 +977,51 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	return ctrl.Result{}, nil
 }
 
+// coLocatedVMsInPodByOtherForks counts the fork-child VMs already co-located
+// INSIDE srcPod by SandboxForks OTHER than self. It is the live cross-fork
+// occupancy the co-location admission subtracts from the per-pod budget so
+// concurrent same-source forks never over-admit past the pod's memory ceiling
+// (guarantee A across forks).
+//
+// A co-located child records status.Children[i].Pod == its host pod and a
+// non-empty status.Children[i].VMID (the new-pod spill path leaves both empty), so
+// those two fields ARE the cross-fork occupancy ledger; no extra bookkeeping is
+// needed. self is excluded because this fork's own co-located slots are governed by
+// the slot loop against the remaining budget (double-counting self would make a
+// fork spill its own already-placed children on a requeue).
+//
+// The list is UNCACHED (APIReader) when available, mirroring deletePendingForkChildPods:
+// a peer fork that co-located a VM one reconcile earlier has persisted its
+// status.Children, but the informer cache may not have observed it yet, and a stale
+// read is exactly the over-admission this guards against. With the controller's
+// serial reconcile (default MaxConcurrentReconciles 1) two same-source forks never
+// evaluate occupancy at the same instant, so the uncached read is an accurate
+// point-in-time count; a caller treats a list error as "full" and spills.
+func (r *SandboxReconciler) coLocatedVMsInPodByOtherForks(ctx context.Context, self *v1.Sandbox, srcPod *corev1.Pod) (int, error) {
+	lister := client.Reader(r.Client)
+	if r.APIReader != nil {
+		lister = r.APIReader
+	}
+	var sandboxes v1.SandboxList
+	if err := lister.List(ctx, &sandboxes, client.InNamespace(self.Namespace)); err != nil {
+		return 0, fmt.Errorf("list sandboxes for cross-fork co-location occupancy of %s/%s: %w", srcPod.Namespace, srcPod.Name, err)
+	}
+	count := 0
+	for i := range sandboxes.Items {
+		s := &sandboxes.Items[i]
+		if s.UID == self.UID {
+			continue
+		}
+		for j := range s.Status.Children {
+			c := &s.Status.Children[j]
+			if c.Pod == srcPod.Name && c.VMID != "" {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
 // findHuskPod returns the husk pod named name in ns (a husk claim's
 // Status.SandboxID is the pod name). It returns an error when not found so the
 // caller can requeue.
@@ -1006,10 +1113,23 @@ func (r *SandboxReconciler) spawnForkChildInSourcePod(ctx context.Context, a spa
 		spRes, err = a.spawnVM(ctx, addr, tlsConf, husk.SpawnVMRequest{
 			VMID: vmID,
 			Activate: husk.ActivateRequest{
-				// The spawned VM reads the FORK snapshot the source already produced,
-				// mounted read-only at HuskSnapshotDir in the source pod. No
-				// ExpectedDigest: the fork snapshot is node-local, not content-addressed.
-				SnapshotDir: HuskSnapshotDir,
+				// The spawned VM restores from the PARENT FORK SNAPSHOT the source stub
+				// wrote to its in-pod forks dir (huskForksInPodDir: mem + vmstate + the
+				// frozen source rootfs at <dir>/rootfs.ext4), NOT the pool template.
+				// HuskSnapshotDir in the SOURCE pod resolves to the pool TEMPLATE
+				// snapshot (the source is a warm pod), so activating from it booted a
+				// FRESH template VM that inherited NEITHER the parent's memory NOR its
+				// disk: the co-located fork was fast precisely because it skipped the
+				// restore a fork requires (the prod-canary correctness bug). Pointing at
+				// the fork snapshot dir restores the parent's memory + filesystem, exactly
+				// as the new-pod fork child does from <DataDir>/forks/<ForkSnapshotID>.
+				SnapshotDir: huskForksInPodDir(a.fork.Name),
+				// ForkSnapshot tells the source stub this is a CO-LOCATED fork child: clone
+				// the child's rootfs from the FROZEN source rootfs the fork snapshot carries
+				// (inherit the DISK) and skip the content-addressed verify a node-local fork
+				// snapshot has no digest for, mirroring the new-pod fork child's
+				// --allow-unverified-snapshots. Without it the child booted the template.
+				ForkSnapshot: true,
 				// Inherit the SAME network posture the new-pod fork child gets from the
 				// source pool template (issue #760), so a co-located child is never less
 				// isolated than a one-pod-per-child fork.

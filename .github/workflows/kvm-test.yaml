@@ -2627,6 +2627,30 @@ jobs:
           sudo chmod 666 /dev/kvm || true
           go test ./internal/husk/ -run TestMultiVMTwoRealFirecrackersKVM -count=1 -v
 
+      # Co-located fork inheritance proof (prod-canary bug). With --multi-vm ON, a
+      # hosted fork that CO-LOCATES the child as an additional VM inside the source
+      # pod (the spawn-vm path) MUST restore the PARENT'S memory + disk, not boot a
+      # fresh template VM. The bug shipped because the co-located child activated from
+      # the pool TEMPLATE (fast because it SKIPPED the restore a fork requires), so a
+      # file written to the parent AND the parent's live in-memory state were BOTH
+      # absent in the child. This test drives the SAME Stub.SpawnVM path the controller
+      # uses and spawns two co-located children on ONE real source stub: a bug-repro
+      # child from the template (inherits nothing) and a fixed child from the fork
+      # snapshot (reads back the marker FILE = disk, and a far-larger /proc/uptime =
+      # memory). It runs BOTH the two-Firecracker test above and the fork-snapshot
+      # restore test in the same invocation so all three multi-VM KVM proofs are
+      # exercised. Gates on /dev/kvm + MITOS_KVM_HUSK_SNAPSHOT_DIR + the template
+      # rootfs the bench phase laid down, and skips cleanly otherwise.
+      - name: Multi-VM husk, co-located fork inherits the parent memory and disk
+        timeout-minutes: 15
+        env:
+          MITOS_KVM_HUSK_SNAPSHOT_DIR: /tmp/mitos-test/bench-data/templates/bench/snapshot
+          MITOS_KVM_FIRECRACKER: /usr/local/bin/firecracker
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm || true
+          go test ./internal/husk/ -run 'TestColocatedForkInheritsSourceStateKVM|TestMultiVMForkSnapshotDefaultVMKVM' -count=1 -v
+
       # Husk activate-correctness proof (#18). The fork-correctness phase above
       # proves the GUEST mechanism (distinct RNG + clock resync) when the host
       # sends NotifyForked directly via test-agent. THIS phase proves the same

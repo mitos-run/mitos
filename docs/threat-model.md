@@ -398,6 +398,28 @@ on delete; the child pods are owner-ref'd to the fork and reaped by Kubernetes G
 Residual: a compromised controller can drive a fork-snapshot of any husk pod it
 can reach, the same residual already stated for activate (Surface 2).
 
+Co-located fork child (MultiVMFork routing, `--multi-vm-fork`): when the source
+pod runs a `--multi-vm` stub, the controller may bring a fork child up as an
+ADDITIONAL VM INSIDE the source pod (the `SpawnVM` control op) instead of a new
+child pod. The co-located child restores from the SAME node-local fork snapshot
+`<dataDir>/forks/<fork-id>` (mem + vmstate + the frozen source rootfs at
+`<fork-id>/rootfs.ext4`) that the new-pod child restores from, carried in the
+`SpawnVM` request as `Activate.ForkSnapshot=true` with `SnapshotDir` pointing at
+that dir. It keeps the identical trust posture: the fork snapshot is NOT
+content-addressed, so the co-located activate skips the content-addressed verify
+exactly as the new-pod child does with `--allow-unverified-snapshots` (the
+artifact is root-owned and never tenant-writable, and re-hashing would gate on a
+digest a live fork does not have). Per-VM independence holds: each co-located
+child gets its OWN per-activation rootfs CoW clone of the frozen source rootfs and
+its OWN bearer token, so its guest writes never cross to a sibling or back to the
+source, which shares only the read-only fork snapshot as a restore image. The
+per-VM in-pod egress filter (`internal/husk` `deriveVMNetwork` + `applyEgressFilter`)
+and the full fail-closed RNG/clock reseed handshake run for the co-located child
+too, so a co-located child is never less isolated than a one-pod-per-child fork.
+Before this fix the co-located child activated from the pool TEMPLATE snapshot, so
+it inherited NEITHER the parent's memory NOR its disk: a correctness violation, not
+an isolation gap, now closed.
+
 ### Husk workspace hydrate/dehydrate (W4 transport on the husk path)
 
 A bound claim's `/workspace` is persisted and restored over TWO new control ops on
@@ -1415,6 +1437,7 @@ CDP.
 | Boundary | Status | Mechanism |
 |---|---|---|
 | Image provenance (controller, forkd, husk-stub) | mitigated for published releases | cosign keyless signing + SPDX SBOM attestation, bound to the image digest, produced by `.github/workflows/publish.yaml`; consumer verification in docs/supply-chain.md. |
+| Patched Firecracker VMM provenance (forkd, husk-stub) | mitigated | The forkd and husk-stub images ship a Mitos-patched `firecracker` (live-fork: memfd/MAP_SHARED guest memory + UFFD write-protect) instead of the stock upstream binary; the stock jailer is unchanged. The patched binary is NOT a general-CDN download: it is built reproducibly in the `mitos-run/firecracker` fork on branch `ci/build-patched-fc` via `.github/workflows/build-patched-fc.yml` (built commit `531a487cf69898a05091d4c7e5f48bec3132309b`) and published as a GitHub release asset (`mitos-fc-uffd-wp-v1.15.0`). `hack/install-firecracker-patched.sh` fetches it from a SINGLE pinned URL and verifies it against a pinned sha256 (`0209700d794acb7b77a919c0aa50506b2186642d80e5c0d13220ee51003b823b`, 5,215,320 bytes) BEFORE install AND re-verifies the on-disk binary after, failing the build CLOSED on any mismatch, so a compromised release or a network substitution cannot install a different VMM. It reports `firecracker --version` = v1.15.0 (same as the stock jailer, so forkd's version-match check still passes) and is behaviour-identical to stock Firecracker v1.15.0 UNLESS `FIRECRACKER_MITOS_SHARED_MEM` or `FIRECRACKER_MITOS_WP_UDS` are set at runtime; this PR sets neither anywhere (the live-fork wiring is a later milestone), so the runtime attack surface is UNCHANGED from stock until that gate is turned on. The swap is a single COPY + RUN per image and is trivially revertable (drop it and the stock upstream firecracker from `hack/install-firecracker.sh` remains). Residual: the patched build does not yet carry cosign/SBOM attestation of its own (tracked with the image-provenance follow-up); trust rests on the pinned sha256 plus the reproducible fork build. |
 | Image CVEs | partial | Trivy scans the built images on every PR for HIGH/CRITICAL fixable findings (ADVISORY today: reported, not yet gating, pending base-image remediation); govulncheck is the BLOCKING gate for Go call-graph-reachable vulnerabilities; base-image and dependency bumps arrive via dependabot. Runtime re-scan of long-lived published tags is not yet automated. |
 | Guest kernel currency | partial | The shipped vmlinux is pinned to an exact version (docs/kernel-cve.md) and validated end to end by the KVM workflow; CVE watch is a documented manual process, not an automated feed. |
 | Guest kernel integrity at stage time | partial | The Helm kernel-stage init container downloads the guest kernel and, when `kernelProvisioner.kernelSha256` is set, verifies the staged file against that digest and FAILS CLOSED on mismatch (covering both a fresh download and an already-cached file), so a swapped upstream object or a MITMed fetch cannot boot a backdoored kernel fleet-wide. The digest is empty by default (a warning is logged); operators should pin it. The privileged forkd, kvm-device-plugin, and kernel-stage pods set `automountServiceAccountToken: false` since none call the Kubernetes API. |

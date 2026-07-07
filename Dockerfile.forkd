@@ -66,6 +66,16 @@ RUN chmod +x /tmp/install-firecracker.sh && \
     FC_VERSION="${FC_VERSION}" /tmp/install-firecracker.sh && \
     rm -f /tmp/install-firecracker.sh
 
+# Swap the stock firecracker for the Mitos-patched VMM (live-fork: memfd/MAP_SHARED
+# + UFFD-WP), keeping the stock jailer. The patched binary is pinned by sha256 and
+# is behaviour-identical to stock v1.15.0 until FIRECRACKER_MITOS_* env is set at
+# runtime (m4b), so this swap is a no-op for stock behaviour. Revert = drop this
+# COPY + RUN. See hack/install-firecracker-patched.sh for provenance.
+COPY hack/install-firecracker-patched.sh /tmp/install-firecracker-patched.sh
+RUN chmod +x /tmp/install-firecracker-patched.sh && \
+    /tmp/install-firecracker-patched.sh && \
+    rm -f /tmp/install-firecracker-patched.sh
+
 COPY --from=builder /build/forkd /usr/local/bin/forkd
 # The Rust guest agent (guest/agent-rs), injected as /init when forkd builds a
 # rootfs from an OCI image. cmd/forkd --agent-bin points here
