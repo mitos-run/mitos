@@ -52,6 +52,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":8090", "console listen address")
 	metricsAddr := flag.String("metrics-addr", ":9100", "Prometheus metrics listen address (a SEPARATE cluster-internal listener; /metrics is never mounted on the public mux). Empty disables the metrics listener.")
+	internalAddr := flag.String("internal-addr", ":8091", "cluster-internal listen address for the bearer-gated machine-to-machine endpoints (/internal/identity/resolve, /internal/session/resolve, /internal/approve-signup). Served ONLY here, never on the public mux, so they are not internet-reachable (GHSA-rcf5-cfv3-jxvv). Empty falls back to mounting them on the public mux (legacy/dev only).")
 	dev := flag.Bool("dev", false, "enable the local dev auth shim (X-Console-Account / X-Console-Org headers); NEVER enable in production")
 	databaseDSN := flag.String("database-dsn", "", "Postgres DSN for durable persistence (accounts, orgs, memberships, API keys). Falls back to the "+pgstore.EnvDSN+" env var. Empty means in-memory persistence (DEV ONLY). The value is a secret and is never logged.")
 	flag.Parse()
@@ -87,7 +88,18 @@ func main() {
 	// org SignUp mints from here on is stamped with the deployment's
 	// placement default at creation time.
 	caps := capabilitiesFromEnv()
-	keys := saas.NewKeyService(store)
+	// API key hash pepper (issue #733, item 3). Opt-in via MITOS_API_KEY_PEPPER;
+	// when set, the SAME value must be configured on the gateway (and CLI) or the
+	// keys the console mints will not verify at the gateway. Never logged.
+	var keyOpts []saas.KeyServiceOption
+	if pepper, ok := saas.KeyPepperFromEnv(); ok {
+		keyOpts = append(keyOpts, saas.WithSalt(pepper))
+		logger.Info("api key pepper configured", "env", saas.EnvKeyPepper)
+		logger.Warn("api key pepper changes the key hash input; enabling it on a deployment that already minted keys invalidates every pre-pepper key. Re-issue keys after turning it on, and configure the SAME value on the gateway and CLI.", "env", saas.EnvKeyPepper)
+	} else {
+		logger.Info("api key pepper not set; keys are hashed without a pepper", "env", saas.EnvKeyPepper)
+	}
+	keys := saas.NewKeyService(store, keyOpts...)
 	accounts := saas.NewAccountService(store, keys, saas.WithHomeRegion(caps.Placement.DefaultName()))
 	// invitations shares the SAME durable store as accounts/orgs/memberships,
 	// so an accepted invite's membership and the invitation row itself are
@@ -165,9 +177,12 @@ func main() {
 	// Deps.Sessions in the production branch. When pool is non-nil (durable
 	// Postgres configured) the durable PgSessionStore is used; otherwise the
 	// in-memory SessionStore is the dev fallback.
+	// Both stores enforce an absolute session max-age so a leaked session token
+	// cannot stay valid forever (issue #733, item 2). The in-memory store
+	// defaults to it; the durable store takes it explicitly.
 	var sessionStore saas.Sessions
 	if pool != nil {
-		sessionStore = pgstore.NewPgSessionStore(pool)
+		sessionStore = pgstore.NewPgSessionStore(pool, pgstore.WithPgSessionMaxAge(saas.DefaultSessionMaxAge))
 	} else {
 		sessionStore = saas.NewSessionStore()
 	}
@@ -422,30 +437,31 @@ func main() {
 	// conditional (the same binary serves both). The token is read from the
 	// environment; if unset, the endpoint is not mounted and a warning is logged.
 	// The token value is never logged.
-	if token := os.Getenv("MITOS_IDENTITY_RESOLVE_TOKEN"); token != "" {
-		mux.Handle("POST /internal/identity/resolve", saas.NewIdentityResolveHandler(accounts, token, logger))
-		logger.Info("identity resolve endpoint mounted")
-		mux.Handle("POST /internal/session/resolve", saas.NewSessionResolveHandler(sessionSvc, token, logger))
-		logger.Info("session resolve endpoint mounted")
-	} else {
-		logger.Warn("MITOS_IDENTITY_RESOLVE_TOKEN unset; POST /internal/identity/resolve not mounted")
-		logger.Warn("MITOS_IDENTITY_RESOLVE_TOKEN unset; POST /internal/session/resolve not mounted")
+	// The /internal/* endpoints (identity/resolve, session/resolve,
+	// approve-signup) are bearer-gated machine-to-machine endpoints, and the
+	// bearer is the ONLY gate. Serving them on the public console mux made them
+	// internet-reachable (GHSA-rcf5-cfv3-jxvv), and identity/resolve even
+	// provisions accounts. They are served on a SEPARATE cluster-internal
+	// listener, exactly like /metrics; the public mux never carries them. An
+	// empty --internal-addr falls back to the public mux for legacy/dev only,
+	// with a loud warning.
+	ideps := internalDeps{
+		accounts:     accounts,
+		sessions:     sessionSvc,
+		allowlist:    allowlist,
+		emailSender:  buildEmailSender(logger),
+		resolveToken: os.Getenv("MITOS_IDENTITY_RESOLVE_TOKEN"),
+		approveToken: os.Getenv("MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN"),
+		logger:       logger,
 	}
-	// The approve-signup endpoint is an INTERNAL machine-to-machine endpoint,
-	// bearer-gated by a dedicated shared secret (MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN).
-	// It canonicalizes the email, adds an allowlist row (idempotent), and sends the
-	// "you are in" email. Mounted OUTSIDE the session middleware. The token value is
-	// never logged. When unset, the endpoint is not mounted and a warning is logged.
-	if approveToken := os.Getenv("MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN"); approveToken != "" {
-		mux.Handle("POST /internal/approve-signup", onboarding.NewApproveSignupHandler(
-			allowlist,
-			buildEmailSender(logger),
-			approveToken,
-			logger,
-		))
-		logger.Info("approve-signup endpoint mounted")
+	if *internalAddr != "" {
+		serveInternal(rootCtx, logger, *internalAddr, newInternalMux(ideps))
 	} else {
-		logger.Warn("MITOS_CONSOLE_APPROVE_SIGNUP_TOKEN unset; POST /internal/approve-signup not mounted")
+		logger.Warn("--internal-addr is empty; mounting the bearer-gated /internal/* endpoints on the PUBLIC mux (legacy/dev). Set --internal-addr for a cluster-internal listener so they are not internet-reachable.")
+		internalMux := newInternalMux(ideps)
+		mux.Handle("POST /internal/identity/resolve", internalMux)
+		mux.Handle("POST /internal/session/resolve", internalMux)
+		mux.Handle("POST /internal/approve-signup", internalMux)
 	}
 	// Liveness stays a static 200 (the process is up); readiness is split out to
 	// /readyz, which pings the configured Postgres pool with a short timeout so a
@@ -551,7 +567,7 @@ func mountAuth(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountSe
 	ah := oidcauth.NewHandlers(oidcauth.Config{
 		Exchanger:          exch,
 		Login:              lm,
-		CookieName:         console.SessionCookieName,
+		CookieName:         console.SessionCookieNameFor(true), // hardened __Host- name; the console OIDC path is always behind TLS
 		RedirectAfterLogin: "/",
 		Secure:             true,
 	})

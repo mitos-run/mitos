@@ -117,6 +117,42 @@ func TestLogoutClearsSessionCookie(t *testing.T) {
 	}
 }
 
+// TestLogoutAlsoClearsLegacyCookieName asserts that when the configured cookie
+// name is the hardened __Host- prefixed one, logout ALSO expires the legacy
+// unprefixed name, so a session cookie set before the __Host- rollout is not
+// left behind and silently keeping the user signed in (issue #733, item 1).
+func TestLogoutAlsoClearsLegacyCookieName(t *testing.T) {
+	store := saas.NewMemStore()
+	accounts := saas.NewAccountService(store, saas.NewKeyService(store))
+	sessions := saas.NewSessionStore()
+	lm := saas.NewLoginManager(fakeVerifier{}, accounts, sessions, func() string { return "sess-token" })
+	h := NewHandlers(Config{
+		Exchanger:          fakeExchanger{},
+		Login:              lm,
+		CookieName:         "__Host-mitos_session",
+		Secure:             true,
+		RedirectAfterLogin: "/",
+	})
+	r := httptest.NewRequest("POST", "/auth/logout", nil)
+	w := httptest.NewRecorder()
+	h.Logout(w, r)
+	// Inspect parsed cookies by EXACT name: "__Host-mitos_session" contains the
+	// substring "mitos_session", so a substring check would false-pass without a
+	// distinct legacy clear.
+	cleared := map[string]bool{}
+	for _, c := range w.Result().Cookies() {
+		if c.MaxAge < 0 || (c.MaxAge == 0 && c.Value == "") {
+			cleared[c.Name] = true
+		}
+	}
+	if !cleared["__Host-mitos_session"] {
+		t.Errorf("logout did not clear the hardened cookie; cleared=%v", cleared)
+	}
+	if !cleared["mitos_session"] {
+		t.Errorf("logout did not clear the legacy cookie; cleared=%v", cleared)
+	}
+}
+
 // TestLoginConnectorHint asserts that ?connector=github or ?connector=google
 // adds connector_id to the provider redirect URL, while an absent or unknown
 // connector value omits connector_id so Dex shows its own chooser.

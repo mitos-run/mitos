@@ -51,7 +51,7 @@ spec:
             - name: MITOS_FRONTDOOR_CONSOLE_URL
               value: {{ .Values.frontdoor.consoleURL | default (printf "http://mitos-console.%s.svc" (include "mitos.namespace" .)) | quote }}
             - name: MITOS_FRONTDOOR_SESSION_RESOLVE_URL
-              value: {{ .Values.frontdoor.sessionResolveURL | default (printf "http://mitos-console.%s.svc/internal/session/resolve" (include "mitos.namespace" .)) | quote }}
+              value: {{ .Values.frontdoor.sessionResolveURL | default (printf "http://mitos-console.%s.svc:8091/internal/session/resolve" (include "mitos.namespace" .)) | quote }}
             {{- if .Values.frontdoor.marketingPagesAddrs }}
             {{- /*
             GitHub Pages anycast IP:port list. When set, the frontdoor dials

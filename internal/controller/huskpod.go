@@ -184,6 +184,12 @@ type HuskPodOptions struct {
 	// change a normal claim: Stub.Activate routes a claim with no VMID to the pod's
 	// default VM, byte-for-byte as the single-VM path does.
 	MultiVM bool
+	// LiveCowFork starts the husk stub with --live-cow-fork so a CO-LOCATED fork
+	// child shares the PARENT's resident guest memory (patched Firecracker memfd +
+	// userfaultfd write-protect) instead of restoring from the disk fork snapshot
+	// (milestone m4b). Default off and SEPARATE from MultiVM so it canaries
+	// independently; off keeps the co-located fork on the disk restore byte-for-byte.
+	LiveCowFork bool
 	// MultiVMForkVMs is the number of ADDITIONAL fork-child VMs a multi-VM pod
 	// reserves node memory for up front (beyond the source VM), so the co-location
 	// routing has room to co-locate that many children before a fork spills to a new
@@ -532,6 +538,14 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 	// VMID-less claim to the pod's default VM).
 	if opts.MultiVM {
 		args = append(args, "--multi-vm")
+	}
+	// Live-cow fork (milestone m4b), default off and separate from --multi-vm: a
+	// co-located fork child shares the parent's resident guest memory instead of
+	// restoring from the disk fork snapshot. Off keeps the disk co-location
+	// byte-for-byte; on it fails closed to the disk restore where the child-side
+	// import is not yet complete, so it never breaks a fork.
+	if opts.LiveCowFork {
+		args = append(args, "--live-cow-fork")
 	}
 
 	// Name-based egress: when the operator configured DNS upstream(s), pass them
@@ -1347,6 +1361,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 		}
 		opts := HuskPodOptions{
 			MultiVM:         r.MultiVM,
+			LiveCowFork:     r.LiveCowFork,
 			MultiVMForkVMs:  r.MultiVMForkVMs,
 			StubImage:       r.HuskStubImage,
 			DNSUpstream:     r.HuskDNSUpstream,
