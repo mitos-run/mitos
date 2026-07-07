@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.30.0](https://github.com/mitos-run/mitos/compare/v1.29.0...v1.30.0) (2026-07-07)
+
+
+### Features
+
+* **husk:** live-cow child boots from the shared parent memfd (sub-100ms, KVM-tested) ([#827](https://github.com/mitos-run/mitos/issues/827)) ([4abdc6c](https://github.com/mitos-run/mitos/commit/4abdc6ccd18ed5e5853be6c4b79e4abf5c217b78))
+
 ## [1.29.0](https://github.com/mitos-run/mitos/compare/v1.28.0...v1.29.0) (2026-07-07)
 
 
