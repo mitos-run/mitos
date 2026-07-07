@@ -158,6 +158,80 @@ func TestMultiVMForkRoutesToSourcePodWhenEnabled(t *testing.T) {
 	}
 }
 
+// TestMultiVMForkRecordsStageTiming proves the per-stage fork timing is wired on
+// the co-location path: after a co-located fork reaches Ready the fork status
+// carries the persisted end-to-end timing anchors (ForkStartedAt stamped once,
+// ForkReconcilePasses counted across the level-triggered passes), and the
+// controller consumes the husk-reported Stages breakdown the spawn-vm fake returns
+// without disturbing the fork. It is the observability wiring check for the
+// ~728 ms hosted fork breakdown; it asserts the timing is emitted, not any value.
+func TestMultiVMForkRecordsStageTiming(t *testing.T) {
+	poolName := uniqueName("pool-mvm-timing")
+	srcClaimName := uniqueName("src-mvm-timing")
+	forkName := uniqueName("mvm-timing")
+
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.9", multiVMSource, withCoLocationBudget("128Mi", "1280Mi"))
+	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
+
+	// The fork-snapshot fake returns a paused-window sub-stage breakdown, exactly
+	// as a real stub does, so the controller logs and observes it.
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir, LatencyMs: 12.0, Stages: map[string]float64{
+			"pause": 0.4, "create_snapshot": 9.0, "rootfs_freeze": 2.0, "resume": 0.6,
+		}}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		return husk.ActivateResult{OK: false, Error: "activate must not be called on the spawn-in-source-pod path"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+
+	// The spawn-vm fake returns the prepare + activate sub-stage breakdown the real
+	// stub reports, so the controller assembles the full co-located-child stages.
+	setForkVMSpawner(func(_ context.Context, _ string, _ *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error) {
+		return husk.SpawnVMResult{OK: true, VMID: req.VMID, VsockPath: "/run/husk/" + req.VMID + ".sock", LatencyMs: 60.0, Stages: map[string]float64{
+			"fc_boot": 42.0, "rootfs_clone": 3.0, "prepare_total": 46.0,
+			"vmstate_restore": 5.0, "guest_ready": 18.0, "handshake": 2.0,
+		}}, nil
+	})
+	t.Cleanup(func() { setForkVMSpawner(nil) })
+
+	setForkMultiVM(true)
+	t.Cleanup(func() { setForkMultiVM(false) })
+
+	fork := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      forkName,
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcClaimName}}, Replicas: 1},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var got v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &got); err != nil {
+			return false
+		}
+		return got.Status.ReadyReplicas == 1
+	})
+
+	var got v1.Sandbox
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get fork: %v", err)
+	}
+	if got.Status.ForkStartedAt == nil {
+		t.Errorf("Status.ForkStartedAt is nil; the end-to-end fork clock was never stamped")
+	}
+	if got.Status.ForkReconcilePasses < 1 {
+		t.Errorf("Status.ForkReconcilePasses = %d, want >= 1 (passes are counted for the level-triggered breakdown)", got.Status.ForkReconcilePasses)
+	}
+}
+
 // TestMultiVMForkOffCreatesNewChildPod proves the default-OFF path is unchanged:
 // with the flag off, a fork still creates a new child pod and never calls the
 // spawn-vm seam, even though the source is multi-VM capable.
