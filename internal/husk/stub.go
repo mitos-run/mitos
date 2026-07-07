@@ -625,8 +625,15 @@ type Stub struct {
 	// shared memfd (SpawnVM sets FIRECRACKER_MITOS_CHILD_MEMFD from it) instead of
 	// the disk snapshot mem file. Nil (the default, and today's production wiring
 	// until the parent-arm + Firecracker child-restore patch land) means every
-	// co-located child restores from disk. Set via SetLiveCowParent.
+	// co-located child restores from disk. Set via SetLiveCowParent, which the
+	// source-arm wiring (armLiveCowSource, milestone m6b) drives once the patched
+	// source Firecracker completes the write-protect handshake.
 	liveCowParent fork.ChildImportProvider
+	// liveCowHandle is the armed source-side WP handler (milestone m6b), retained so
+	// teardown can Close it (unblocking a stuck Receive and stopping the Serve fault
+	// loop). It is the SAME object as liveCowParent once the handshake completes, but
+	// typed as the closable handle. Nil unless the source was armed. Guarded by mu.
+	liveCowHandle fork.WPForkHandle
 	instances     map[vmID]*vmInstance
 	// closing is set (under mu) when closeAllInstances begins teardown, so a
 	// concurrent create can no longer add a VM that would outlive Close. Guarded
