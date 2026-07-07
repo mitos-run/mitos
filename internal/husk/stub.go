@@ -714,7 +714,9 @@ func (s *Stub) Prepare(ctx context.Context) error {
 	// prepareInstance locks s.mu itself, so return before taking the lock here.
 	// When multiVM is false the single-VM body below runs byte-for-byte unchanged.
 	if s.multiVM {
-		return s.prepareInstance(ctx, defaultVMID)
+		// A plain Prepare brings up the pod's default (source) VM from the pool
+		// template, so the rootfs clone source is the template (empty override).
+		return s.prepareInstance(ctx, defaultVMID, "")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

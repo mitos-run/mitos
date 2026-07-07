@@ -398,6 +398,28 @@ on delete; the child pods are owner-ref'd to the fork and reaped by Kubernetes G
 Residual: a compromised controller can drive a fork-snapshot of any husk pod it
 can reach, the same residual already stated for activate (Surface 2).
 
+Co-located fork child (MultiVMFork routing, `--multi-vm-fork`): when the source
+pod runs a `--multi-vm` stub, the controller may bring a fork child up as an
+ADDITIONAL VM INSIDE the source pod (the `SpawnVM` control op) instead of a new
+child pod. The co-located child restores from the SAME node-local fork snapshot
+`<dataDir>/forks/<fork-id>` (mem + vmstate + the frozen source rootfs at
+`<fork-id>/rootfs.ext4`) that the new-pod child restores from, carried in the
+`SpawnVM` request as `Activate.ForkSnapshot=true` with `SnapshotDir` pointing at
+that dir. It keeps the identical trust posture: the fork snapshot is NOT
+content-addressed, so the co-located activate skips the content-addressed verify
+exactly as the new-pod child does with `--allow-unverified-snapshots` (the
+artifact is root-owned and never tenant-writable, and re-hashing would gate on a
+digest a live fork does not have). Per-VM independence holds: each co-located
+child gets its OWN per-activation rootfs CoW clone of the frozen source rootfs and
+its OWN bearer token, so its guest writes never cross to a sibling or back to the
+source, which shares only the read-only fork snapshot as a restore image. The
+per-VM in-pod egress filter (`internal/husk` `deriveVMNetwork` + `applyEgressFilter`)
+and the full fail-closed RNG/clock reseed handshake run for the co-located child
+too, so a co-located child is never less isolated than a one-pod-per-child fork.
+Before this fix the co-located child activated from the pool TEMPLATE snapshot, so
+it inherited NEITHER the parent's memory NOR its disk: a correctness violation, not
+an isolation gap, now closed.
+
 ### Husk workspace hydrate/dehydrate (W4 transport on the husk path)
 
 A bound claim's `/workspace` is persisted and restored over TWO new control ops on

@@ -1006,10 +1006,23 @@ func (r *SandboxReconciler) spawnForkChildInSourcePod(ctx context.Context, a spa
 		spRes, err = a.spawnVM(ctx, addr, tlsConf, husk.SpawnVMRequest{
 			VMID: vmID,
 			Activate: husk.ActivateRequest{
-				// The spawned VM reads the FORK snapshot the source already produced,
-				// mounted read-only at HuskSnapshotDir in the source pod. No
-				// ExpectedDigest: the fork snapshot is node-local, not content-addressed.
-				SnapshotDir: HuskSnapshotDir,
+				// The spawned VM restores from the PARENT FORK SNAPSHOT the source stub
+				// wrote to its in-pod forks dir (huskForksInPodDir: mem + vmstate + the
+				// frozen source rootfs at <dir>/rootfs.ext4), NOT the pool template.
+				// HuskSnapshotDir in the SOURCE pod resolves to the pool TEMPLATE
+				// snapshot (the source is a warm pod), so activating from it booted a
+				// FRESH template VM that inherited NEITHER the parent's memory NOR its
+				// disk: the co-located fork was fast precisely because it skipped the
+				// restore a fork requires (the prod-canary correctness bug). Pointing at
+				// the fork snapshot dir restores the parent's memory + filesystem, exactly
+				// as the new-pod fork child does from <DataDir>/forks/<ForkSnapshotID>.
+				SnapshotDir: huskForksInPodDir(a.fork.Name),
+				// ForkSnapshot tells the source stub this is a CO-LOCATED fork child: clone
+				// the child's rootfs from the FROZEN source rootfs the fork snapshot carries
+				// (inherit the DISK) and skip the content-addressed verify a node-local fork
+				// snapshot has no digest for, mirroring the new-pod fork child's
+				// --allow-unverified-snapshots. Without it the child booted the template.
+				ForkSnapshot: true,
 				// Inherit the SAME network posture the new-pod fork child gets from the
 				// source pool template (issue #760), so a co-located child is never less
 				// isolated than a one-pod-per-child fork.
