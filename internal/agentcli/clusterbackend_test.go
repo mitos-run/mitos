@@ -235,6 +235,40 @@ func TestClusterBackendForkCreatesFork(t *testing.T) {
 	}
 }
 
+func TestClusterBackendForkNoWaitReturnsUnreadyChildren(t *testing.T) {
+	scheme := testScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1.Sandbox{}).
+		Build()
+	be := &ClusterBackend{
+		client: c, namespace: "default", now: time.Now,
+		pollInterval: time.Millisecond, pollTimeout: 2 * time.Second,
+	}
+	// Children are named but left in the zero (not Ready) phase.
+	be.forkReadyHook = func(ctx context.Context, name string, n int) {
+		var sandbox v1.Sandbox
+		if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: name}, &sandbox); err != nil {
+			return
+		}
+		children := make([]v1.SandboxChild, 0, n)
+		for i := 0; i < n; i++ {
+			children = append(children, v1.SandboxChild{Name: name + "-" + string(rune('a'+i))})
+		}
+		sandbox.Status.Children = children
+		_ = c.Status().Update(ctx, &sandbox)
+	}
+
+	// --no-wait must return the child ids without waiting for Ready.
+	ids, err := be.Fork(withNoWait(context.Background()), "sbx-1", 2)
+	if err != nil {
+		t.Fatalf("Fork no-wait: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("Fork no-wait ids = %v, want 2 even though children are not Ready", ids)
+	}
+}
+
 func TestClusterBackendExecSendsBearerAndRedactsToken(t *testing.T) {
 	const token = "super-secret-token-value"
 	// The Connect runtime server echoes the presented bearer token into its error

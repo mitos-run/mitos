@@ -212,3 +212,67 @@ func TestForkTimeoutAndWaitFlags(t *testing.T) {
 		t.Fatalf("fork call HasDeadline=%v NoWait=%v, want both true", calls[0].HasDeadline, calls[0].NoWait)
 	}
 }
+
+// TestForkIDAfterFlags asserts the sandbox id parses correctly when it follows
+// value-taking flags (e.g. --count 2 sbx-1). A naive single flag.Parse would
+// mis-read the flag value "2" as the id.
+func TestForkIDAfterFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"fork", "--count", "2", "--timeout", "10", "sbx-1"},
+		{"fork", "sbx-1", "--count", "2"},
+		{"fork", "--count", "2", "sbx-1"},
+	} {
+		fb := NewFakeBackend()
+		fb.ForkIDs = []string{"f1", "f2"}
+		code, _, errw := runCLI(t, fb, args...)
+		if code != ExitOK {
+			t.Fatalf("%v: exit code = %d (%s), want %d", args, code, errw.String(), ExitOK)
+		}
+		calls := fb.RecordedCalls()
+		if len(calls) != 1 || calls[0].Method != "fork" || calls[0].SandboxID != "sbx-1" || calls[0].Replicas != 2 {
+			t.Fatalf("%v: call = %+v, want fork sbx-1 x2", args, calls)
+		}
+	}
+}
+
+// TestTerminateIDAfterFlags asserts terminate parses the id after --timeout.
+func TestTerminateIDAfterFlags(t *testing.T) {
+	fb := NewFakeBackend()
+	code, _, errw := runCLI(t, fb, "sandbox", "terminate", "--timeout", "5", "sbx-9")
+	if code != ExitOK {
+		t.Fatalf("exit code = %d (%s), want %d", code, errw.String(), ExitOK)
+	}
+	calls := fb.RecordedCalls()
+	if len(calls) != 1 || calls[0].SandboxID != "sbx-9" || !calls[0].HasDeadline {
+		t.Fatalf("call = %+v, want terminate sbx-9 with deadline", calls)
+	}
+}
+
+// TestOutputFormatLastFlagWins asserts a later human format overrides an earlier
+// --json (last flag wins), so an explicit -o table after --json renders human.
+func TestOutputFormatLastFlagWins(t *testing.T) {
+	fb := NewFakeBackend()
+	fb.ListInfos = []SandboxInfo{{Name: "sbx-1", Pool: "python", Phase: "Ready"}}
+	code, out, _ := runCLI(t, fb, "sandbox", "ls", "--json", "-o", "table")
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want %d", code, ExitOK)
+	}
+	if strings.Contains(out.String(), `"sandboxes"`) {
+		t.Fatalf("got JSON despite a trailing -o table (last flag should win): %q", out.String())
+	}
+}
+
+// TestWsLogNotFoundExitCode asserts a not-found workspace maps to ExitNotFound
+// on the ws log path.
+func TestWsLogNotFoundExitCode(t *testing.T) {
+	fb := NewFakeBackend()
+	ws := fb.Workspace().(*FakeWorkspaceBackend)
+	ws.Errors["ws_log"] = ErrNotFound
+	code, _, errw := runCLI(t, fb, "ws", "log", "ghost")
+	if code != ExitNotFound {
+		t.Fatalf("exit code = %d, want %d (not found)", code, ExitNotFound)
+	}
+	if errw.Len() == 0 {
+		t.Fatalf("want a diagnostic on stderr")
+	}
+}

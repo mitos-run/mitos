@@ -62,17 +62,9 @@ func runWs(ctx context.Context, args []string, b WorkspaceBackend, out, errw io.
 			fmt.Fprintf(errw, "ws ls: %v\n", err)
 			return exitCodeFor(err)
 		}
-		if jsonOut {
-			s, e := jsonWorkspaceInfos(infos)
-			if e != nil {
-				fmt.Fprintf(errw, "ws ls: %v\n", e)
-				return ExitError
-			}
-			fmt.Fprint(out, s)
-			return ExitOK
-		}
-		fmt.Fprint(out, formatWorkspaceList(infos))
-		return ExitOK
+		return renderList(out, errw, "ws ls", jsonOut,
+			func() (string, error) { return jsonWorkspaceInfos(infos) },
+			func() string { return formatWorkspaceList(infos) })
 	case "log":
 		jsonOut, rest, ferr := extractOutputFlag(args[1:])
 		if ferr != nil {
@@ -88,17 +80,9 @@ func runWs(ctx context.Context, args []string, b WorkspaceBackend, out, errw io.
 			fmt.Fprintf(errw, "ws log: %v\n", err)
 			return exitCodeFor(err)
 		}
-		if jsonOut {
-			s, e := jsonRevisionLog(revs)
-			if e != nil {
-				fmt.Fprintf(errw, "ws log: %v\n", e)
-				return ExitError
-			}
-			fmt.Fprint(out, s)
-			return ExitOK
-		}
-		fmt.Fprint(out, formatRevisionLog(revs))
-		return ExitOK
+		return renderList(out, errw, "ws log", jsonOut,
+			func() (string, error) { return jsonRevisionLog(revs) },
+			func() string { return formatRevisionLog(revs) })
 	case "diff":
 		if len(args) < 3 {
 			fmt.Fprint(errw, "ws diff: a workspace and a revision are required\n\n"+wsUsage)

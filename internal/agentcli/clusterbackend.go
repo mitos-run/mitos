@@ -232,12 +232,17 @@ func (b *ClusterBackend) Fork(ctx context.Context, sandboxID string, n int) ([]s
 	if b.forkReadyHook != nil {
 		b.forkReadyHook(ctx, name, n)
 	}
-	return b.waitChildrenReady(ctx, name, n)
+	// --no-wait returns as soon as the n children are named in Status.Children,
+	// regardless of phase, so the caller still gets the child ids without waiting
+	// for the microVMs to reach Ready. The default waits for Ready.
+	return b.waitChildren(ctx, name, n, !noWaitRequested(ctx))
 }
 
-// waitChildrenReady polls the Sandbox until at least n children are Ready,
-// then returns their names. Children are reported in Status.Children.
-func (b *ClusterBackend) waitChildrenReady(ctx context.Context, name string, n int) ([]string, error) {
+// waitChildren polls the Sandbox until at least n children are present in
+// Status.Children, then returns their names. When requireReady is true a child
+// counts only once its phase is Ready; when false it counts as soon as it is
+// named, so a --no-wait fork returns the child ids without waiting for boot.
+func (b *ClusterBackend) waitChildren(ctx context.Context, name string, n int, requireReady bool) ([]string, error) {
 	deadline := b.now().Add(b.pollTimeout)
 	for {
 		var sandbox v1.Sandbox
@@ -247,7 +252,7 @@ func (b *ClusterBackend) waitChildrenReady(ctx context.Context, name string, n i
 		ready := make([]string, 0, n)
 		for i := range sandbox.Status.Children {
 			child := &sandbox.Status.Children[i]
-			if child.Phase == v1.SandboxReady {
+			if !requireReady || child.Phase == v1.SandboxReady {
 				ready = append(ready, child.Name)
 			}
 		}
@@ -255,7 +260,11 @@ func (b *ClusterBackend) waitChildrenReady(ctx context.Context, name string, n i
 			return ready[:n], nil
 		}
 		if b.now().After(deadline) {
-			return nil, fmt.Errorf("fork %s not ready after %s", name, b.pollTimeout)
+			state := "ready"
+			if !requireReady {
+				state = "created"
+			}
+			return nil, fmt.Errorf("fork %s: %d of %d children %s after %s", name, len(ready), n, state, b.pollTimeout)
 		}
 		select {
 		case <-ctx.Done():
@@ -425,8 +434,17 @@ func (w *ClusterWorkspaceBackend) ListWorkspaces(ctx context.Context, namespace 
 	return out, nil
 }
 
-// Log lists the revisions belonging to workspace, newest first.
+// Log lists the revisions belonging to workspace, newest first. A missing
+// workspace is reported as ErrNotFound (exit 3) rather than an empty log, so an
+// automated caller can tell "no revisions yet" from "no such workspace".
 func (w *ClusterWorkspaceBackend) Log(ctx context.Context, workspace string) ([]RevisionInfo, error) {
+	var ws v1.Workspace
+	if err := w.client.Get(ctx, client.ObjectKey{Namespace: w.namespace, Name: workspace}, &ws); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("workspace %s not found: %w", workspace, ErrNotFound)
+		}
+		return nil, fmt.Errorf("get workspace %s: %w", workspace, err)
+	}
 	var list v1.WorkspaceRevisionList
 	if err := w.client.List(ctx, &list, client.InNamespace(w.namespace)); err != nil {
 		return nil, fmt.Errorf("list revisions: %w", err)

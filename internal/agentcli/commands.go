@@ -129,17 +129,9 @@ func cmdSandboxLs(ctx context.Context, args []string, backend Backend, out, errw
 		fmt.Fprintf(errw, "list sandboxes: %v\n", err)
 		return exitCodeFor(err)
 	}
-	if jsonOut {
-		s, err := jsonSandboxInfos(infos)
-		if err != nil {
-			fmt.Fprintf(errw, "sandbox ls: %v\n", err)
-			return ExitError
-		}
-		fmt.Fprint(out, s)
-		return ExitOK
-	}
-	fmt.Fprint(out, formatSandboxInfos(infos))
-	return ExitOK
+	return renderList(out, errw, "sandbox ls", jsonOut,
+		func() (string, error) { return jsonSandboxInfos(infos) },
+		func() string { return formatSandboxInfos(infos) })
 }
 
 func cmdSandboxExec(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
@@ -164,10 +156,6 @@ func cmdSandboxExec(ctx context.Context, args []string, backend Backend, out, er
 }
 
 func cmdSandboxFork(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
-	// Accept the sandbox id either before or after the flags, so both
-	// `fork sbx-1 --replicas 3` and `fork --replicas 3 sbx-1` work. The stdlib
-	// flag parser stops at the first non-flag token, so split the id out first.
-	id, rest := splitFirstPositional(args)
 	fs := newFlagSet("sandbox fork", errw)
 	// --count is the documented flag (#311); --replicas is kept as a back-compat
 	// alias. --count wins when set (default 0 means "not set, use --replicas").
@@ -176,12 +164,12 @@ func cmdSandboxFork(ctx context.Context, args []string, backend Backend, out, er
 	wait := fs.Bool("wait", true, "wait for the forks to become Ready before returning")
 	noWait := fs.Bool("no-wait", false, "return as soon as the forks are created; do not wait for Ready")
 	timeout := fs.Int("timeout", 0, "max seconds to wait for Ready (0 = backend default)")
-	if err := fs.Parse(rest); err != nil {
+	// Accept the sandbox id either before or after the flags, so both
+	// `fork sbx-1 --count 3` and `fork --count 3 sbx-1` parse correctly.
+	id, err := parseLeadingID(fs, args)
+	if err != nil {
 		fmt.Fprint(errw, usage)
 		return ExitUsage
-	}
-	if id == "" && fs.NArg() > 0 {
-		id = fs.Arg(0)
 	}
 	if id == "" {
 		fmt.Fprintf(errw, "sandbox fork: a sandbox id is required\n\n%s", usage)
@@ -205,18 +193,15 @@ func cmdSandboxFork(ctx context.Context, args []string, backend Backend, out, er
 }
 
 func cmdSandboxTerminate(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
-	id, rest := splitFirstPositional(args)
 	fs := newFlagSet("sandbox terminate", errw)
 	// terminate is asynchronous: the object is deleted and the controller reaps
 	// it. --timeout bounds the delete call itself; waiting until the sandbox is
 	// fully reaped is a named follow-up, so --wait is not offered here yet.
 	timeout := fs.Int("timeout", 0, "max seconds to bound the delete call (0 = no bound)")
-	if err := fs.Parse(rest); err != nil {
+	id, err := parseLeadingID(fs, args)
+	if err != nil {
 		fmt.Fprint(errw, usage)
 		return ExitUsage
-	}
-	if id == "" && fs.NArg() > 0 {
-		id = fs.Arg(0)
 	}
 	if id == "" {
 		fmt.Fprintf(errw, "sandbox terminate: a sandbox id is required\n\n%s", usage)
@@ -252,21 +237,26 @@ func cmdDev(_ context.Context, args []string, _, errw io.Writer) int {
 	}
 }
 
-// splitFirstPositional returns the first argument that is not a flag (does not
-// start with "-") and the remaining args with that token removed, so a leading
-// positional id can appear before flags that the stdlib flag parser would
-// otherwise stop at. If there is no positional token, id is empty and rest is
-// args unchanged.
-func splitFirstPositional(args []string) (id string, rest []string) {
-	for i, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			rest = make([]string, 0, len(args)-1)
-			rest = append(rest, args[:i]...)
-			rest = append(rest, args[i+1:]...)
-			return a, rest
-		}
+// parseLeadingID parses fs from args when the command takes a single positional
+// id that may appear either before or after its flags. The stdlib flag parser
+// stops at the first non-flag token, so a single parse mis-reads a flag value as
+// the id (`fork --count 2 sbx-1` would take "2"). This parses once to consume any
+// leading flags, lifts the first remaining positional as the id, then parses the
+// tokens that followed the id so trailing flags (`fork sbx-1 --count 2`) are
+// still honored. It returns an empty id when no positional is present.
+func parseLeadingID(fs *flag.FlagSet, args []string) (id string, err error) {
+	if err = fs.Parse(args); err != nil {
+		return "", err
 	}
-	return "", args
+	pos := fs.Args()
+	if len(pos) == 0 {
+		return "", nil
+	}
+	id = pos[0]
+	if err = fs.Parse(pos[1:]); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // formatSandboxInfos renders SandboxInfo rows as an aligned table with columns

@@ -3,8 +3,28 @@ package agentcli
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 )
+
+// renderList writes a read-verb listing either as JSON (when jsonOut, via
+// jsonFn) or as the human table (via textFn), and returns the process exit code.
+// It is the single place the read verbs branch on output format so the JSON/text
+// shape does not drift as more listing verbs are added. verb names the command
+// for the diagnostic on an encode failure.
+func renderList(out, errw io.Writer, verb string, jsonOut bool, jsonFn func() (string, error), textFn func() string) int {
+	if jsonOut {
+		s, err := jsonFn()
+		if err != nil {
+			fmt.Fprintf(errw, "%s: %v\n", verb, err)
+			return ExitError
+		}
+		fmt.Fprint(out, s)
+		return ExitOK
+	}
+	fmt.Fprint(out, textFn())
+	return ExitOK
+}
 
 // extractOutputFlag pulls the output-format flags out of args and reports
 // whether structured JSON was requested. It recognizes, in any position:
@@ -24,7 +44,9 @@ func extractOutputFlag(args []string) (jsonOut bool, rest []string, err error) {
 		case "json":
 			jsonOut = true
 		case "table", "text", "human", "":
-			// The human render is the default; nothing to set.
+			// A later human format wins over an earlier --json (last flag wins),
+			// so an explicit -o table after --json resets to the human render.
+			jsonOut = false
 		default:
 			return fmt.Errorf("unknown output format %q (want json or table)", v)
 		}
