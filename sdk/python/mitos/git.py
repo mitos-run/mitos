@@ -58,6 +58,16 @@ class GitSpec:
     credentials_secret: Optional[tuple[str, str]] = None
     credentials_username: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        # Validate on every construction path, not just the git() factory, so a
+        # directly constructed mitos.GitSpec (it is exported) cannot smuggle an
+        # invalid spec past the fail-fast checks and on to the cluster. Normalise
+        # the containers to plain list/tuple after validating.
+        _validate_git_args(self.paths, self.credentials_secret, self.credentials_username)
+        self.paths = list(self.paths)
+        if self.credentials_secret is not None:
+            self.credentials_secret = tuple(self.credentials_secret)  # type: ignore[assignment]
+
     def to_spec(self) -> dict:
         """Render the JSON ``spec.git`` object, omitting unset optional fields."""
         spec: dict = {"paths": list(self.paths)}
@@ -69,6 +79,54 @@ class GitSpec:
         return spec
 
 
+def _validate_git_args(
+    paths: object,
+    credentials_secret: object,
+    credentials_username: object,
+) -> None:
+    """Validate the git spec arguments, raising an LLM-legible AgentRunError.
+
+    Shared by :func:`git` and :meth:`GitSpec.__post_init__` so the fail-fast
+    checks hold on every construction path, including a directly constructed
+    ``mitos.GitSpec``.
+    """
+    if not paths or not isinstance(paths, (list, tuple)):
+        raise AgentRunError(
+            "git spec needs at least one workspace path",
+            code="invalid_git_paths",
+            cause="paths is empty or not a list",
+            remediation='Pass paths=["/workspace/repo"] naming the repo path(s) to track.',
+        )
+    for p in paths:
+        if not isinstance(p, str) or not p.strip():
+            raise AgentRunError(
+                "git spec paths must be non-blank strings",
+                code="invalid_git_paths",
+                cause=f"path entry {p!r} is blank or not a string",
+                remediation="Give each path a non-empty absolute path inside the workspace.",
+            )
+
+    if credentials_secret is not None and (
+        not isinstance(credentials_secret, (list, tuple))
+        or len(credentials_secret) != 2
+        or not all(isinstance(x, str) and x.strip() for x in credentials_secret)
+    ):
+        raise AgentRunError(
+            "git spec credentials_secret must be a (secret_name, secret_key) pair",
+            code="invalid_git_credentials",
+            cause=f"credentials_secret {credentials_secret!r} is not a 2-tuple of non-blank strings",
+            remediation='Pass credentials_secret=("my-secret", "token") naming the Secret and key.',
+        )
+
+    if credentials_username is not None and credentials_secret is None:
+        raise AgentRunError(
+            "git spec credentials_username needs credentials_secret",
+            code="invalid_git_credentials",
+            cause="credentials_username was set without credentials_secret",
+            remediation="Pass credentials_secret=(name, key) alongside credentials_username, or drop the username.",
+        )
+
+
 def git(
     paths: list[str],
     *,
@@ -77,55 +135,19 @@ def git(
 ) -> GitSpec:
     """Build a validated :class:`GitSpec` for a Workspace ``spec.git``.
 
-    See :class:`GitSpec` for the field meanings. Validation fails fast with an
-    LLM-legible :class:`~mitos.errors.AgentRunError` so a malformed declaration
-    is caught before it reaches the cluster:
+    See :class:`GitSpec` for the field meanings. Validation runs in
+    :meth:`GitSpec.__post_init__` and fails fast with an LLM-legible
+    :class:`~mitos.errors.AgentRunError` so a malformed declaration is caught
+    before it reaches the cluster:
 
     - ``invalid_git_paths`` if ``paths`` is empty or has a blank entry.
     - ``invalid_git_credentials`` if ``credentials_secret`` is not a
       ``(name, key)`` pair of non-blank strings, or ``credentials_username`` is
       set without ``credentials_secret``.
     """
-    if not paths or not isinstance(paths, (list, tuple)):
-        raise AgentRunError(
-            "git() needs at least one workspace path",
-            code="invalid_git_paths",
-            cause="paths is empty or not a list",
-            remediation='Pass paths=["/workspace/repo"] naming the repo path(s) to track.',
-        )
-    for p in paths:
-        if not isinstance(p, str) or not p.strip():
-            raise AgentRunError(
-                "git() paths must be non-blank strings",
-                code="invalid_git_paths",
-                cause=f"path entry {p!r} is blank or not a string",
-                remediation="Give each path a non-empty absolute path inside the workspace.",
-            )
-
-    if credentials_secret is not None:
-        if (
-            not isinstance(credentials_secret, (list, tuple))
-            or len(credentials_secret) != 2
-            or not all(isinstance(x, str) and x.strip() for x in credentials_secret)
-        ):
-            raise AgentRunError(
-                "git() credentials_secret must be a (secret_name, secret_key) pair",
-                code="invalid_git_credentials",
-                cause=f"credentials_secret {credentials_secret!r} is not a 2-tuple of non-blank strings",
-                remediation='Pass credentials_secret=("my-secret", "token") naming the Secret and key.',
-            )
-
-    if credentials_username is not None and credentials_secret is None:
-        raise AgentRunError(
-            "git() credentials_username needs credentials_secret",
-            code="invalid_git_credentials",
-            cause="credentials_username was set without credentials_secret",
-            remediation="Pass credentials_secret=(name, key) alongside credentials_username, or drop the username.",
-        )
-
     return GitSpec(
-        paths=list(paths),
-        credentials_secret=(tuple(credentials_secret) if credentials_secret is not None else None),  # type: ignore[arg-type]
+        paths=paths,
+        credentials_secret=credentials_secret,
         credentials_username=credentials_username,
     )
 

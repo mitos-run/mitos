@@ -111,7 +111,41 @@ def test_workspace_set_git_patches_spec_git():
     _, kwargs = c._api.patch_namespaced_custom_object.call_args
     assert kwargs["name"] == "proj-w"
     assert kwargs["plural"] == "workspaces"
-    assert kwargs["body"] == {"spec": {"git": {"paths": ["/workspace/repo"]}}}
+    # Merge-patch preserves omitted keys, so unset credential fields are sent as
+    # explicit null to clear any previously stored reference.
+    assert kwargs["body"] == {
+        "spec": {
+            "git": {
+                "paths": ["/workspace/repo"],
+                "credentialsSecretRef": None,
+                "credentialsUsername": None,
+            }
+        }
+    }
+
+
+def test_workspace_set_git_keeps_provided_credentials():
+    c = _fake_client()
+    ws = c.create_workspace("proj-c")
+    c._api.reset_mock()
+    ws.set_git(mitos.git(paths=["/workspace/repo"], credentials_secret=("s", "k")))
+    _, kwargs = c._api.patch_namespaced_custom_object.call_args
+    git_patch = kwargs["body"]["spec"]["git"]
+    assert git_patch["credentialsSecretRef"] == {"name": "s", "key": "k"}
+    # Username still unset, so it is cleared explicitly.
+    assert git_patch["credentialsUsername"] is None
+
+
+def test_direct_gitspec_construction_is_validated():
+    """GitSpec is exported, so validation must hold on the direct path too, not
+    only through the git() factory (CodeRabbit)."""
+    with pytest.raises(AgentRunError) as ei:
+        GitSpec(paths=[])
+    assert ei.value.code == "invalid_git_paths"
+
+    with pytest.raises(AgentRunError) as ei:
+        GitSpec(paths=["/workspace/repo"], credentials_username="u")
+    assert ei.value.code == "invalid_git_credentials"
 
 
 def test_git_exported_from_package():

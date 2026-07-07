@@ -254,10 +254,18 @@ class Workspace:
         """
         from mitos.git import coerce_git
 
+        git_spec = coerce_git(git).to_spec()
+        # patch_namespaced_custom_object uses JSON merge-patch (RFC 7396), so an
+        # omitted key preserves the server's current value. Send the optional
+        # credential fields as explicit null when unset so a set_git that drops
+        # credentials actually clears any previously stored reference.
+        git_spec.setdefault("credentialsSecretRef", None)
+        git_spec.setdefault("credentialsUsername", None)
+
         self._api.patch_namespaced_custom_object(
             group=API_GROUP, version=API_VERSION, namespace=self.namespace,
             plural="workspaces", name=self.name,
-            body={"spec": {"git": coerce_git(git).to_spec()}},
+            body={"spec": {"git": git_spec}},
         )
 
     def serve(
