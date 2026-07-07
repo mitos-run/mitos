@@ -615,7 +615,7 @@ Trust and residual, stated honestly:
   life of the source. This adds NO new tenant-facing input: the socket is the SAME
   host-local, per-VM, guest-unreachable socket already reviewed above, now over the
   SOURCE VM's own m1-exported memfd; the handler still only write-protects / unprotects
-  / copies the parent's own pages and writes nowhere on the host. The retained handle
+  / copies the parent's own pages and makes NO persistent disk writes (the only host write is into the anonymous frozen memfd in host RAM). The retained handle
   is Closed at pod teardown (`closeLiveCowSource`), unblocking a stuck `Receive` and
   stopping `Serve`. FAIL-SAFE: arming happens ONLY with the flag on AND a real workdir;
   the flag off, the mock/unit path, a socket-bind failure, a source Firecracker that
