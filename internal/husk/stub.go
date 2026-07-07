@@ -17,6 +17,7 @@ import (
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
@@ -604,13 +605,21 @@ type Stub struct {
 	// instances is the default-off scaffold a later increment migrates that
 	// single-VM state onto (map[vmID]*vmInstance keyed per fork); it is nil unless
 	// a caller opts in, so increment 1 changes no runtime behavior.
-	multiVM   bool
+	multiVM bool
 	// liveCowFork gates the live copy-on-write co-located fork path (Options
 	// .LiveCowFork, milestone m4b). Default false keeps the co-located fork on the
 	// disk snapshot restore byte-for-byte; separate from multiVM so it canaries
 	// independently.
 	liveCowFork bool
-	instances   map[vmID]*vmInstance
+	// liveCowParent is the armed parent-side live-cow WP handler for this pod's
+	// running source VM (milestone m5). When non-nil AND liveCowFork is on, a
+	// co-located fork child spawn imports its guest RAM from the parent's live
+	// shared memfd (SpawnVM sets FIRECRACKER_MITOS_CHILD_MEMFD from it) instead of
+	// the disk snapshot mem file. Nil (the default, and today's production wiring
+	// until the parent-arm + Firecracker child-restore patch land) means every
+	// co-located child restores from disk. Set via SetLiveCowParent.
+	liveCowParent fork.ChildImportProvider
+	instances     map[vmID]*vmInstance
 	// closing is set (under mu) when closeAllInstances begins teardown, so a
 	// concurrent create can no longer add a VM that would outlive Close. Guarded
 	// by mu; only meaningful on the multi-VM path.

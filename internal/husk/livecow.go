@@ -1,6 +1,8 @@
 package husk
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 
 	"mitos.run/mitos/internal/fork"
@@ -43,7 +45,63 @@ const (
 	// memfd coordinates to (FIRECRACKER_MITOS_SHARED_MEM_EXPORT), under the parent
 	// VM's workdir, which the WP handler reads to reach the parent's live memory.
 	liveCowMemExportName = "mitos-memfd.export"
+	// liveCowChildImportName is the file SpawnVM writes the child-import export
+	// line to (fork.ChildMemfdImport.ExportLine) and names to the child Firecracker
+	// via FIRECRACKER_MITOS_CHILD_MEMFD, so the child boots its guest RAM from the
+	// parent's live shared memfd (m5). Written under the fork snapshot dir, the same
+	// node-local trust boundary the fork child already restores its rootfs from.
+	liveCowChildImportName = "mitos-child-memfd.export"
 )
+
+// SetLiveCowParent wires the armed parent-side live-cow WP handler for this pod's
+// running source VM (milestone m5). When set AND the stub was started with
+// --live-cow-fork, a co-located fork child spawn imports its guest RAM from the
+// parent's live shared memfd instead of the disk snapshot mem file. Nil (the
+// default) keeps every co-located child on the disk restore. The provider is the
+// fork.WPForkHandle the parent-arm wiring creates; passing it here is the seam the
+// parent-arm increment flips on.
+func (s *Stub) SetLiveCowParent(p fork.ChildImportProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.liveCowParent = p
+}
+
+// liveCowChildImportEnv assembles the FIRECRACKER_MITOS_CHILD_MEMFD environment a
+// co-located fork child Firecracker must be launched with so its restore takes the
+// guest-memory backing from the parent's live shared memfd (MAP_PRIVATE + FROZEN
+// overlay) named in an export file, instead of the disk snapshot mem file. It
+// returns:
+//   - (env, nil) when an armed live-cow parent published a child import: the child
+//     boots from the shared memfd (the disk mem path is still passed to the child
+//     Firecracker, so an unpatched binary that ignores the env falls back to disk;
+//     a patched child-restore binary prefers the memfd);
+//   - (nil, nil) when no live-cow parent is armed: the child restores from disk;
+//   - (nil, err) on a real failure assembling the import: SpawnVM logs and falls
+//     back to the disk restore, so the flag never breaks a fork (fail-closed).
+func (s *Stub) liveCowChildImportEnv(req ActivateRequest) ([]string, error) {
+	// Read the armed parent under s.mu: SetLiveCowParent may arm it asynchronously
+	// while a sibling VM's SpawnVM runs, and an interface value is two words, so an
+	// unsynchronized read could tear. Take a stable local and release the lock
+	// before the ChildImport I/O (which never re-takes s.mu).
+	s.mu.Lock()
+	parent := s.liveCowParent
+	s.mu.Unlock()
+	if parent == nil {
+		return nil, nil
+	}
+	if req.SnapshotDir == "" {
+		return nil, fmt.Errorf("live-cow child import: empty snapshot dir")
+	}
+	imp, err := parent.ChildImport(req.SnapshotDir)
+	if err != nil {
+		return nil, fmt.Errorf("live-cow child import: %w", err)
+	}
+	exportPath := filepath.Join(req.SnapshotDir, liveCowChildImportName)
+	if err := os.WriteFile(exportPath, []byte(imp.ExportLine()+"\n"), 0o600); err != nil {
+		return nil, fmt.Errorf("live-cow child import: write export %s: %w", exportPath, err)
+	}
+	return fork.ChildMemfdEnv(exportPath), nil
+}
 
 // LiveCowForkEnabled reports whether this pod was started with the live-cow fork
 // path enabled (--live-cow-fork). Exported for the controller-driven status and
