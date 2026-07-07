@@ -170,7 +170,11 @@ func (s *KeyService) CreateKey(ctx context.Context, req CreateKeyRequest) (Creat
 	} else {
 		for _, sc := range scopes {
 			if !knownScopes[sc] {
-				return CreatedKey{}, fmt.Errorf("create key: scope %q is not a known scope (valid: read, execute, lifecycle, admin): %w", sc, ErrUnknownScope)
+				// The advertised list is derived from FullScopes so it cannot drift
+				// from the accepted vocabulary. The legacy ScopeSandboxes is accepted
+				// (knownScopes) but deliberately NOT advertised here: new keys should
+				// carry the finer scopes, not the legacy full-lifecycle alias.
+				return CreatedKey{}, fmt.Errorf("create key: scope %q is not a known scope (valid: %s): %w", sc, strings.Join(FullScopes(), ", "), ErrUnknownScope)
 			}
 		}
 	}
