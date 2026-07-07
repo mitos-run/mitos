@@ -52,6 +52,11 @@ type fakeVMM struct {
 	snapMem   string
 	snapState string
 	snapErr   error
+	// snapVMStateOnly records that the live-cow vmstate-only capture was taken (no
+	// mem file). snapVMStateOnlyErr scripts its failure. On the vmstate-only path
+	// snapMem stays empty, which a test asserts to prove NO mem write happened.
+	snapVMStateOnly    bool
+	snapVMStateOnlyErr error
 
 	// callOrder records the activate-time VMM call sequence ("load", "patch",
 	// "resume") so a test can assert load(resume=false) -> PatchDrive -> Resume.
@@ -155,6 +160,16 @@ func (f *fakeVMM) CreateSnapshot(memPath, snapshotPath string) error {
 	f.snapState = snapshotPath
 	f.callOrder = append(f.callOrder, "snapshot")
 	return f.snapErr
+}
+
+func (f *fakeVMM) CreateSnapshotVMStateOnly(snapshotPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Deliberately leave f.snapMem empty: the live-cow path writes NO mem file.
+	f.snapVMStateOnly = true
+	f.snapState = snapshotPath
+	f.callOrder = append(f.callOrder, "snapshot_vmstate_only")
+	return f.snapVMStateOnlyErr
 }
 
 func TestVMMInterfaceHasForkSnapshotMethods(t *testing.T) {

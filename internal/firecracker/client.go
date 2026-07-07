@@ -496,6 +496,18 @@ func (c *Client) Resume() error {
 
 // --- Snapshot Operations ---
 
+// snapshotTypeFull is the stock Firecracker Full snapshot: it copies the whole
+// guest RAM to mem_file_path AND writes the device/CPU vmstate to snapshot_path.
+// snapshotTypeMitosVmstateOnly is the Mitos-patched vmstate-only capture: it
+// writes ONLY the vmstate to snapshot_path and SKIPS the guest-memory copy (the
+// ~364ms `mem` write measured on prod, issue #832), because on the live-cow fork
+// path the guest RAM is already resident in the exported MAP_SHARED memfd a
+// co-located child MAP_PRIVATEs.
+const (
+	snapshotTypeFull             = "Full"
+	snapshotTypeMitosVmstateOnly = "MitosVmstateOnly"
+)
+
 func (c *Client) CreateSnapshot(memPath, snapshotPath string) error {
 	// A jailed Firecracker writes both files inside its chroot; the
 	// mirrored destination dirs must exist and be writable by the jailed
@@ -507,7 +519,7 @@ func (c *Client) CreateSnapshot(memPath, snapshotPath string) error {
 		}
 	}
 	if err := c.put("/snapshot/create", SnapshotCreate{
-		SnapshotType: "Full",
+		SnapshotType: snapshotTypeFull,
 		SnapshotPath: snapshotPath,
 		MemFilePath:  memPath,
 	}); err != nil {
@@ -517,6 +529,36 @@ func (c *Client) CreateSnapshot(memPath, snapshotPath string) error {
 		if err := c.exportFromJail(p); err != nil {
 			return fmt.Errorf("export snapshot file from chroot: %w", err)
 		}
+	}
+	return nil
+}
+
+// CreateSnapshotVMStateOnly writes ONLY the device + CPU vmstate to snapshotPath
+// and does NOT copy guest memory to a mem file. It is the live-cow fork capture:
+// the running guest RAM is already resident in the MAP_SHARED memfd the patched
+// parent Firecracker exports (m1), which a co-located fork child MAP_PRIVATEs, so
+// the Full snapshot's guest-RAM copy (the ~364ms `mem` write, issue #832) is
+// redundant. It issues PUT /snapshot/create with the Mitos vmstate-only type and
+// NO mem_file_path (the omitempty tag drops the field), and exports only the small
+// vmstate file back out of the jail.
+//
+// It REQUIRES the Mitos-patched Firecracker vmstate-only snapshot mode
+// (mitos-run/firecracker): stock Firecracker rejects a /snapshot/create without a
+// mem_file_path. The husk only calls it on the gated live-cow fork path (an armed
+// write-protect parent handle present) and falls back to the Full CreateSnapshot
+// otherwise, so a pod without the patch never reaches this call.
+func (c *Client) CreateSnapshotVMStateOnly(snapshotPath string) error {
+	if err := c.ensureJailedDir(filepath.Dir(snapshotPath)); err != nil {
+		return fmt.Errorf("prepare snapshot dir in chroot: %w", err)
+	}
+	if err := c.put("/snapshot/create", SnapshotCreate{
+		SnapshotType: snapshotTypeMitosVmstateOnly,
+		SnapshotPath: snapshotPath,
+	}); err != nil {
+		return err
+	}
+	if err := c.exportFromJail(snapshotPath); err != nil {
+		return fmt.Errorf("export snapshot file from chroot: %w", err)
 	}
 	return nil
 }

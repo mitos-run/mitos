@@ -142,6 +142,14 @@ type vmm interface {
 	// fork-snapshot op writes the source VM's snapshot here so child husk pods can
 	// restore independent copies of it.
 	CreateSnapshot(memPath, snapshotPath string) error
+	// CreateSnapshotVMStateOnly writes ONLY the device/CPU vmstate of the PAUSED VM
+	// to snapshotPath and does NOT copy guest memory to a mem file. It is the
+	// live-cow fork capture: the guest RAM is already resident in the source's
+	// exported MAP_SHARED memfd (m1) that a co-located child MAP_PRIVATEs, so the
+	// ~364ms mem write a Full snapshot does is redundant (issue #832). The
+	// fork-snapshot op uses it ONLY on the armed live-cow path and falls back to
+	// CreateSnapshot otherwise, so a fork never breaks.
+	CreateSnapshotVMStateOnly(snapshotPath string) error
 	// Ping reports whether the VMM still answers its API socket. It returns an
 	// error once the Firecracker process is gone or defunct, which the husk
 	// liveness monitor uses to detect a dead warm slot (issue #527).

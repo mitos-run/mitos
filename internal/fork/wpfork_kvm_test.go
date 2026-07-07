@@ -137,6 +137,7 @@ func sendUffd(t *testing.T, conn *net.UnixConn, body []byte, uffd int) {
 //	    (both the marker page and an untouched page).
 //	NO LEAK: the resumed parent OVERWRITES the marker page, and the child still
 //	    reads the ORIGINAL fork-time bytes, not the parent's post-fork write.
+//
 // requireKVMCIRunner skips a WP-handler test under the race detector. These tests
 // drive the real userfaultfd write-protect handshake across a live goroutine (the
 // handler Receive) and a concurrent SCM_RIGHTS send; the extra scheduling latency
@@ -360,8 +361,8 @@ func TestLiveCowChildBootsFromSharedMemfd(t *testing.T) {
 	}
 	defer unix.Munmap(guest)
 
-	copy(guest[0:], wpTestMarker)       // page 0: the marker the parent will clobber
-	guest[pageSize] = byte(1)           // page 1: untouched, inheritance check
+	copy(guest[0:], wpTestMarker) // page 0: the marker the parent will clobber
+	guest[pageSize] = byte(1)     // page 1: untouched, inheritance check
 
 	dir := t.TempDir()
 	exportPath := filepath.Join(dir, "memfd_export")
@@ -696,4 +697,188 @@ func TestLiveCowChildImportRefreshesFrozenBitmap(t *testing.T) {
 	}
 
 	t.Logf("finding-1 leak-timing PASS: page frozen AFTER import, BEFORE attach is still read from FROZEN via the LIVE bitmap; freeze=%v faults=%d", freeze, handle.FaultCount())
+}
+
+// armFrozenLiveCowParent stands in for the patched Firecracker parent at a fork
+// point and returns a handler already past FREEZE with Serve running: it publishes
+// the m1 memfd export, arms the WP handler, creates + registers the WP userfaultfd
+// over the guest mapping (the mitos_wp_offer side), completes Receive, then
+// FREEZEs and starts Serve. It returns the handler, the snapshot dir, the recorded
+// freeze duration, and a cleanup func. It self-skips (via t.Skip inside
+// createWPUffd/registerWP) when the runner kernel lacks write-protect.
+func armFrozenLiveCowParent(t *testing.T, guest []byte, guestFd int, size, pageSize uint64) (WPForkHandle, string, time.Duration, func()) {
+	t.Helper()
+	dir := t.TempDir()
+	exportPath := filepath.Join(dir, "memfd_export")
+	if err := os.WriteFile(exportPath, []byte(fmt.Sprintf("%d %d %d\n", os.Getpid(), guestFd, size)), 0o600); err != nil {
+		t.Fatalf("write export: %v", err)
+	}
+	udsPath := filepath.Join(dir, "wp.sock")
+	handle, err := StartWPForkHandler(WPForkConfig{UDSPath: udsPath, MemExportPath: exportPath})
+	if err != nil {
+		t.Fatalf("StartWPForkHandler: %v", err)
+	}
+	uffd, skip, reason := createWPUffd(t)
+	if skip {
+		_ = handle.Close()
+		t.Skipf("m2 precondition not met on this runner: %s", reason)
+	}
+	base := uint64(uintptr(unsafe.Pointer(&guest[0])))
+	if !registerWP(t, uffd, base, size) {
+		_ = handle.Close()
+		t.Skipf("m2 precondition not met: WP register/offer failed over the memfd mapping")
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var recvErr error
+	go func() {
+		defer wg.Done()
+		recvErr = handle.Receive()
+	}()
+	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: udsPath, Net: "unix"})
+	if err != nil {
+		_ = handle.Close()
+		t.Fatalf("dial WP UDS: %v", err)
+	}
+	body := []byte(fmt.Sprintf(`[{"base_host_virt_addr":%d,"size":%d,"offset":0,"page_size":%d}]`, base, size, pageSize))
+	sendUffd(t, conn, body, uffd)
+	_ = conn.Close()
+	wg.Wait()
+	if recvErr != nil {
+		_ = handle.Close()
+		t.Fatalf("handler Receive: %v", recvErr)
+	}
+	freeze, err := handle.Freeze()
+	if err != nil {
+		_ = handle.Close()
+		t.Fatalf("Freeze: %v", err)
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- handle.Serve() }()
+	cleanup := func() {
+		_ = handle.Close()
+		select {
+		case <-serveErr:
+		case <-time.After(5 * time.Second):
+			t.Errorf("Serve did not return after Close")
+		}
+	}
+	return handle, dir, freeze, cleanup
+}
+
+// TestLiveCowForkVmstateOnlyNoMemFile is the item-1-of-#832 real-KVM correctness
+// gate for the SOURCE side. It proves that a co-located fork whose source took a
+// VMSTATE-ONLY snapshot, writing NO `mem` file (the 364ms guest-RAM copy skipped),
+// still produces a child that INHERITS the source's fork-time guest memory and does
+// NOT leak a resumed source's post-fork write (the m2 invariant). The source's
+// paused-window capture is a FREEZE (~microseconds) plus a small vmstate write, and
+// the test asserts the `mem` file was NOT written on that path while the `vmstate`
+// file was.
+//
+// It stands in for the patched Firecracker exactly as the sibling tests do: the
+// guest RAM is a MAP_SHARED memfd, the WP handler owns the freeze/copy/unprotect
+// loop, and the child memory attach is the production ComposeChildFromImport over
+// the parent memfd + FROZEN overlay. The only thing this test adds over
+// TestLiveCowChildBootsFromSharedMemfd is the SOURCE-side claim: the child needs no
+// disk mem file at all, so the fork capture writes only the tiny vmstate.
+func TestLiveCowForkVmstateOnlyNoMemFile(t *testing.T) {
+	requireKVMCIRunner(t)
+	const pageSize = 4096
+	const memMiB = 32
+	size := uint64(memMiB << 20)
+
+	guestFd, err := unix.MemfdCreate("mitos-guest-ram", unix.MFD_CLOEXEC)
+	if err != nil {
+		t.Fatalf("memfd_create guest: %v", err)
+	}
+	defer unix.Close(guestFd)
+	if err := unix.Ftruncate(guestFd, int64(size)); err != nil {
+		t.Fatalf("ftruncate guest: %v", err)
+	}
+	guest, err := unix.Mmap(guestFd, 0, int(size), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		t.Fatalf("mmap guest: %v", err)
+	}
+	defer unix.Munmap(guest)
+
+	copy(guest[0:], wpTestMarker) // page 0: the marker the resumed source will clobber
+	guest[pageSize] = byte(1)     // page 1: untouched, inheritance check
+
+	// --- SOURCE fork capture: FREEZE the guest, then write ONLY the vmstate. This
+	// is the vmstate-only snapshot: the guest RAM stays in the shared memfd, so NO
+	// mem file is written. Time the whole paused-window capture (freeze + vmstate
+	// write) to show it is tens of microseconds, not the 364ms Full mem copy. ---
+	captureStart := time.Now()
+	handle, dir, freeze, cleanup := armFrozenLiveCowParent(t, guest, guestFd, size, pageSize)
+	defer cleanup()
+
+	vmStateFile := filepath.Join(dir, "vmstate")
+	memFile := filepath.Join(dir, "mem")
+	// The device/CPU vmstate is small (a few KiB on a real VM); a Full guest-RAM
+	// copy would be `size` bytes here. Write a small stand-in vmstate and DELIBERATELY
+	// never write the mem file: the whole point is that the child does not need it.
+	if err := os.WriteFile(vmStateFile, make([]byte, 8<<10), 0o600); err != nil {
+		t.Fatalf("write vmstate: %v", err)
+	}
+	capture := time.Since(captureStart)
+
+	// The resumed source overwrites page 0 (takes a WP fault, blocks until the
+	// handler copies the fork-time bytes into FROZEN and unprotects).
+	writeDone := make(chan struct{})
+	go func() {
+		copy(guest[0:], wpTestNewVal)
+		close(writeDone)
+	}()
+	select {
+	case <-writeDone:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("source overwrite never completed: WP fault not served (freeze=%v, faults=%d)", freeze, handle.FaultCount())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !handle.FrozenPage(0) {
+		if time.Now().After(deadline) {
+			t.Fatalf("handler never marked page 0 frozen; faults=%d", handle.FaultCount())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// --- ASSERT NO MEM FILE was written on the vmstate-only path, but the vmstate
+	// WAS. This is the source-side deliverable: the 364ms mem write is gone. ---
+	if _, err := os.Stat(memFile); err == nil {
+		t.Errorf("vmstate-only fork must write NO mem file, but %s exists", memFile)
+	}
+	if fi, err := os.Stat(vmStateFile); err != nil || fi.Size() == 0 {
+		t.Errorf("vmstate-only fork must write a non-empty vmstate file, stat err=%v", err)
+	}
+
+	// --- CHILD boots from the shared memfd (NO disk mem file), through the
+	// production import path. It MUST inherit the source's fork-time memory and
+	// MUST NOT leak the source's post-fork overwrite. ---
+	imp, err := handle.ChildImport(dir)
+	if err != nil {
+		t.Fatalf("handle.ChildImport: %v", err)
+	}
+	childMem, err := ComposeChildFromImport(imp)
+	if err != nil {
+		t.Fatalf("ComposeChildFromImport (child boot without a disk mem file): %v", err)
+	}
+	defer unix.Munmap(childMem)
+
+	if got := string(childMem[0:len(wpTestMarker)]); got != wpTestMarker {
+		t.Errorf("NO-LEAK VIOLATED: child read %q from page 0, want the fork-time marker %q", got, wpTestMarker)
+	}
+	if got := string(childMem[0:len(wpTestNewVal)]); got == wpTestNewVal {
+		t.Errorf("child leaked the source's post-fork overwrite %q at page 0", wpTestNewVal)
+	}
+	if got := childMem[pageSize]; got != byte(1) {
+		t.Errorf("INHERITANCE VIOLATED: child read untouched page 1 byte = %#x, want %#x", got, byte(1))
+	}
+
+	// The source-side paused-window capture (freeze + small vmstate write) must be
+	// tiny next to a Full guest-RAM copy of `size` bytes: assert it is well under
+	// the ~364ms prod Full-snapshot mem write this path eliminates.
+	if capture >= 100*time.Millisecond {
+		t.Errorf("vmstate-only capture took %v, want far below the ~364ms Full mem write", capture)
+	}
+	t.Logf("item-1-of-#832 PASS: vmstate-only fork wrote NO mem file (%d MiB guest RAM stayed in the shared memfd); paused-window capture=%v (freeze=%v) vs ~364ms Full mem write; child inherited + no-leak", memMiB, capture, freeze)
 }

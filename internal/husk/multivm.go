@@ -905,9 +905,10 @@ func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapsh
 
 	start := time.Now()
 	// Per-stage timing of the paused checkpoint window, so the controller sees
-	// whether the fork-snapshot cost is the CreateSnapshot memory write or the
-	// rootfs freeze. Timing/observability only, under the instance lock.
-	stages := make(map[string]float64, 4)
+	// whether the fork-snapshot cost is the CreateSnapshot memory write, the
+	// live-cow freeze, or the rootfs freeze. Timing/observability only, under the
+	// instance lock.
+	stages := make(map[string]float64, 5)
 	mark := time.Now()
 
 	if err := inst.vm.Pause(); err != nil {
@@ -917,17 +918,47 @@ func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapsh
 	recordStage(stages, "pause", mark)
 	mark = time.Now()
 
-	if err := inst.vm.CreateSnapshot(memFile, vmStateFile); err != nil {
-		// Best effort: resume the source so a transient snapshot error does not leave
-		// a tenant's live sandbox frozen. The snapshot already failed, so the resume
-		// error is not surfaced, but the bounded retry + stuck-paused marker still
-		// apply here (a transient resume blip on this branch must not silently leave
-		// the source paused, the v1.24.1 incident class).
-		_ = s.resumeInstanceAfterFork(id, inst)
-		werr := fmt.Errorf("husk: create fork snapshot in %s for vm %q: %w", req.SnapshotDir, id, err)
-		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	// Live-cow fork capture (issue #832): when the live-cow path is armed (flag on
+	// AND a parent-side WP handle that can freeze the running source), FREEZE the
+	// source guest memfd (UFFD write-protect the whole live region, ~microseconds)
+	// and capture ONLY the small device/CPU vmstate, INSTEAD OF writing the whole
+	// guest RAM to a `mem` file (the ~364ms Full-snapshot cost). The co-located
+	// child boots its guest RAM from the parent's shared memfd (m5), so the disk
+	// `mem` file is redundant on this path; the freeze keeps a resumed source from
+	// leaking a post-fork write forward into the child (the m2 no-leak invariant,
+	// docs/fork-correctness.md). On any failure the source is resumed (never leave a
+	// tenant's live sandbox frozen) before failing closed, exactly as the Full path.
+	//
+	// FALLBACK (flag off, or no armed parent, or a non-live-cow pod): the Full
+	// CreateSnapshot(mem, vmstate) runs byte-for-byte as before, so a fork never
+	// breaks. This selector is the ONLY behavior change; off is the current path.
+	if freezer := s.liveCowSnapshotFreezer(); freezer != nil {
+		if _, err := freezer.Freeze(); err != nil {
+			_ = s.resumeInstanceAfterFork(id, inst)
+			werr := fmt.Errorf("husk: freeze source guest for live-cow fork snapshot vm %q: %w", id, err)
+			return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+		}
+		recordStage(stages, "freeze", mark)
+		mark = time.Now()
+		if err := inst.vm.CreateSnapshotVMStateOnly(vmStateFile); err != nil {
+			_ = s.resumeInstanceAfterFork(id, inst)
+			werr := fmt.Errorf("husk: create vmstate-only fork snapshot in %s for vm %q: %w", req.SnapshotDir, id, err)
+			return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+		}
+		recordStage(stages, "create_snapshot", mark)
+	} else {
+		if err := inst.vm.CreateSnapshot(memFile, vmStateFile); err != nil {
+			// Best effort: resume the source so a transient snapshot error does not leave
+			// a tenant's live sandbox frozen. The snapshot already failed, so the resume
+			// error is not surfaced, but the bounded retry + stuck-paused marker still
+			// apply here (a transient resume blip on this branch must not silently leave
+			// the source paused, the v1.24.1 incident class).
+			_ = s.resumeInstanceAfterFork(id, inst)
+			werr := fmt.Errorf("husk: create fork snapshot in %s for vm %q: %w", req.SnapshotDir, id, err)
+			return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+		}
+		recordStage(stages, "create_snapshot", mark)
 	}
-	recordStage(stages, "create_snapshot", mark)
 	mark = time.Now()
 
 	// Freeze THIS instance's source rootfs INSIDE the paused window, as a
