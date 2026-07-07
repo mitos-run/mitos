@@ -741,7 +741,9 @@ func (s *Stub) Prepare(ctx context.Context) error {
 	if s.multiVM {
 		// A plain Prepare brings up the pod's default (source) VM from the pool
 		// template, so the rootfs clone source is the template (empty override).
-		return s.prepareInstance(ctx, defaultVMID, "")
+		// A plain Prepare is a warm-pool prepay, not on the hosted-fork hot path,
+		// so it opts out of the per-stage timing map (nil stages).
+		return s.prepareInstance(ctx, defaultVMID, "", nil)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

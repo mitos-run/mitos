@@ -52,6 +52,15 @@ func TestMultiVMForkSnapshotFromDefaultVM(t *testing.T) {
 		t.Fatalf("ForkSnapshot on a multi-vm stub's default VM must be OK, got: %+v", res)
 	}
 
+	// Per-stage fork timing is emitted: the paused-window sub-stages the
+	// controller reads for the hosted-fork breakdown must be present (rootfs_freeze
+	// is skipped here because the mock instance has no per-activation rootfs clone).
+	for _, stage := range []string{"pause", "create_snapshot", "resume"} {
+		if _, ok := res.Stages[stage]; !ok {
+			t.Errorf("ForkSnapshot result missing stage timing %q; got stages %v", stage, res.Stages)
+		}
+	}
+
 	// The DEFAULT instance's VM (not the single-VM s.vm, which is nil under
 	// multi-vm) must have been paused for the checkpoint and resumed afterward.
 	defVM := vms["husk-test"]
