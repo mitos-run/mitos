@@ -137,7 +137,20 @@ func sendUffd(t *testing.T, conn *net.UnixConn, body []byte, uffd int) {
 //	    (both the marker page and an untouched page).
 //	NO LEAK: the resumed parent OVERWRITES the marker page, and the child still
 //	    reads the ORIGINAL fork-time bytes, not the parent's post-fork write.
+// requireKVMCIRunner skips a WP-handler test outside the KVM CI runner. These
+// tests exercise the real userfaultfd write-protect handshake and need the KVM CI
+// environment (the firecracker-test job). The plain go-test ubuntu runner lacks
+// it and cannot complete the handshake reliably, so gate on /dev/kvm exactly as
+// engine_pause_kvm_test.go does. They still RUN and are proven in firecracker-test.
+func requireKVMCIRunner(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("skipping WP-handler KVM test: /dev/kvm not available (runs in the firecracker-test KVM job)")
+	}
+}
+
 func TestLiveCowForkInheritanceAndNoLeak(t *testing.T) {
+	requireKVMCIRunner(t)
 	const pageSize = 4096
 	const npages = 8
 	size := uint64(npages * pageSize)
@@ -319,6 +332,7 @@ func TestLiveCowForkInheritanceAndNoLeak(t *testing.T) {
 // patch + a KVM node); the memory import that is the heart of m5 is proven for
 // real, including the no-leak selector and the latency win.
 func TestLiveCowChildBootsFromSharedMemfd(t *testing.T) {
+	requireKVMCIRunner(t)
 	const pageSize = 4096
 	// A multi-MiB guest so the disk-restore baseline (reading/faulting the whole
 	// mem file) is measurable while the memfd attach stays microseconds: the whole
@@ -529,6 +543,7 @@ func TestLiveCowChildBootsFromSharedMemfd(t *testing.T) {
 // This test FAILS on the stale-snapshot code (ComposeChildFromImport read a bitmap
 // file copied at t0) and PASSES once the import carries the live bitmap memfd.
 func TestLiveCowChildImportRefreshesFrozenBitmap(t *testing.T) {
+	requireKVMCIRunner(t)
 	const pageSize = 4096
 	const npages = 8
 	size := uint64(npages * pageSize)
