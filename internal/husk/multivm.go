@@ -13,6 +13,7 @@ import (
 
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/vsock"
@@ -168,7 +169,11 @@ func deriveVMNetwork(id vmID, base *vsock.NotifyForkedNetwork) *vsock.NotifyFork
 // so the child inherits the parent's DISK instead of the pristine template, the
 // co-located analog of the new-pod fork child's --rootfs pointing at the frozen
 // source rootfs.
-func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride string) error {
+// extraEnv (variadic, milestone m5) is appended to the child Firecracker process
+// environment at launch. SpawnVM passes the FIRECRACKER_MITOS_CHILD_MEMFD entry
+// here so a co-located live-cow child boots its guest RAM from the parent's shared
+// memfd; every other caller passes none, preserving the prior behavior.
+func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride string, extraEnv ...string) error {
 	if err := checkVMID(id); err != nil {
 		return err
 	}
@@ -193,6 +198,11 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride s
 	}
 
 	cfg := s.deriveVMConfig(id)
+	// Append any per-spawn environment (m5: the child memfd-import env) onto a COPY
+	// of the base env so one spawn's env never mutates the shared s.cfg slice.
+	if len(extraEnv) > 0 {
+		cfg.Env = append(append([]string(nil), cfg.Env...), extraEnv...)
+	}
 	// Create the per-VM workdir before launching so the Firecracker API socket and
 	// vsock UDS have a home. The default VM reuses the pod workdir (already created
 	// by cmd/husk-stub), and the unit path has an empty workdir, so only a nested
@@ -469,17 +479,30 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 	if req.Activate.ForkSnapshot && req.Activate.SnapshotDir != "" {
 		rootfsSrcOverride = filepath.Join(req.Activate.SnapshotDir, "rootfs.ext4")
 	}
+	// Milestone m5: when this pod has an armed parent-side live-cow WP handler
+	// (SetLiveCowParent) AND --live-cow-fork is on, the co-located child imports its
+	// guest RAM from the parent's LIVE shared memfd (MAP_PRIVATE + FROZEN overlay)
+	// instead of restoring the memory image from the disk fork snapshot: SpawnVM
+	// sets FIRECRACKER_MITOS_CHILD_MEMFD on the child Firecracker from the parent
+	// handle's ChildImport. The disk mem path is STILL passed to LoadSnapshot as the
+	// fallback, so a child Firecracker that does not honor the env (or a pod with no
+	// armed parent) restores from disk byte-for-byte. FAIL-CLOSED: any error
+	// assembling the import logs and falls back to the disk restore, so turning the
+	// flag on never breaks a fork.
+	var childMemfdEnv []string
 	if s.liveCowForkApplies(req.Activate) {
-		// Milestone m4b: the parent-side live-cow engine (memfd share + write-protect
-		// handler, internal/fork) is armed and KVM-tested for the inheritance/no-leak
-		// invariant, but the CHILD-side memfd import (booting this child's guest RAM
-		// from the parent's LIVE memory instead of the disk snapshot mem file) needs a
-		// matching Firecracker patch and lands next. Until then a live-cow-enabled pod
-		// still restores the co-located child from the disk fork snapshot (fail-closed):
-		// the flag never breaks a fork, it only opts into the new path where complete.
-		fmt.Fprintf(os.Stderr, "husk: live-cow fork enabled for co-located child vm %q; child memfd-import pending, restoring from disk fork snapshot this pass\n", req.VMID)
+		env, err := s.liveCowChildImportEnv(req.Activate)
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "husk: live-cow child memfd import unavailable for vm %q (%v); restoring from disk fork snapshot this pass\n", req.VMID, err)
+		case env != nil:
+			childMemfdEnv = env
+			fmt.Fprintf(os.Stderr, "husk: live-cow child vm %q boots from the shared parent memfd (%s set); disk mem restore is the fallback\n", req.VMID, fork.EnvChildMemfd)
+		default:
+			fmt.Fprintf(os.Stderr, "husk: live-cow fork enabled for co-located child vm %q but no armed live-cow parent; restoring from disk fork snapshot this pass\n", req.VMID)
+		}
 	}
-	if err := s.prepareInstance(ctx, id, rootfsSrcOverride); err != nil {
+	if err := s.prepareInstance(ctx, id, rootfsSrcOverride, childMemfdEnv...); err != nil {
 		return SpawnVMResult{
 			OK:    false,
 			VMID:  req.VMID,

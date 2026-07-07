@@ -75,9 +75,16 @@ type wpForkHandler struct {
 	liveSize uint64
 	frozenFd int
 	frozen   []byte // private FROZEN image, RW MAP_SHARED
-	frozenBM []byte // 1 bit/page: which pages a child must read from FROZEN
-	pageSize uint64
-	closed   bool
+	// frozenBM is the 1-bit-per-page selector (set bit = a child must read that page
+	// from FROZEN). It is a MAP_SHARED view of frozenBMFd, a memfd, so a co-located
+	// child can reopen the SAME live region through /proc and read the CURRENT bits
+	// at attach time instead of a stale snapshot (the m2 no-leak invariant end to
+	// end: a page frozen after the import is assembled but before the child attaches
+	// is still sourced from FROZEN).
+	frozenBMFd int
+	frozenBM   []byte
+	pageSize   uint64
+	closed     bool
 
 	// uffdFile wraps the uffd so Serve's read is driven by the Go runtime poller:
 	// a blocking read(2) on the raw uffd is not interrupted when another goroutine
@@ -114,7 +121,7 @@ func newWPForkHandler(cfg WPForkConfig) (*wpForkHandler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wpfork: listen %s: %w", cfg.UDSPath, err)
 	}
-	return &wpForkHandler{cfg: cfg, ln: ln, uffd: -1, frozenFd: -1}, nil
+	return &wpForkHandler{cfg: cfg, ln: ln, uffd: -1, frozenFd: -1, frozenBMFd: -1}, nil
 }
 
 // StartWPForkHandler binds the write-protect handshake socket for a live-cow fork
@@ -164,7 +171,7 @@ func (h *wpForkHandler) Receive() error {
 	}
 
 	pageSize := regions[0].pageSizeBytes()
-	frozenFd, err := unix.MemfdCreate("mitos-frozen", unix.MFD_CLOEXEC)
+	frozenFd, err := unix.MemfdCreate(frozenMemfdName, unix.MFD_CLOEXEC)
 	if err != nil {
 		_ = unix.Close(uffdFD)
 		_ = unix.Munmap(live)
@@ -183,13 +190,34 @@ func (h *wpForkHandler) Receive() error {
 		_ = unix.Close(frozenFd)
 		return fmt.Errorf("wpfork: mmap frozen: %w", err)
 	}
+	// The frozen bitmap is backed by a memfd (not MAP_SHARED|MAP_ANONYMOUS) so a
+	// co-located child can reopen the SAME live region through /proc/<pid>/fd and
+	// read the CURRENT per-page selector at attach time. frozenBitmapName is the
+	// identity the child verifies on reopen.
 	bmBytes := frozenBitmapBytes(exp.bytes, pageSize)
-	frozenBM, err := unix.Mmap(-1, 0, int(bmBytes), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED|unix.MAP_ANONYMOUS)
+	frozenBMFd, err := unix.MemfdCreate(frozenBitmapName, unix.MFD_CLOEXEC)
 	if err != nil {
 		_ = unix.Close(uffdFD)
 		_ = unix.Munmap(live)
 		_ = unix.Munmap(frozen)
 		_ = unix.Close(frozenFd)
+		return fmt.Errorf("wpfork: memfd_create frozen bitmap: %w", err)
+	}
+	if err := unix.Ftruncate(frozenBMFd, int64(bmBytes)); err != nil {
+		_ = unix.Close(uffdFD)
+		_ = unix.Munmap(live)
+		_ = unix.Munmap(frozen)
+		_ = unix.Close(frozenFd)
+		_ = unix.Close(frozenBMFd)
+		return fmt.Errorf("wpfork: ftruncate frozen bitmap: %w", err)
+	}
+	frozenBM, err := unix.Mmap(frozenBMFd, 0, int(bmBytes), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		_ = unix.Close(uffdFD)
+		_ = unix.Munmap(live)
+		_ = unix.Munmap(frozen)
+		_ = unix.Close(frozenFd)
+		_ = unix.Close(frozenBMFd)
 		return fmt.Errorf("wpfork: mmap frozen bitmap: %w", err)
 	}
 
@@ -208,6 +236,7 @@ func (h *wpForkHandler) Receive() error {
 	h.liveSize = exp.bytes
 	h.frozenFd = frozenFd
 	h.frozen = frozen
+	h.frozenBMFd = frozenBMFd
 	h.frozenBM = frozenBM
 	h.pageSize = pageSize
 	h.mu.Unlock()
@@ -411,6 +440,85 @@ func (h *wpForkHandler) FrozenPage(pageIndex uint64) bool {
 	return testFrozenBit(h.frozenBM, pageIndex)
 }
 
+// FrozenBitmap returns a copy of the frozen bitmap at the instant of the call, so
+// a co-located child reads a stable per-page source selector while Serve keeps
+// marking pages. Nil before Receive.
+func (h *wpForkHandler) FrozenBitmap() []byte {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.frozenBM == nil {
+		return nil
+	}
+	out := make([]byte, len(h.frozenBM))
+	copy(out, h.frozenBM)
+	return out
+}
+
+// ChildImport assembles the coordinates a co-located fork child needs to boot from
+// the parent's live memory (see ChildImportProvider). It reads the parent's m1
+// export to reach the parent shared memfd, and points the child at this handler's
+// FROZEN memfd and its LIVE frozen bitmap memfd (both owned by THIS process). The
+// bitmap is passed as a live memfd, NOT a static file copy, so the child reads the
+// CURRENT per-page selector at attach time: a page this handler freezes AFTER
+// ChildImport runs but BEFORE the child attaches is still sourced from FROZEN, so
+// the resumed parent's post-fork write can never leak into the child.
+//
+// Each descriptor's identity (st_ino, st_dev) is captured here (the parent owns the
+// FROZEN and bitmap memfds directly; the guest memfd it reaches once through /proc)
+// so the child can verify on reopen that a recycled PID has not handed it a foreign
+// fd. dir is the child's node-local snapshot dir; it is validated as the trust
+// boundary but the import no longer writes any file there.
+func (h *wpForkHandler) ChildImport(dir string) (ChildMemfdImport, error) {
+	h.mu.Lock()
+	frozenFd := h.frozenFd
+	frozenBMFd := h.frozenBMFd
+	liveSize := h.liveSize
+	pageSize := h.pageSize
+	h.mu.Unlock()
+	if frozenFd < 0 || frozenBMFd < 0 || liveSize == 0 || pageSize == 0 {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport before handshake")
+	}
+	if dir == "" {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport empty dir")
+	}
+	exportRaw, err := os.ReadFile(h.cfg.MemExportPath)
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport read memfd export %s: %w", h.cfg.MemExportPath, err)
+	}
+	exp, err := parseMemfdExport(string(exportRaw))
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport %w", err)
+	}
+	parentIno, parentDev, err := procFdIdentity(exp.pid, exp.fd)
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport identify parent memfd: %w", err)
+	}
+	frozenIno, frozenDev, err := fdIdentity(frozenFd)
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport identify frozen memfd: %w", err)
+	}
+	bmIno, bmDev, err := fdIdentity(frozenBMFd)
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport identify frozen bitmap memfd: %w", err)
+	}
+	return ChildMemfdImport{
+		ParentPID: exp.pid,
+		ParentFD:  exp.fd,
+		ParentIno: parentIno,
+		ParentDev: parentDev,
+		Bytes:     exp.bytes,
+		FrozenPID: os.Getpid(),
+		FrozenFD:  frozenFd,
+		FrozenIno: frozenIno,
+		FrozenDev: frozenDev,
+		BitmapPID: os.Getpid(),
+		BitmapFD:  frozenBMFd,
+		BitmapIno: bmIno,
+		BitmapDev: bmDev,
+		PageSize:  pageSize,
+	}, nil
+}
+
 // FaultCount returns the number of write-protect faults Serve has resolved.
 func (h *wpForkHandler) FaultCount() int64 { return atomic.LoadInt64(&h.served) }
 
@@ -452,6 +560,10 @@ func (h *wpForkHandler) Close() error {
 	if h.frozenBM != nil {
 		_ = unix.Munmap(h.frozenBM)
 		h.frozenBM = nil
+	}
+	if h.frozenBMFd >= 0 {
+		_ = unix.Close(h.frozenBMFd)
+		h.frozenBMFd = -1
 	}
 	if h.frozenFd >= 0 {
 		_ = unix.Close(h.frozenFd)
