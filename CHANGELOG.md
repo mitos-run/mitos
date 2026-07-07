@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.32.1](https://github.com/mitos-run/mitos/compare/v1.32.0...v1.32.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **husk:** arm the restored source VM so the live-cow vmstate-only fork engages ([#832](https://github.com/mitos-run/mitos/issues/832)) ([#837](https://github.com/mitos-run/mitos/issues/837)) ([8e9d78a](https://github.com/mitos-run/mitos/commit/8e9d78a3173af788aa09b06023ce2949d31637f6))
+
 ## [1.32.0](https://github.com/mitos-run/mitos/compare/v1.31.0...v1.32.0) (2026-07-07)
 
 
