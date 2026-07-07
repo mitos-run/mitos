@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.32.0](https://github.com/mitos-run/mitos/compare/v1.31.0...v1.32.0) (2026-07-07)
+
+
+### Features
+
+* **husk:** install the vmstate-only-capable patched Firecracker ([#834](https://github.com/mitos-run/mitos/issues/834)) ([8972d36](https://github.com/mitos-run/mitos/commit/8972d3642f3d6fd6691f35002716f8ea6512b84b))
+* **husk:** live-cow fork snapshots vmstate only, skips the 364ms mem-file write ([#833](https://github.com/mitos-run/mitos/issues/833)) ([0c26249](https://github.com/mitos-run/mitos/commit/0c262493d4e59dc57bb00b9cf83ae4e9d53c61a0))
+* **husk:** wire live-cow fork to the vmstate-only snapshot (drops the 364ms mem write) ([#836](https://github.com/mitos-run/mitos/issues/836)) ([778ee7c](https://github.com/mitos-run/mitos/commit/778ee7c5094304fafd7fdde6bd8d3da37c4369a9))
+
 ## [1.31.0](https://github.com/mitos-run/mitos/compare/v1.30.0...v1.31.0) (2026-07-07)
 
 
