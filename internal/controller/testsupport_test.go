@@ -52,6 +52,13 @@ func BuildForkChildPodForTest(fork *v1.Sandbox, srcPod *corev1.Pod, childName st
 	return buildForkChildPod(fork, srcPod, childName, opts, scheme)
 }
 
+// CoLocatedForkVMBudgetForTest exposes coLocatedForkVMBudget to the external
+// controller_test package so the per-pod co-location budget a source husk pod
+// grants (guarantee A) can be unit-tested against the real pod builder's output.
+func CoLocatedForkVMBudgetForTest(pod *corev1.Pod) int {
+	return coLocatedForkVMBudget(pod)
+}
+
 // SetForkSnapshotForTest installs the fork-snapshot seam (tests only).
 func (r *SandboxReconciler) SetForkSnapshotForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error)) {
 	r.forkSnapshot = fn
