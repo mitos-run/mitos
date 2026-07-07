@@ -35,7 +35,9 @@ func TestCreateRejectsReplicasAboveCap(t *testing.T) {
 		t.Errorf("error is not shaped as invalid_input: %s", resp.Body)
 	}
 	var list v1.SandboxList
-	_ = c.List(context.Background(), &list)
+	if err := c.List(context.Background(), &list); err != nil {
+		t.Fatalf("list: %v", err)
+	}
 	if len(list.Items) != 0 {
 		t.Errorf("created %d sandboxes for an over-cap replicas request", len(list.Items))
 	}

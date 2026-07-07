@@ -94,6 +94,7 @@ func main() {
 	if pepper, ok := saas.KeyPepperFromEnv(); ok {
 		keyOpts = append(keyOpts, saas.WithSalt(pepper))
 		logger.Info("api key pepper configured", "env", saas.EnvKeyPepper)
+		logger.Warn("api key pepper changes the key hash input; enabling it on a deployment that already minted keys invalidates every pre-pepper key. Re-issue keys after turning it on, and configure the SAME value on the gateway and CLI.", "env", saas.EnvKeyPepper)
 	} else {
 		logger.Info("api key pepper not set; keys are hashed without a pepper", "env", saas.EnvKeyPepper)
 	}
