@@ -24,9 +24,7 @@ func (f *fakeChildImportProvider) ChildImport(dir string) (fork.ChildMemfdImport
 	if f.err != nil {
 		return fork.ChildMemfdImport{}, f.err
 	}
-	imp := f.imp
-	imp.BitmapPath = filepath.Join(dir, "mitos-frozen.bm")
-	return imp, nil
+	return f.imp, nil
 }
 
 // TestLiveCowForkGateDefaultOff proves the flag defaults off and the gate keeps
@@ -103,7 +101,9 @@ func TestLiveCowChildImportEnvNoParent(t *testing.T) {
 func TestLiveCowChildImportEnvArmed(t *testing.T) {
 	dir := t.TempDir()
 	prov := &fakeChildImportProvider{imp: fork.ChildMemfdImport{
-		ParentPID: 4242, ParentFD: 5, Bytes: 256 << 20, FrozenPID: 4243, FrozenFD: 6, PageSize: 4096,
+		ParentPID: 4242, ParentFD: 5, ParentIno: 111, ParentDev: 42, Bytes: 256 << 20,
+		FrozenPID: 4243, FrozenFD: 6, FrozenIno: 222, FrozenDev: 42,
+		BitmapPID: 4243, BitmapFD: 7, BitmapIno: 333, BitmapDev: 42, PageSize: 4096,
 	}}
 	s := New(firecracker.VMConfig{}, Options{MultiVM: true, LiveCowFork: true})
 	s.SetLiveCowParent(prov)
@@ -128,7 +128,7 @@ func TestLiveCowChildImportEnvArmed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse export file %q: %v", string(raw), err)
 	}
-	if imp.ParentPID != 4242 || imp.Bytes != 256<<20 || imp.BitmapPath != filepath.Join(dir, "mitos-frozen.bm") {
+	if imp.ParentPID != 4242 || imp.Bytes != 256<<20 || imp.BitmapFD != 7 || imp.BitmapIno != 333 {
 		t.Errorf("export line lost fields: %+v", imp)
 	}
 }

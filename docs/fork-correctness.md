@@ -177,7 +177,17 @@ it does not read the guest RAM back off disk, which is the sub-100ms win.
 
 The parent's armed WP handler publishes the child's coordinates as a
 `ChildMemfdImport` (`ChildImport`: the parent memfd from the m1 export, the FROZEN
-memfd, a snapshot of the frozen bitmap, the page size). The husk writes that as the
+memfd, the handler's LIVE frozen bitmap memfd, and the page size). The bitmap is
+passed as a live memfd, NOT a static snapshot: the child re-maps it `MAP_SHARED` and
+reads the CURRENT per-page selector at attach time, so a page the handler freezes
+AFTER the import is assembled but BEFORE the child attaches is still sourced from
+FROZEN (the no-leak invariant holds end to end across that window, not just at the
+instant the import was built). Each memfd also carries its `(st_ino, st_dev)`
+identity, captured by the parent that owns it; the child re-`fstat`s the descriptor
+it reopens through `/proc/<pid>/fd/<fd>` and refuses any mismatch or non-memfd
+target, so an exporter that exited with its PID recycled to an unrelated process
+cannot make the child attach a foreign descriptor (fail closed to the disk restore).
+The husk writes that as the
 `FIRECRACKER_MITOS_CHILD_MEMFD` export file and sets the env on the child
 Firecracker (`Stub.liveCowChildImportEnv`, `SpawnVM`). The child Firecracker's
 memory backing comes from the memfd + FROZEN overlay while its CPU + device vmstate
@@ -194,9 +204,18 @@ real FROZEN image produced by the real WP handler, and asserts the child boots f
 the SHARED memfd, NOT disk, with BOTH halves of the invariant, NO LEAK (a page the
 resumed parent overwrote is read from FROZEN at its fork-time value, never the
 parent's post-fork write) and INHERITANCE (an untouched page is read live from the
-shared memfd). It also measures the child memory attach and asserts it is sub-100ms
-AND faster than a same-size disk mem-file restore baseline. On a runner whose kernel
-lacks write-protect it self-skips with the m2 precondition reason. The contract and
+shared memfd). It also measures the child memory attach and asserts it is sub-100ms;
+it records a same-size disk mem-file restore as a context log line ONLY, not an
+assertion (at this micro scale that baseline faults from a just-written warm page
+cache, so it is a RAM-speed read too; the real prod win is the child faulting from
+the parent's resident RAM via CoW plus an O(1) attach at scale, measured on prod).
+On a runner whose kernel lacks write-protect it self-skips with the m2 precondition
+reason. A sibling KVM test `TestLiveCowChildImportRefreshesFrozenBitmap` pins the
+LIVE-bitmap timing: it assembles the import, THEN has the parent overwrite a page,
+THEN attaches, and asserts the child still reads the fork-time bytes from FROZEN (a
+stale bitmap snapshot would leak the post-import write; the test demonstrates that
+leak in-log against a t0 snapshot and proves the production live-bitmap attach does
+not). The contract and
 env plumbing are unit-tested off KVM (`internal/fork`
 `TestChildMemfdEnv`/`TestChildMemfdImportRoundTrip`/`TestParseChildMemfdImportRejectsBad`,
 `internal/husk`

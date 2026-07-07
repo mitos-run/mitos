@@ -44,10 +44,11 @@ type WPForkHandle interface {
 	// FROZEN memfd. A copy so the caller reads a stable snapshot while Serve keeps
 	// marking pages. Nil before Receive.
 	FrozenBitmap() []byte
-	// ChildImport writes the current frozen bitmap into dir and returns the
-	// coordinates a co-located fork child needs to boot its guest RAM from the
-	// parent's live memory: the parent shared memfd (from the m1 export), this
-	// handler's FROZEN memfd, that bitmap file, and the page size. It is the
+	// ChildImport returns the coordinates a co-located fork child needs to boot its
+	// guest RAM from the parent's live memory: the parent shared memfd (from the m1
+	// export), this handler's FROZEN memfd, and this handler's LIVE frozen bitmap
+	// memfd (so the child reads the CURRENT per-page selector at attach time, not a
+	// stale copy), plus each descriptor's identity and the page size. It is the
 	// ChildImportProvider the husk consults on a live-cow child spawn. Fails before
 	// Receive (no memfd/bitmap yet).
 	ChildImport(dir string) (ChildMemfdImport, error)

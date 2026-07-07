@@ -580,15 +580,25 @@ Trust and residual, stated honestly:
   own exported guest memfd plus a per-page overlay from the handler's PRIVATE FROZEN
   memfd (`internal/fork/childmemfd*.go`, `fork.ComposeChildFromImport`). The child
   reads ONLY the parent's own m1-exported memfd (same pod/node trust boundary, the
-  SAME `/proc/<pid>/fd` read the parent-side handler already uses) and the handler's
-  FROZEN memfd; `MAP_PRIVATE` means every child write is copy-on-write and invisible
-  to the parent and to sibling children, so it opens NO cross-VM write channel and no
-  new tenant-facing input (the coordinates ride the host-local
-  `FIRECRACKER_MITOS_CHILD_MEMFD` export file the husk writes under the node-local
-  fork snapshot dir, not any guest-reachable surface). It performs no host-path write.
-  The per-page FROZEN selector preserves the point-in-time-T invariant end to end
-  (KVM-tested no-leak + inheritance in `TestLiveCowChildBootsFromSharedMemfd`), so
-  child memory independence holds exactly as on the disk-fork path. The disk `mem`
+  SAME `/proc/<pid>/fd` read the parent-side handler already uses), the handler's
+  FROZEN memfd, and the handler's LIVE frozen-bitmap memfd; `MAP_PRIVATE` means every
+  child write is copy-on-write and invisible to the parent and to sibling children,
+  so it opens NO cross-VM write channel and no new tenant-facing input (the
+  coordinates ride the host-local `FIRECRACKER_MITOS_CHILD_MEMFD` export file the husk
+  writes under the node-local fork snapshot dir, not any guest-reachable surface). It
+  performs no host-path write. The per-page FROZEN selector preserves the
+  point-in-time-T invariant end to end, and crucially the bitmap is read LIVE
+  (`MAP_SHARED` of the bitmap memfd) at attach time, not from a snapshot taken when
+  the import was assembled, so a page the parent freezes between import and attach is
+  still sourced from FROZEN and the resumed parent's post-fork write cannot leak into
+  the child (KVM-tested no-leak + inheritance in `TestLiveCowChildBootsFromSharedMemfd`
+  and the leak-timing `TestLiveCowChildImportRefreshesFrozenBitmap`). Each reopened
+  descriptor is IDENTITY-VERIFIED before it is mapped: the `/proc/<pid>/fd/<fd>` target
+  must be a memfd (of the expected name for the FROZEN and bitmap memfds this handler
+  owns) AND its `(st_ino, st_dev)` must match the identity the parent captured for the
+  descriptor it owns. So an exporter that exited with its PID recycled to an unrelated
+  process cannot make the child attach a foreign descriptor: the check fails closed and
+  the child falls back to the disk restore. The disk `mem`
   path is still passed to `LoadSnapshot`, so the child falls back to the disk restore
   when the import is unavailable (never breaks a fork). Pending: the child Firecracker
   restore path that READS this env is the remaining smallest Firecracker patch (the

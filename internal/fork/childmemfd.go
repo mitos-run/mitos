@@ -2,6 +2,7 @@ package fork
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -52,43 +53,105 @@ const EnvChildMemfd = "FIRECRACKER_MITOS_CHILD_MEMFD"
 // build its point-in-time guest memory from the parent's live memory: where to
 // reach the parent's shared guest memfd (ParentPID/ParentFD via /proc), the total
 // guest size, where to reach the handler's private FROZEN memfd (FrozenPID/FrozenFD
-// via /proc), the path to the frozen bitmap (which pages to source from FROZEN),
-// and the page size. It is written to the EnvChildMemfd file by the parent's WP
-// handler (ChildImport) and consumed by the child restore (ComposeChildFromImport
-// on the Go side; the Firecracker child-restore patch reads the same line).
+// via /proc), where to reach the handler's LIVE frozen bitmap memfd
+// (BitmapPID/BitmapFD via /proc; the child mmaps it MAP_SHARED so it reads the
+// CURRENT per-page source selector at attach time, not a stale snapshot taken when
+// the import was assembled), and the page size.
+//
+// Each memfd also carries its identity (st_ino + st_dev, captured by the parent
+// which OWNS the real descriptor). The child re-fstats the descriptor it reopens
+// and rejects any mismatch, so an exporter that exited and had its PID recycled to
+// an unrelated process cannot trick the child into mapping a foreign descriptor
+// (fail closed). Inode 0 is never a real memfd, so a zero identity is rejected.
+//
+// It is written to the EnvChildMemfd file by the parent's WP handler (ChildImport)
+// and consumed by the child restore (ComposeChildFromImport on the Go side; the
+// Firecracker child-restore patch reads the same line).
 type ChildMemfdImport struct {
-	ParentPID  int
-	ParentFD   int
-	Bytes      uint64
-	FrozenPID  int
-	FrozenFD   int
-	BitmapPath string
-	PageSize   uint64
+	ParentPID int
+	ParentFD  int
+	ParentIno uint64
+	ParentDev uint64
+	Bytes     uint64
+	FrozenPID int
+	FrozenFD  int
+	FrozenIno uint64
+	FrozenDev uint64
+	BitmapPID int
+	BitmapFD  int
+	BitmapIno uint64
+	BitmapDev uint64
+	PageSize  uint64
 }
 
-// ExportLine renders the import as the single line the EnvChildMemfd file carries:
-// "<parentPID> <parentFD> <bytes> <frozenPID> <frozenFD> <pageSize> <bitmapPath>".
-// The bitmap path is last so it may contain no spaces up to the final field; the
-// husk derives it under the parent VM workdir, which is space-free.
+// exportFields is the number of space-separated numeric fields ExportLine emits
+// and ParseChildMemfdImport requires. All fields are non-negative integers, so the
+// line has NO variable-length path component: there is nothing for a stray space to
+// truncate, and a strict field count plus per-field integer parse rejects any
+// malformed or trailing input (finding: fmt.Sscanf %s could silently truncate a
+// path at the first space).
+const exportFields = 14
+
+// ExportLine renders the import as the single all-numeric line the EnvChildMemfd
+// file carries. The order matches ParseChildMemfdImport and the Firecracker
+// child-restore patch contract.
 func (c ChildMemfdImport) ExportLine() string {
-	return fmt.Sprintf("%d %d %d %d %d %d %s",
-		c.ParentPID, c.ParentFD, c.Bytes, c.FrozenPID, c.FrozenFD, c.PageSize, c.BitmapPath)
+	return fmt.Sprintf("%d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+		c.ParentPID, c.ParentFD, c.ParentIno, c.ParentDev,
+		c.Bytes,
+		c.FrozenPID, c.FrozenFD, c.FrozenIno, c.FrozenDev,
+		c.BitmapPID, c.BitmapFD, c.BitmapIno, c.BitmapDev,
+		c.PageSize)
 }
 
 // ParseChildMemfdImport parses the ExportLine the parent's WP handler wrote to the
 // EnvChildMemfd file. Pure, so both the Go child-restore wrapper and unit tests
-// consume it without a live handler; the /proc mmap it feeds is Linux-only.
+// consume it without a live handler; the /proc mmap it feeds is Linux-only. It
+// splits on whitespace and requires EXACTLY exportFields numeric tokens, so a line
+// with a truncated, extra, or non-numeric field is rejected rather than silently
+// accepted.
 func ParseChildMemfdImport(s string) (ChildMemfdImport, error) {
-	var c ChildMemfdImport
-	n, err := fmt.Sscanf(strings.TrimSpace(s), "%d %d %d %d %d %d %s",
-		&c.ParentPID, &c.ParentFD, &c.Bytes, &c.FrozenPID, &c.FrozenFD, &c.PageSize, &c.BitmapPath)
-	if err != nil || n != 7 {
-		return ChildMemfdImport{}, fmt.Errorf("parse child memfd import %q: want \"<parentPID> <parentFD> <bytes> <frozenPID> <frozenFD> <pageSize> <bitmapPath>\": %w", s, err)
+	fields := strings.Fields(strings.TrimSpace(s))
+	if len(fields) != exportFields {
+		return ChildMemfdImport{}, fmt.Errorf("parse child memfd import %q: want %d space-separated numeric fields, got %d", s, exportFields, len(fields))
 	}
-	if c.ParentPID <= 0 || c.ParentFD < 0 || c.Bytes == 0 || c.FrozenPID <= 0 || c.FrozenFD < 0 || c.PageSize == 0 || c.BitmapPath == "" {
-		return ChildMemfdImport{}, fmt.Errorf("parse child memfd import %q: non-positive or empty field", s)
+	var v [exportFields]uint64
+	for i, f := range fields {
+		u, err := strconv.ParseUint(f, 10, 64)
+		if err != nil {
+			return ChildMemfdImport{}, fmt.Errorf("parse child memfd import %q: field %d (%q): %w", s, i, f, err)
+		}
+		v[i] = u
+	}
+	c := ChildMemfdImport{
+		ParentPID: int(v[0]), ParentFD: int(v[1]), ParentIno: v[2], ParentDev: v[3],
+		Bytes:     v[4],
+		FrozenPID: int(v[5]), FrozenFD: int(v[6]), FrozenIno: v[7], FrozenDev: v[8],
+		BitmapPID: int(v[9]), BitmapFD: int(v[10]), BitmapIno: v[11], BitmapDev: v[12],
+		PageSize:  v[13],
+	}
+	if err := c.validate(); err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("parse child memfd import %q: %w", s, err)
 	}
 	return c, nil
+}
+
+// validate rejects an import with a non-positive pid, negative fd, zero size, zero
+// page size, or a zero memfd inode identity (no real memfd has inode 0, so a zero
+// identity means the parent could not capture it and the child must fail closed
+// rather than attach an unverifiable descriptor).
+func (c ChildMemfdImport) validate() error {
+	switch {
+	case c.ParentPID <= 0 || c.FrozenPID <= 0 || c.BitmapPID <= 0:
+		return fmt.Errorf("non-positive pid")
+	case c.ParentFD < 0 || c.FrozenFD < 0 || c.BitmapFD < 0:
+		return fmt.Errorf("negative fd")
+	case c.Bytes == 0 || c.PageSize == 0:
+		return fmt.Errorf("zero guest size or page size")
+	case c.ParentIno == 0 || c.FrozenIno == 0 || c.BitmapIno == 0:
+		return fmt.Errorf("zero memfd inode identity (fail closed)")
+	}
+	return nil
 }
 
 // ChildMemfdEnv returns the environment entries a co-located live-cow CHILD
@@ -105,11 +168,14 @@ func ChildMemfdEnv(exportPath string) []string {
 }
 
 // ChildImportProvider is implemented by the parent's armed live-cow WP handler
-// (WPForkHandle). It yields, into dir, the coordinates a co-located child needs to
-// boot from the parent's live memory: it writes the current frozen bitmap into dir
-// and returns the ChildMemfdImport pointing at the parent memfd, the FROZEN memfd,
-// and that bitmap file. The husk consults it on a co-located fork-child spawn; a
-// nil provider (no armed parent) means the child falls back to the disk restore.
+// (WPForkHandle). It yields the coordinates a co-located child needs to boot from
+// the parent's live memory: the ChildMemfdImport pointing at the parent shared
+// memfd, the FROZEN memfd, and the handler's LIVE frozen bitmap memfd (so the child
+// reads the CURRENT per-page source selector at attach time, not a stale copy). The
+// dir argument names the child's node-local snapshot dir (the trust boundary the
+// child already restores from); the husk consults the provider on a co-located
+// fork-child spawn; a nil provider (no armed parent) means the child falls back to
+// the disk restore.
 type ChildImportProvider interface {
 	ChildImport(dir string) (ChildMemfdImport, error)
 }
