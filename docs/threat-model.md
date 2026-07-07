@@ -129,6 +129,14 @@ open, with a severity on the review rows) is preserved throughout.
 | controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd, husk pods |
 | Snapshot artifacts | files under `/var/lib/mitos` on each node | - | forkd builds them; husk pods mount and execute them as memory images |
 
+### Operator-selected AppArmor confinement
+
+The Helm chart leaves `forkd.appArmorProfile` unset by default, so AppArmor
+selection remains with the container runtime. Operators can explicitly select
+`Unconfined` or a pre-loaded `Localhost` profile for forkd. `Unconfined` removes
+AppArmor confinement, while a Localhost profile must be reviewed, loaded, and
+kept consistent on every eligible KVM node.
+
 ## 0. Default execution surface: the unprivileged husk pod (issue #18)
 
 Pod-native execution is now the DEFAULT (the controller runs
@@ -390,6 +398,28 @@ on delete; the child pods are owner-ref'd to the fork and reaped by Kubernetes G
 Residual: a compromised controller can drive a fork-snapshot of any husk pod it
 can reach, the same residual already stated for activate (Surface 2).
 
+Co-located fork child (MultiVMFork routing, `--multi-vm-fork`): when the source
+pod runs a `--multi-vm` stub, the controller may bring a fork child up as an
+ADDITIONAL VM INSIDE the source pod (the `SpawnVM` control op) instead of a new
+child pod. The co-located child restores from the SAME node-local fork snapshot
+`<dataDir>/forks/<fork-id>` (mem + vmstate + the frozen source rootfs at
+`<fork-id>/rootfs.ext4`) that the new-pod child restores from, carried in the
+`SpawnVM` request as `Activate.ForkSnapshot=true` with `SnapshotDir` pointing at
+that dir. It keeps the identical trust posture: the fork snapshot is NOT
+content-addressed, so the co-located activate skips the content-addressed verify
+exactly as the new-pod child does with `--allow-unverified-snapshots` (the
+artifact is root-owned and never tenant-writable, and re-hashing would gate on a
+digest a live fork does not have). Per-VM independence holds: each co-located
+child gets its OWN per-activation rootfs CoW clone of the frozen source rootfs and
+its OWN bearer token, so its guest writes never cross to a sibling or back to the
+source, which shares only the read-only fork snapshot as a restore image. The
+per-VM in-pod egress filter (`internal/husk` `deriveVMNetwork` + `applyEgressFilter`)
+and the full fail-closed RNG/clock reseed handshake run for the co-located child
+too, so a co-located child is never less isolated than a one-pod-per-child fork.
+Before this fix the co-located child activated from the pool TEMPLATE snapshot, so
+it inherited NEITHER the parent's memory NOR its disk: a correctness violation, not
+an isolation gap, now closed.
+
 ### Husk workspace hydrate/dehydrate (W4 transport on the husk path)
 
 A bound claim's `/workspace` is persisted and restored over TWO new control ops on
@@ -448,6 +478,49 @@ against eviction are the architectural fix, tracked in #744; they are a change t
 the warm-pool/shared-CAS model (a warm pod is built before a claim binds, so its
 eventual workspace is unknown at mount time) and need cluster-e2e and a named
 security reviewer, so they are deliberately not rushed here.
+
+### Husk spawn-vm (add a VM to a running pod, multi-VM path)
+
+A `spawn-vm` control op asks a RUNNING husk pod to bring up an ADDITIONAL
+same-tenant VM (a new vmID) INSIDE the same pod, using the experimental
+multi-VM-per-pod engine (`Options.MultiVM`, #764). It rides the SAME
+op-dispatched mTLS channel as activate, fork-snapshot, and the workspace ops,
+authorized to the controller identity ONLY (`internal/husk.ServeTLS` plus
+`AuthorizeControllerIdentity`); the auth is NOT weakened for it. The request
+carries the new VM's id plus the same activation inputs an activate takes
+(snapshot dir/source and expected digest, per-fork network, egress policy and
+allowlists, inbound policy, env, secrets, token), so like activate it CAN carry
+tenant SECRETS; those are never logged. The stub validates the vmID with the
+`checkVMID` allowlist BEFORE deriving any per-VM socket, workdir, tap, or /30 from
+it, so a traversing id can never spawn a VM, then runs the per-VM prepare +
+activate (`internal/husk/multivm.go` `SpawnVM` -> `prepareInstance` +
+`activateInstance`), which fails closed per instance and never disturbs a sibling.
+The op FAILS CLOSED on the flag: a stub NOT started with `--multi-vm` refuses
+spawn-vm, so a single-VM pod is never driven to host a second VM. The spawned VM
+lands on its OWN tap + /30 + default-deny egress chain derived from the vmID (the
+per-VM network isolation in the multi-VM-per-pod row of Surface 2, Guest to guest), so a
+co-located VM's egress cannot cross into a sibling's. This is DEFAULT OFF. The
+controller CAN now drive it behind its own default-off flag (`--multi-vm-fork`,
+`SandboxReconciler.MultiVMFork`): when on AND the source husk pod is multi-VM
+capable (its stub runs `--multi-vm`, recorded by the `mitos.run/multi-vm` pod
+label), a hosted fork child is spawned as an ADDITIONAL VM inside the SOURCE pod
+instead of a new child pod (`internal/controller/sandboxfork_controller.go`
+`spawnForkChildInSourcePod`), threading the SAME snapshot + network + egress posture
+the new-pod fork child inherits and reusing the SAME mTLS control channel and
+fork-snapshot flow; the child's `status.pod`/`status.vmId`/`status.node` record the
+shared host. The flag is DEFAULT OFF, and off is byte-for-byte the new-pod path, so
+the shipped surface is unchanged: nothing spawns a second VM in production today. A
+non-capable source silently falls back to the new-pod path, and a spawn failure
+fails toward a clear pending (logged, requeued), never a silent hang. The
+CONSERVATIVE increment caps co-location per pod at a small fixed number
+(`maxCoLocatedForkVMsPerPod`) and spills the rest to new pods; the real per-pod and
+node MEMORY ACCOUNTING that bounds how many VMs a pod may hold (so a fork can never
+overcommit a host) is a named follow-up (L1.7b). Residual: a compromised controller
+can drive a spawn-vm against any multi-VM husk pod it can reach, the same residual
+already stated for activate and fork-snapshot (Surface 2); and it inherits the
+shared-pod-netns residual of the multi-VM-per-pod mode (Surface 2, Guest to guest),
+which is why it stays flag-gated behind that mode's per-VM tap + /30 isolation and a
+named security review before it ships.
 
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin
 (`cmd/kvm-device-plugin`, `internal/deviceplugin`): the pod requests
@@ -826,6 +899,7 @@ The primary boundary is KVM hardware virtualization via Firecracker.
 | Control | Status | Detail |
 |---|---|---|
 | Separate KVM VMs per sandbox | **mitigated** | No two sandboxes share a kernel. |
+| Multi-VM-per-pod: co-located same-tenant VMs share ONE pod netns | **flag-gated, default off; per-VM tap + /30 isolation** | The experimental multi-VM-per-pod mode (`Options.MultiVM`, #764) hosts several same-tenant CoW forks inside ONE husk pod instead of one pod per VM, so those VMs share the pod's single network namespace instead of each getting its own. Isolation between the co-located VMs is then by the SAME mechanism forkd's shared host netns already uses across sandboxes: each VM gets its OWN tap and its OWN /30 point-to-point link derived deterministically from its vmID (`internal/husk/multivm.go` `deriveVMNetwork` + `internal/netconf` `DeriveInPodSecondaryLink`; secondary /30s live in a dedicated in-pod `100.64.0.0/16` space so they can never alias the primary VM's node-assigned link), its OWN default-deny nftables egress chain with the unconditional metadata block, and `ip saddr` anti-spoof pinning, so one VM's egress cannot cross into a sibling's tap or borrow its allowlist. This is a NETWORK SURFACE MOVE from the shipped model (one VM per pod netns, a kernel boundary between VMs): behind this flag the boundary between two same-tenant VMs in a pod is per-tap dispatch, not a netns boundary, the same defense-in-depth posture and residuals as forkd's host-netns row in section 4. The mode is DEFAULT OFF and no production caller (nor the controller) sets it, so the shipped surface is unchanged. Proven by `internal/husk` mock-level tests (distinct tap/IP/gateway/MAC per vmID) and a KVM firecracker-test that boots two real Firecrackers in one pod each exec-ing over its own vsock; the per-VM DNS-proxy fan-out is deferred (multi-VM egress is IP-allowlist only until L1.4b), so name-based egress is disabled in this mode rather than shared. |
 | raw-forkd: forks share ONE writable rootfs inode (cross-fork filesystem channel) | **fixed (per-fork rootfs CoW) on raw-forkd** | Previously, on the raw-forkd fork path the template rootfs was hard-linked into each fork's chroot and the rootfs drive was attached with `readOnly=false` (`internal/firecracker/template.go` `AddDrive("rootfs", templateRootfs, false, true)`) and NEVER rebound, so all forks of one template on a node shared a SINGLE writable rootfs inode: a write by one fork was visible to its siblings (and across tenants, since snapshots are node-flat), a cross-fork filesystem read/write channel and a corruption vector. FIXED: `internal/fork/engine.go` now gives each fork its OWN copy-on-write clone of the template rootfs (`prepareForkRootfs` reflink-clones the template rootfs to `<dataDir>/sandboxes/<id>/rootfs.ext4` through the SAME `volume.Backend.ReflinkCopy` owner the husk path uses), loads the snapshot PAUSED (`resume=false`), rebinds the baked `rootfs` drive to that per-fork clone with `PatchDrive` while the guest is frozen, then `Resume`s, exactly mirroring the husk `Stub.Prepare`/`Stub.Activate` fix (section 0 surface 3). The template rootfs is now the READ-ONLY CoW SOURCE; no two forks, and no fork and the source, ever write the same rootfs path. The per-fork clone is hard-linked into the jailer chroot (never the shared template) and reaped with the sandbox dir at Terminate. Proven by `internal/fork/rootfs_cow_test.go` (distinct backing paths, distinct inodes, and a write in one fork's rootfs not visible in a sibling or the template); real-VM cross-fork isolation is KVM-gated (firecracker-test). Residual: raw-forkd is STILL not for untrusted multi-tenant for the OTHER reason below (node-flat snapshots); the privileged-DaemonSet and jailer-disabled reasons are closed since #352 (forkd is non-privileged with the jailer enabled). |
 | CoW page sharing side channels | **open** | All forks of a snapshot share read-only pages via `mmap(MAP_PRIVATE)` of the same mem file. Flush+Reload-style attacks across forks of the *same tenant's* snapshot are in scope to document; cross-tenant page sharing must be prevented by never sharing snapshot files across trust boundaries. Not yet enforced anywhere. |
 | KSM | **open** | We must mandate KSM off on hosts (we control the reference platform). Not yet documented in any platform guide or checked by forkd at startup. |
@@ -1363,6 +1437,7 @@ CDP.
 | Boundary | Status | Mechanism |
 |---|---|---|
 | Image provenance (controller, forkd, husk-stub) | mitigated for published releases | cosign keyless signing + SPDX SBOM attestation, bound to the image digest, produced by `.github/workflows/publish.yaml`; consumer verification in docs/supply-chain.md. |
+| Patched Firecracker VMM provenance (forkd, husk-stub) | mitigated | The forkd and husk-stub images ship a Mitos-patched `firecracker` (live-fork: memfd/MAP_SHARED guest memory + UFFD write-protect) instead of the stock upstream binary; the stock jailer is unchanged. The patched binary is NOT a general-CDN download: it is built reproducibly in the `mitos-run/firecracker` fork on branch `ci/build-patched-fc` via `.github/workflows/build-patched-fc.yml` (built commit `531a487cf69898a05091d4c7e5f48bec3132309b`) and published as a GitHub release asset (`mitos-fc-uffd-wp-v1.15.0`). `hack/install-firecracker-patched.sh` fetches it from a SINGLE pinned URL and verifies it against a pinned sha256 (`0209700d794acb7b77a919c0aa50506b2186642d80e5c0d13220ee51003b823b`, 5,215,320 bytes) BEFORE install AND re-verifies the on-disk binary after, failing the build CLOSED on any mismatch, so a compromised release or a network substitution cannot install a different VMM. It reports `firecracker --version` = v1.15.0 (same as the stock jailer, so forkd's version-match check still passes) and is behaviour-identical to stock Firecracker v1.15.0 UNLESS `FIRECRACKER_MITOS_SHARED_MEM` or `FIRECRACKER_MITOS_WP_UDS` are set at runtime; this PR sets neither anywhere (the live-fork wiring is a later milestone), so the runtime attack surface is UNCHANGED from stock until that gate is turned on. The swap is a single COPY + RUN per image and is trivially revertable (drop it and the stock upstream firecracker from `hack/install-firecracker.sh` remains). Residual: the patched build does not yet carry cosign/SBOM attestation of its own (tracked with the image-provenance follow-up); trust rests on the pinned sha256 plus the reproducible fork build. |
 | Image CVEs | partial | Trivy scans the built images on every PR for HIGH/CRITICAL fixable findings (ADVISORY today: reported, not yet gating, pending base-image remediation); govulncheck is the BLOCKING gate for Go call-graph-reachable vulnerabilities; base-image and dependency bumps arrive via dependabot. Runtime re-scan of long-lived published tags is not yet automated. |
 | Guest kernel currency | partial | The shipped vmlinux is pinned to an exact version (docs/kernel-cve.md) and validated end to end by the KVM workflow; CVE watch is a documented manual process, not an automated feed. |
 | Guest kernel integrity at stage time | partial | The Helm kernel-stage init container downloads the guest kernel and, when `kernelProvisioner.kernelSha256` is set, verifies the staged file against that digest and FAILS CLOSED on mismatch (covering both a fresh download and an already-cached file), so a swapped upstream object or a MITMed fetch cannot boot a backdoored kernel fleet-wide. The digest is empty by default (a warning is logged); operators should pin it. The privileged forkd, kvm-device-plugin, and kernel-stage pods set `automountServiceAccountToken: false` since none call the Kubernetes API. |

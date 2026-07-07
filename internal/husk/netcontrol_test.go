@@ -187,6 +187,152 @@ func TestServeTLSDispatchesForkSnapshot(t *testing.T) {
 	}
 }
 
+// spawnVMClient runs the controller-side spawn-vm exchange directly (mirroring
+// internal/controller.SpawnVMOnHusk, kept here so the husk test does not import
+// the controller). It dials over mTLS, writes the op + request, reads the result.
+func spawnVMClient(t *testing.T, addr string, clientConf *tls.Config, req SpawnVMRequest) (SpawnVMResult, error) {
+	t.Helper()
+	dialer := &tls.Dialer{Config: clientConf}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return SpawnVMResult{}, err
+	}
+	defer conn.Close()
+	if err := WriteControlOp(conn, OpSpawnVM); err != nil {
+		return SpawnVMResult{}, err
+	}
+	if err := WriteSpawnVMRequest(conn, req); err != nil {
+		return SpawnVMResult{}, err
+	}
+	return ReadSpawnVMResult(conn)
+}
+
+// TestServeTLSDispatchesSpawnVM proves the spawn-vm control op end to end: a
+// SpawnVMRequest written by the client is read by the server dispatch and drives
+// prepareInstance + activateInstance for the named vmID on a MultiVM stub, so an
+// ADDITIONAL same-tenant VM comes up in the running pod and the result carries its
+// vsock path.
+func TestServeTLSDispatchesSpawnVM(t *testing.T) {
+	p := newNetTestPKI(t)
+	vms := map[string]*fakeVMM{}
+	stub := newMultiVMTestStub(t, vms)
+	// The pod is already serving its primary VM.
+	if err := stub.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if _, err := stub.Activate(context.Background(), ActivateRequest{SnapshotDir: "/snap"}); err != nil {
+		t.Fatalf("Activate default: %v", err)
+	}
+
+	addr, stop := startServer(t, stub, p)
+	defer stop()
+
+	const second = "fork-7"
+	res, err := spawnVMClient(t, addr, p.clientConf(t, p.ctrlCert), SpawnVMRequest{
+		VMID:     second,
+		Activate: ActivateRequest{SnapshotDir: "/snap"},
+	})
+	if err != nil {
+		t.Fatalf("spawn-vm over mTLS: %v", err)
+	}
+	if !res.OK {
+		t.Fatalf("spawn-vm not OK: %q", res.Error)
+	}
+	if res.VsockPath == "" {
+		t.Fatalf("spawn-vm result missing vsock path: %+v", res)
+	}
+	if res.VMID != second {
+		t.Fatalf("spawn-vm result VMID = %q, want %q", res.VMID, second)
+	}
+	// The additional VM prepared + activated in the pod, its own instance.
+	if got := stub.instances[vmID(second)].state; got != StateActive {
+		t.Fatalf("spawned instance state = %s, want active", got)
+	}
+	// The primary VM is undisturbed and the spawned VM owns a distinct VMM.
+	if got := stub.instances[defaultVMID].state; got != StateActive {
+		t.Fatalf("primary instance state = %s, want active", got)
+	}
+	if _, ok := vms["husk-test-fork-7"]; !ok {
+		t.Fatalf("spawned vmID must derive a distinct per-VM config ID, got keys %v", vms)
+	}
+}
+
+// TestServeTLSSpawnVMRejectedOnSingleVMStub proves the fail-closed flag gate: a
+// spawn-vm op against a stub NOT running in multi-VM mode is refused, and no VM is
+// spawned. The single-VM pod owns exactly one VM and must never be driven to host
+// a second over the wire.
+func TestServeTLSSpawnVMRejectedOnSingleVMStub(t *testing.T) {
+	p := newNetTestPKI(t)
+	stub := newTestStubWithNotifier(t, &fakeVMM{}, readyOK, &fakeNotifier{})
+	if stub.multiVM {
+		t.Fatal("newTestStubWithNotifier must be single-VM")
+	}
+	if err := stub.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	addr, stop := startServer(t, stub, p)
+	defer stop()
+
+	res, err := spawnVMClient(t, addr, p.clientConf(t, p.ctrlCert), SpawnVMRequest{
+		VMID:     "fork-7",
+		Activate: ActivateRequest{SnapshotDir: "/snap"},
+	})
+	if err != nil {
+		t.Fatalf("spawn-vm exchange: %v", err)
+	}
+	if res.OK {
+		t.Fatalf("spawn-vm on a single-VM stub must fail closed, got OK: %+v", res)
+	}
+	if !strings.Contains(res.Error, "multi-VM") {
+		t.Fatalf("spawn-vm rejection must name the multi-VM gate, got %q", res.Error)
+	}
+	// No instances scaffold is allocated on the single-VM path, so nothing spawned.
+	if stub.instances != nil {
+		t.Fatalf("single-VM stub must not spawn a VM (instances = %v)", stub.instances)
+	}
+	// The pod's one VM is undisturbed by the refused spawn.
+	if stub.State() != StateDormant {
+		t.Fatalf("single-VM pod state = %s, want dormant (refused spawn must not touch it)", stub.State())
+	}
+}
+
+// TestServeTLSSpawnVMRejectsInvalidVMID proves an unsafe vmID is refused
+// fail-closed by the checkVMID gate before any per-VM path is derived from it, so
+// a traversing id can never spawn a VM over the control channel.
+func TestServeTLSSpawnVMRejectsInvalidVMID(t *testing.T) {
+	p := newNetTestPKI(t)
+	vms := map[string]*fakeVMM{}
+	stub := newMultiVMTestStub(t, vms)
+	addr, stop := startServer(t, stub, p)
+	defer stop()
+
+	res, err := spawnVMClient(t, addr, p.clientConf(t, p.ctrlCert), SpawnVMRequest{
+		VMID:     "../evil",
+		Activate: ActivateRequest{SnapshotDir: "/snap"},
+	})
+	if err != nil {
+		t.Fatalf("spawn-vm exchange: %v", err)
+	}
+	if res.OK {
+		t.Fatalf("spawn-vm with an unsafe vmID must fail closed, got OK: %+v", res)
+	}
+	if !strings.Contains(res.Error, "invalid vm id") {
+		t.Fatalf("spawn-vm rejection must name the invalid vm id, got %q", res.Error)
+	}
+	// No instance was created for the unsafe id, and no VM was started for it.
+	stub.mu.Lock()
+	_, exists := stub.instances["../evil"]
+	stub.mu.Unlock()
+	if exists {
+		t.Fatal("an instance was created for an unsafe vmID")
+	}
+	if len(vms) != 0 {
+		t.Fatalf("no VMM must start for a rejected vmID, got %v", vms)
+	}
+}
+
 func TestServeTLSDispatchesDehydrateAndHydrateWorkspace(t *testing.T) {
 	// A serving stub holding an ACTIVE fake VM answers dehydrate-workspace then
 	// hydrate-workspace over the mTLS control channel: the dehydrate captures the
