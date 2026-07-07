@@ -175,11 +175,13 @@ that runs in the forked child before `execve`, so it applies to the whole child
 tree.
 
 To override the default, set the `MITOS_RLIMIT_NOFILE` environment variable in
-the guest agent's environment to a decimal file count. It is read once per spawn
-from the agent's own environment, so it applies uniformly to every spawned
-process. An unparseable value is ignored with a warning and the default applies.
-An operator may set a value below the default deliberately; the agent never
-raises the hard limit (that needs `CAP_SYS_RESOURCE` and is out of scope).
+the guest agent's environment to a decimal file count of at least 64. It is read
+once per spawn from the agent's own environment, so it applies uniformly to every
+spawned process. A value below 64, or an unparseable value, is ignored with a
+warning and the default applies; the floor stops a `0` or tiny typo from silently
+crippling every spawned child. An operator may set a value below the default (but
+at or above the floor) deliberately; the agent never raises the hard limit (that
+needs `CAP_SYS_RESOURCE` and is out of scope).
 
 The default and the override resolution are unit-tested on any host; the
 end-to-end proof (a spawned guest process observing the raised limit and opening

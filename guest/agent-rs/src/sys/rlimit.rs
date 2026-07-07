@@ -35,19 +35,28 @@ pub const DEFAULT_NOFILE_SOFT: u64 = 65536;
 /// every spawned process (exec, PTY, run_code kernel, serving workload).
 pub const RLIMIT_NOFILE_ENV: &str = "MITOS_RLIMIT_NOFILE";
 
+/// Minimum accepted soft NOFILE override. Below this a spawned child could not
+/// open enough descriptors for even basic operation (stdio plus a handful), so a
+/// degenerate value like `0` would recreate the exact EMFILE-on-everything
+/// failure this module exists to prevent. An override below the floor (or empty,
+/// or unparseable) is ignored and `DEFAULT_NOFILE_SOFT` applies instead.
+pub const MIN_NOFILE_SOFT: u64 = 64;
+
 /// Parse the operator override value for the soft NOFILE limit.
 ///
-/// Accepts a decimal file count. Returns `None` for empty or unparseable input
-/// so the caller falls back to `DEFAULT_NOFILE_SOFT`. Only finite decimal values
-/// are accepted deliberately: an "unlimited" soft NOFILE is rejected by the
-/// kernel above fs.nr_open and would turn a benign misconfiguration into a spawn
-/// failure, which violates the boring-failure rule.
+/// Accepts a decimal file count of at least `MIN_NOFILE_SOFT`. Returns `None` for
+/// empty, unparseable, or below-floor input so the caller falls back to
+/// `DEFAULT_NOFILE_SOFT`. Only finite decimal values are accepted deliberately:
+/// an "unlimited" soft NOFILE is rejected by the kernel above fs.nr_open and
+/// would turn a benign misconfiguration into a spawn failure, which violates the
+/// boring-failure rule. The floor prevents the opposite footgun: a `0` or tiny
+/// value silently crippling every spawned child.
 pub fn parse_nofile_override(raw: &str) -> Option<u64> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
-    trimmed.parse::<u64>().ok()
+    trimmed.parse::<u64>().ok().filter(|&v| v >= MIN_NOFILE_SOFT)
 }
 
 /// Compute the soft RLIMIT_NOFILE to install given the process's current
@@ -82,7 +91,8 @@ fn configured_nofile_override() -> Option<u64> {
                 tracing::warn!(
                     var = RLIMIT_NOFILE_ENV,
                     value = %raw,
-                    "ignoring unparseable RLIMIT_NOFILE override; using default {}",
+                    "ignoring invalid RLIMIT_NOFILE override (want an integer >= {}); using default {}",
+                    MIN_NOFILE_SOFT,
                     DEFAULT_NOFILE_SOFT
                 );
             }
@@ -150,10 +160,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_accepts_plain_decimal() {
+    fn parse_accepts_plain_decimal_at_or_above_floor() {
         assert_eq!(parse_nofile_override("65536"), Some(65536));
         assert_eq!(parse_nofile_override("  4096  "), Some(4096));
-        assert_eq!(parse_nofile_override("1"), Some(1));
+        assert_eq!(parse_nofile_override("64"), Some(MIN_NOFILE_SOFT));
+    }
+
+    #[test]
+    fn parse_rejects_zero_and_sub_floor_values() {
+        // A degenerate override must never reach setrlimit; it falls back to the
+        // default instead of crippling every spawned child with EMFILE.
+        assert_eq!(parse_nofile_override("0"), None);
+        assert_eq!(parse_nofile_override("1"), None);
+        assert_eq!(parse_nofile_override("63"), None);
     }
 
     #[test]
@@ -201,55 +220,47 @@ mod tests {
         assert_eq!(resolve_nofile_soft(4096, 1_048_576, Some(512)), 512);
     }
 
-    // The real proof (a spawned child actually sees the raised limit) needs a
-    // running Linux process; this asserts the pre_exec hook installs and the
-    // child reports the raised soft limit. It is Linux-gated (matches the guest
-    // target) and so is skipped on the darwin developer build, exactly like the
-    // spawn tests in service/workload.rs.
+    // The real proof (a spawned child actually sees the resolved limit) needs a
+    // running Linux process. This spawns a child with the hook installed and
+    // asserts its soft NOFILE equals what resolve_nofile_soft computes from this
+    // process's own limits. It reads the limits READ-ONLY (no setrlimit on the
+    // test process), so it touches no process-wide state and cannot race with
+    // other parallel tests (CodeRabbit). When the host starts below the default,
+    // as CI Linux runners do (soft 1024), this asserts the raise to
+    // DEFAULT_NOFILE_SOFT. It is Linux-gated (matches the guest target) and so is
+    // skipped on the darwin developer build, like the spawn tests in
+    // service/workload.rs.
     #[cfg(target_os = "linux")]
     #[test]
-    fn spawned_child_sees_raised_soft_nofile() {
+    fn spawned_child_sees_resolved_soft_nofile() {
         use std::process::Command;
-        // Lower this process's own soft NOFILE so the raise is observable even
-        // when the test host already starts high.
         let mut cur = libc::rlimit {
             rlim_cur: 0,
             rlim_max: 0,
         };
-        // SAFETY: getrlimit reads into a local; setrlimit lowers our own soft.
+        // SAFETY: getrlimit only reads into a local; no process state is changed.
         unsafe {
             assert_eq!(libc::getrlimit(libc::RLIMIT_NOFILE, &mut cur), 0);
         }
+        let soft = cur.rlim_cur as u64;
         let hard = cur.rlim_max as u64;
-        // Only meaningful when the hard limit is above 1024.
-        if hard <= 1024 {
-            return;
-        }
-        let lowered = libc::rlimit {
-            rlim_cur: 1024,
-            rlim_max: cur.rlim_max,
-        };
-        // SAFETY: lowering our own soft limit; harmless for the test process.
-        unsafe {
-            assert_eq!(libc::setrlimit(libc::RLIMIT_NOFILE, &lowered), 0);
-        }
 
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg("ulimit -Sn");
         apply_nofile_limit(&mut cmd);
         let out = cmd.output().expect("spawn ulimit");
         let reported = String::from_utf8_lossy(&out.stdout);
-        let soft: u64 = reported.trim().parse().expect("numeric ulimit -Sn");
-        let expected = resolve_nofile_soft(1024, hard, None);
-        assert_eq!(
-            soft, expected,
-            "child soft NOFILE should be raised to the resolved default"
-        );
-
-        // Restore our own soft limit so later tests are unaffected.
-        // SAFETY: restoring the original limit read above.
-        unsafe {
-            let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &cur);
+        let reported = reported.trim();
+        // A host whose soft limit is already unlimited has nothing to prove and
+        // ulimit prints "unlimited" rather than a number; skip that case.
+        if reported == "unlimited" {
+            return;
         }
+        let child_soft: u64 = reported.parse().expect("numeric ulimit -Sn");
+        assert_eq!(
+            child_soft,
+            resolve_nofile_soft(soft, hard, None),
+            "child soft NOFILE should equal the resolved default"
+        );
     }
 }
