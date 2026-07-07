@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -72,7 +73,7 @@ func TestMultiVMTwoRealFirecrackersKVM(t *testing.T) {
 	ids := []vmID{defaultVMID, "vm-2"}
 	vsockByID := map[vmID]string{}
 	for _, id := range ids {
-		if err := s.prepareInstance(context.Background(), id); err != nil {
+		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 		res, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: snapDir})
@@ -235,6 +236,208 @@ func TestMultiVMForkSnapshotDefaultVMKVM(t *testing.T) {
 	if strings.TrimSpace(got) != "forked-child-alive" {
 		t.Fatalf("forked child guest exec = %q, want %q (the restored fork must run)", strings.TrimSpace(got), "forked-child-alive")
 	}
+}
+
+// TestColocatedForkInheritsSourceStateKVM is the KVM acceptance bar for the
+// prod-canary co-located-fork correctness bug: with --multi-vm ON, a hosted fork
+// that CO-LOCATES the child as an ADDITIONAL VM INSIDE the source pod (the spawn-vm
+// path the controller drives via SpawnVM) MUST restore the PARENT'S memory AND disk,
+// not boot a fresh template VM.
+//
+// The bug: the co-located child was spawned from the pool TEMPLATE snapshot (and its
+// rootfs cloned from the template rootfs), so a file written to the parent AND the
+// parent's live in-memory state were BOTH ABSENT in the child. The co-location was
+// fast precisely because it SKIPPED the restore a fork requires. The fix routes the
+// spawn-vm ActivateRequest at the FORK snapshot (mem + vmstate + the FROZEN source
+// rootfs at SnapshotDir/rootfs.ext4) with ForkSnapshot=true, so the child inherits
+// the parent.
+//
+// This test proves BOTH the bug and the fix ON THE SAME KVM RUNNER by spawning two
+// co-located children in one source stub:
+//
+//   - a BUG-REPRO child from the TEMPLATE snapshot (ForkSnapshot=false), the exact
+//     request the old wiring sent: it inherits NEITHER the marker file NOR the
+//     advanced uptime, and
+//   - a FIXED child from the FORK snapshot (ForkSnapshot=true), the request the fix
+//     sends: it reads back the marker file (DISK inheritance from the frozen source
+//     rootfs) AND a MUCH larger /proc/uptime (MEMORY inheritance from the fork memory
+//     checkpoint; uptime lives only in guest RAM and is never on disk).
+//
+// The mock/envtest fakes never restore real state, so this KVM proof is the only
+// gate that catches the bug; the controller-level envtest asserts the WIRING (the
+// spawn carries the parent fork snapshot dir + ForkSnapshot, not the template).
+//
+// GATED and skips cleanly unless /dev/kvm exists AND MITOS_KVM_HUSK_SNAPSHOT_DIR is
+// set AND the template rootfs is present next to the snapshot (the bench template
+// lays it out at <snapshot dir>/../rootfs.ext4), so a darwin dev box or any non-KVM
+// runner never asserts and is never a fake pass.
+func TestColocatedForkInheritsSourceStateKVM(t *testing.T) {
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("skipping co-located-fork inheritance proof: /dev/kvm not available (needs a KVM runner)")
+	}
+	snapDir := os.Getenv("MITOS_KVM_HUSK_SNAPSHOT_DIR")
+	if snapDir == "" {
+		t.Skip("skipping co-located-fork inheritance proof: set MITOS_KVM_HUSK_SNAPSHOT_DIR (the KVM CI sets it)")
+	}
+	for _, name := range []string{"mem", "vmstate"} {
+		if _, err := os.Stat(filepath.Join(snapDir, name)); err != nil {
+			t.Skipf("skipping co-located-fork inheritance proof: snapshot file %s not present: %v", name, err)
+		}
+	}
+	// The bench template lays the source rootfs next to the snapshot subdir
+	// (<data>/templates/<id>/rootfs.ext4, one level up from the snapshot dir). The
+	// source stub needs its OWN CoW clone of it so its writes are captured by the
+	// fork snapshot's frozen rootfs; without a real rootfs there is nothing to
+	// inherit, so skip rather than assert.
+	templateRootfs := filepath.Join(filepath.Dir(snapDir), "rootfs.ext4")
+	if _, err := os.Stat(templateRootfs); err != nil {
+		t.Skipf("skipping co-located-fork inheritance proof: template rootfs %s not present: %v", templateRootfs, err)
+	}
+	fcBin := os.Getenv("MITOS_KVM_FIRECRACKER")
+	if fcBin == "" {
+		fcBin = "/usr/local/bin/firecracker"
+	}
+
+	ctx := context.Background()
+
+	// One --multi-vm source stub with a per-activation rootfs CoW so the source VM
+	// writes its OWN clone (captured by the fork snapshot) and each co-located child
+	// gets its own independent clone. AllowUnverified mirrors the CI snapshot's
+	// unsigned manifest, exactly like the other husk KVM tests.
+	src := New(firecracker.VMConfig{
+		ID:             "husk-colo-src",
+		FirecrackerBin: fcBin,
+		WorkDir:        t.TempDir(),
+		VcpuCount:      1,
+		MemSizeMib:     256,
+	}, Options{
+		AllowUnverified:    true,
+		ReadyTimeout:       30 * time.Second,
+		MultiVM:            true,
+		RootfsTemplatePath: templateRootfs,
+		RootfsCoWDir:       t.TempDir(),
+	})
+	defer func() { _ = src.Close() }()
+
+	// Bring up the source (default) VM from the template snapshot.
+	if err := src.Prepare(ctx); err != nil {
+		t.Fatalf("source Prepare: %v", err)
+	}
+	sres, err := src.Activate(ctx, ActivateRequest{SnapshotDir: snapDir})
+	if err != nil || !sres.OK {
+		t.Fatalf("source Activate: err=%v res=%+v", err, sres)
+	}
+	srcAgent, err := kvmConnectAgent(sres.VsockPath)
+	if err != nil {
+		t.Fatalf("connect source agent: %v", err)
+	}
+	defer srcAgent.Close() //nolint:errcheck // best-effort teardown
+
+	// Write a UNIQUE marker file to the source rootfs and sync it onto the block
+	// device so the fork snapshot's FROZEN rootfs carries it (the DISK signal). A
+	// template boot never has this file.
+	const markerPath = "/mitos-colo-marker.txt"
+	marker := fmt.Sprintf("colo-inherit-%d", time.Now().UnixNano())
+	if _, err := kvmExecOK(srcAgent, fmt.Sprintf("printf %s > %s && /bin/busybox sync", marker, markerPath)); err != nil {
+		t.Fatalf("write+sync marker in source: %v", err)
+	}
+
+	// Let the source's guest clock advance well past the template's baked uptime, so
+	// a child that restores the FORK memory reads a MUCH larger /proc/uptime than a
+	// child that boots the template. Uptime lives only in guest RAM, so it is a clean
+	// MEMORY-inheritance signal that no disk write can fake.
+	time.Sleep(9 * time.Second)
+
+	// Fork snapshot the source's default VM: pause -> mem+vmstate -> freeze the
+	// source rootfs clone to <forkDir>/rootfs.ext4 -> resume. This is the exact
+	// artifact the controller's fork-snapshot op produces in the source pod.
+	forkDir := filepath.Join(t.TempDir(), "fork-snap")
+	fres, err := src.ForkSnapshot(ctx, ForkSnapshotRequest{ForkID: "colo-child", SnapshotDir: forkDir})
+	if err != nil || !fres.OK {
+		t.Fatalf("source ForkSnapshot must succeed on KVM: err=%v res=%+v", err, fres)
+	}
+	for _, name := range []string{"mem", "vmstate", "rootfs.ext4"} {
+		if _, err := os.Stat(filepath.Join(forkDir, name)); err != nil {
+			t.Fatalf("fork snapshot did not write %s (needed for co-located inheritance): %v", name, err)
+		}
+	}
+
+	// BUG-REPRO co-located child: the OLD wiring's request, activating from the
+	// TEMPLATE snapshot with ForkSnapshot=false. It clones the TEMPLATE rootfs and
+	// loads TEMPLATE memory, so it inherits nothing. Driving it here proves on the
+	// SAME runner that the pre-fix wiring loses the parent's state.
+	bugRes := src.SpawnVM(ctx, SpawnVMRequest{
+		VMID:     "colo-bug",
+		Activate: ActivateRequest{SnapshotDir: snapDir},
+	})
+	if !bugRes.OK {
+		t.Fatalf("bug-repro spawn (template) must still boot a fresh VM: %+v", bugRes)
+	}
+	bugAgent, err := kvmConnectAgent(bugRes.VsockPath)
+	if err != nil {
+		t.Fatalf("connect bug-repro child agent: %v", err)
+	}
+	defer bugAgent.Close() //nolint:errcheck // best-effort teardown
+
+	// FIXED co-located child: the request the fix sends, activating from the FORK
+	// snapshot with ForkSnapshot=true. SpawnVM clones the FROZEN source rootfs at
+	// forkDir/rootfs.ext4 and loads the fork mem+vmstate, so the child inherits the
+	// parent's disk AND memory. This is the identical SpawnVM path the controller
+	// drives (SpawnVMOnHusk -> Stub.SpawnVM -> activateInstance).
+	fixRes := src.SpawnVM(ctx, SpawnVMRequest{
+		VMID:     "colo-fix",
+		Activate: ActivateRequest{SnapshotDir: forkDir, ForkSnapshot: true},
+	})
+	if !fixRes.OK {
+		t.Fatalf("fixed co-located spawn from the fork snapshot must succeed: %+v", fixRes)
+	}
+	fixAgent, err := kvmConnectAgent(fixRes.VsockPath)
+	if err != nil {
+		t.Fatalf("connect fixed child agent: %v", err)
+	}
+	defer fixAgent.Close() //nolint:errcheck // best-effort teardown
+
+	// DISK inheritance: the fixed child reads back the marker; the bug-repro child
+	// does not (the file never existed on the template rootfs).
+	readMarker := func(agent *guestgrpc.Client) string {
+		out, _ := kvmExecOK(agent, fmt.Sprintf("cat %s 2>/dev/null || true", markerPath))
+		return strings.TrimSpace(out)
+	}
+	if got := readMarker(bugAgent); got == marker {
+		t.Fatalf("bug-repro child unexpectedly has the source marker %q; the template path should NOT inherit disk", marker)
+	}
+	if got := readMarker(fixAgent); got != marker {
+		t.Fatalf("DISK inheritance FAILED: fixed co-located child read %q, want the source marker %q (frozen source rootfs not restored)", got, marker)
+	}
+
+	// MEMORY inheritance: the fixed child's uptime is far ahead of the bug-repro
+	// child's, which sits at the template's baked uptime. The 9s the source ran
+	// before the fork snapshot separates them; a 4s floor absorbs scheduling slack.
+	bugUptime := kvmReadUptime(t, bugAgent)
+	fixUptime := kvmReadUptime(t, fixAgent)
+	if fixUptime <= bugUptime+4 {
+		t.Fatalf("MEMORY inheritance FAILED: fixed child uptime %.2fs must be well ahead of the template-boot bug-repro child %.2fs (fork memory checkpoint not restored)", fixUptime, bugUptime)
+	}
+}
+
+// kvmReadUptime reads the guest's /proc/uptime and returns the first field (seconds
+// since the guest booted) as a float. It fails the test on a transport or parse
+// error so a broken read is never silently treated as zero uptime.
+func kvmReadUptime(t *testing.T, agent *guestgrpc.Client) float64 {
+	t.Helper()
+	out, err := kvmExecOK(agent, "cat /proc/uptime")
+	if err != nil {
+		t.Fatalf("read /proc/uptime: %v", err)
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		t.Fatalf("empty /proc/uptime output %q", out)
+	}
+	v, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		t.Fatalf("parse uptime %q: %v", fields[0], err)
+	}
+	return v
 }
 
 // kvmConnectAgent dials the guest agent's gRPC service on the vsock UDS with a

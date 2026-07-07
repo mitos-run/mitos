@@ -160,7 +160,15 @@ func deriveVMNetwork(id vmID, base *vsock.NotifyForkedNetwork) *vsock.NotifyFork
 // clone) but scoped to ONE entry in the instances map, so preparing a second VM
 // never touches the first. Fail closed: any error tears the dormant VMM down and
 // leaves the instance out of StateDormant.
-func (s *Stub) prepareInstance(ctx context.Context, id vmID) error {
+//
+// rootfsSrcOverride selects the file the per-activation rootfs CoW clone is made
+// FROM. Empty (every template activate) clones from the pool template rootfs
+// (s.rootfsTemplatePath), the prior behavior byte-for-byte. A CO-LOCATED fork child
+// passes the FROZEN source rootfs the fork snapshot carries (SnapshotDir/rootfs.ext4)
+// so the child inherits the parent's DISK instead of the pristine template, the
+// co-located analog of the new-pod fork child's --rootfs pointing at the frozen
+// source rootfs.
+func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride string) error {
 	if err := checkVMID(id); err != nil {
 		return err
 	}
@@ -226,20 +234,26 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID) error {
 
 	// Per-activation rootfs CoW clone, scoped to this VM's derived id so two VMs in
 	// the pod never share or overwrite a rootfs clone. Same primitive and dormant
-	// pre-paid timing as the single-VM Prepare.
-	if s.rootfsTemplatePath != "" && s.rootfsCoWDir != "" {
+	// pre-paid timing as the single-VM Prepare. The clone SOURCE is the pool template
+	// rootfs by default; a CO-LOCATED fork child overrides it with the frozen source
+	// rootfs the fork snapshot carries so the child inherits the parent's DISK.
+	rootfsSrc := s.rootfsTemplatePath
+	if rootfsSrcOverride != "" {
+		rootfsSrc = rootfsSrcOverride
+	}
+	if rootfsSrc != "" && s.rootfsCoWDir != "" {
 		clonePath := filepath.Join(s.rootfsCoWDir, cfg.ID, "rootfs.ext4")
 		if err := os.MkdirAll(filepath.Dir(clonePath), 0o755); err != nil {
 			_ = inst.vm.Close()
 			inst.vm = nil
 			return fmt.Errorf("husk: create per-activation rootfs dir for vm %q: %w", id, err)
 		}
-		if err := waitForFile(ctx, s.rootfsTemplatePath, rootfsTemplateWait); err != nil {
+		if err := waitForFile(ctx, rootfsSrc, rootfsTemplateWait); err != nil {
 			_ = inst.vm.Close()
 			inst.vm = nil
-			return fmt.Errorf("husk: per-activation rootfs template %s not ready for vm %q: %w", s.rootfsTemplatePath, id, err)
+			return fmt.Errorf("husk: per-activation rootfs source %s not ready for vm %q: %w", rootfsSrc, id, err)
 		}
-		if err := s.reflink(s.rootfsTemplatePath, clonePath); err != nil {
+		if err := s.reflink(rootfsSrc, clonePath); err != nil {
 			_ = inst.vm.Close()
 			inst.vm = nil
 			return fmt.Errorf("husk: clone per-activation rootfs for vm %q: %w", id, err)
@@ -309,8 +323,16 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 
 	// Verify-on-activate gate, with the same prepare-time fast path the single-VM
 	// Activate uses: skip the re-hash only when THIS instance verified this exact
-	// snapshot during its dormant period.
-	if !(inst.prepareVerified && req.SnapshotDir == s.prepareSnapshotDir && req.ExpectedDigest == s.prepareExpectedDigest) {
+	// snapshot during its dormant period. A CO-LOCATED fork child (req.ForkSnapshot)
+	// restores a node-local FORK snapshot the source stub produced in the SAME
+	// pod/node trust boundary; it is NOT content-addressed (there is no recorded
+	// digest to verify against), so the content-addressed verify is skipped exactly
+	// as the new-pod fork child does with --allow-unverified-snapshots. The
+	// fork-correctness RNG/clock reseed handshake below still runs, fail-closed.
+	switch {
+	case req.ForkSnapshot:
+		// node-local fork snapshot: skip the content-addressed verify (no digest).
+	case !(inst.prepareVerified && req.SnapshotDir == s.prepareSnapshotDir && req.ExpectedDigest == s.prepareExpectedDigest):
 		if err := s.verify(req); err != nil {
 			werr := fmt.Errorf("husk: snapshot verification failed for vm %q: %w", id, err)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
@@ -438,7 +460,16 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 	if err := checkVMID(id); err != nil {
 		return SpawnVMResult{OK: false, VMID: req.VMID, Error: err.Error()}
 	}
-	if err := s.prepareInstance(ctx, id); err != nil {
+	// A CO-LOCATED fork child clones its rootfs from the FROZEN source rootfs the
+	// fork snapshot carries at SnapshotDir/rootfs.ext4 (inherit the parent's DISK),
+	// NOT the pool template rootfs. Empty otherwise, so a non-fork spawn keeps the
+	// template clone. This mirrors the new-pod fork child, whose --rootfs points at
+	// the same frozen source rootfs (huskForkRootfsInPodPath).
+	rootfsSrcOverride := ""
+	if req.Activate.ForkSnapshot && req.Activate.SnapshotDir != "" {
+		rootfsSrcOverride = filepath.Join(req.Activate.SnapshotDir, "rootfs.ext4")
+	}
+	if err := s.prepareInstance(ctx, id, rootfsSrcOverride); err != nil {
 		return SpawnVMResult{
 			OK:    false,
 			VMID:  req.VMID,
