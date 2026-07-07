@@ -201,7 +201,7 @@ func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
 	// The node has memory headroom so admits() selects it; the forkd Fork RPC is
 	// what rejects, exactly the race the schedule-time count check cannot close.
 	testRegistry.SetNodeMemory("cap-node-3", 16*gib, 0)
-	engine.ForkErr = fork.ErrAtCapacity // -> gRPC ResourceExhausted
+	engine.SetForkErr(fork.ErrAtCapacity) // -> gRPC ResourceExhausted
 
 	makeCapacityFixture(t, "cap3")
 
@@ -227,7 +227,7 @@ func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
 
 	// Clearing the reject lets a later reconcile place the claim and go Ready,
 	// proving the re-pend was recoverable (not a dead end).
-	engine.ForkErr = nil
+	engine.SetForkErr(nil)
 	ready := waitForPhase(t, "cap3", v1.SandboxReady, 15*time.Second)
 	if ready.Status.Node != "cap-node-3" {
 		t.Fatalf("ready node = %q, want cap-node-3", ready.Status.Node)
@@ -246,7 +246,7 @@ func TestClaimRePendsOnForkdUnavailable(t *testing.T) {
 	defer stop()
 
 	testRegistry.SetNodeMemory("cap-node-4", 16*gib, 0)
-	engine.ForkErr = status.Error(codes.Unavailable, "node draining")
+	engine.SetForkErr(status.Error(codes.Unavailable, "node draining"))
 
 	makeCapacityFixture(t, "cap4")
 
