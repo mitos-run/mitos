@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.29.0](https://github.com/mitos-run/mitos/compare/v1.28.0...v1.29.0) (2026-07-07)
+
+
+### Features
+
+* **husk:** live copy-on-write fork sharing parent memory (default-off, KVM-tested) ([#820](https://github.com/mitos-run/mitos/issues/820)) ([96efe00](https://github.com/mitos-run/mitos/commit/96efe0084754be468af40ff92dd266ce9e986f33))
+
+
+### Bug Fixes
+
+* **console:** serve /internal M2M endpoints on a cluster-internal listener (GHSA-rcf5-cfv3-jxvv) ([#742](https://github.com/mitos-run/mitos/issues/742)) ([6e22227](https://github.com/mitos-run/mitos/commit/6e22227362285625468af8a974f240edb451d836))
+* **hosted:** defense-in-depth hardening for the front door ([#733](https://github.com/mitos-run/mitos/issues/733)) ([#743](https://github.com/mitos-run/mitos/issues/743)) ([b8154cd](https://github.com/mitos-run/mitos/commit/b8154cd2d0240aa0c1a2c3653d878b995a81d99f))
+
 ## [1.28.0](https://github.com/mitos-run/mitos/compare/v1.27.0...v1.28.0) (2026-07-07)
 
 
