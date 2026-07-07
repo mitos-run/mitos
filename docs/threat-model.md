@@ -522,7 +522,7 @@ shared-pod-netns residual of the multi-VM-per-pod mode (Surface 2, Guest to gues
 which is why it stays flag-gated behind that mode's per-VM tap + /30 isolation and a
 named security review before it ships.
 
-### Husk live copy-on-write fork (parent memory share + child memfd import, milestones m4b/m5)
+### Husk live copy-on-write fork (parent memory share + child memfd import + source arming, milestones m4b/m5/m6b)
 
 The live-cow fork path (`--live-cow-fork`, `SandboxReconciler.LiveCowFork` ->
 warm husk pod `--live-cow-fork` -> `husk.Options.LiveCowFork`) lets a CO-LOCATED
@@ -604,6 +604,26 @@ Trust and residual, stated honestly:
   restore path that READS this env is the remaining smallest Firecracker patch (the
   shipped fork patches only the parent side); until it lands the env is set and the
   child restores from disk.
+- Source-side arming (milestone m6b): the parent-side handler is now BOUND to the
+  running source VM in production. When a source (default) VM launches under
+  `--live-cow-fork` with a real workdir, `prepareInstance` calls
+  `Stub.armLiveCowSource`, which binds the host-local per-VM write-protect socket
+  BEFORE the source Firecracker starts and launches it with the `FIRECRACKER_MITOS_*`
+  env; a background goroutine (`serveLiveCowSource`) completes the `SCM_RIGHTS`
+  handshake once the patched source Firecracker connects during restore, arms the
+  freezer (`SetLiveCowParent`), and runs the copy-before-unprotect `Serve` loop for the
+  life of the source. This adds NO new tenant-facing input: the socket is the SAME
+  host-local, per-VM, guest-unreachable socket already reviewed above, now over the
+  SOURCE VM's own m1-exported memfd; the handler still only write-protects / unprotects
+  / copies the parent's own pages and writes nowhere on the host. The retained handle
+  is Closed at pod teardown (`closeLiveCowSource`), unblocking a stuck `Receive` and
+  stopping `Serve`. FAIL-SAFE: arming happens ONLY with the flag on AND a real workdir;
+  the flag off, the mock/unit path, a socket-bind failure, a source Firecracker that
+  never offers the handshake, or a non-Linux host all leave the freezer nil, so
+  `forkSnapshotInstance` takes the Full `mem`+`vmstate` snapshot and a fork never
+  breaks. KVM-tested end to end in `TestForkSnapshotLiveCowSourceArmedVmstateOnlyKVM`
+  (real patched Firecracker: no mem file, sub-364ms capture, source resumed + faults
+  served, child composed from the source memfd).
 - Source vmstate-only capture (issue #832): on the armed live-cow path the source
   fork snapshot (`forkSnapshotInstance`, `internal/husk/multivm.go`) FREEZEs the
   guest and captures ONLY the small device/CPU `vmstate`, writing NO `mem` file (the

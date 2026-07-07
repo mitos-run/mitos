@@ -246,6 +246,19 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride s
 	if len(extraEnv) > 0 {
 		cfg.Env = append(append([]string(nil), cfg.Env...), extraEnv...)
 	}
+	// Arm the PARENT side of the live-cow fork for the SOURCE (default) VM (milestone
+	// m6b): bind the write-protect handshake socket and launch THIS Firecracker with
+	// the FIRECRACKER_MITOS_* env so it exports its guest memfd (m1) and offers the
+	// write-protect uffd (m2) to the handler. Once the handshake completes the freezer
+	// is armed (SetLiveCowParent) and forkSnapshotInstance takes the vmstate-only
+	// snapshot path (skipping the ~364ms mem write) instead of the Full fallback. Gated
+	// inside armLiveCowSource on --live-cow-fork AND a real workdir, so every child VM,
+	// the disk path, and the mock/unit path launch stock (a fork never breaks).
+	if id == defaultVMID {
+		if parentEnv := s.armLiveCowSource(cfg.WorkDir); len(parentEnv) > 0 {
+			cfg.Env = append(append([]string(nil), cfg.Env...), parentEnv...)
+		}
+	}
 	// Create the per-VM workdir before launching so the Firecracker API socket and
 	// vsock UDS have a home. The default VM reuses the pod workdir (already created
 	// by cmd/husk-stub), and the unit path has an empty workdir, so only a nested
@@ -681,6 +694,12 @@ func (s *Stub) closeAllInstances() error {
 		entries = append(entries, entry{id: id, inst: inst})
 	}
 	s.mu.Unlock()
+
+	// Tear down the armed source-side live-cow WP handler (m6b) so a stuck Receive
+	// and the Serve fault loop stop with the pod. A no-op when the source was never
+	// armed. Done alongside the VMM closes so the whole live-cow apparatus goes down
+	// with the pod.
+	s.closeLiveCowSource()
 
 	var firstErr error
 	for _, e := range entries {
