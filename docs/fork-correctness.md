@@ -160,6 +160,33 @@ plumbing are unit-tested off KVM (`internal/fork` `TestLiveCowParentEnv`,
 `internal/firecracker` `TestLaunchEnv`, `internal/controller`
 `TestBuildHuskPodThreadsLiveCowFork`).
 
+Repeated forks of ONE source: per-fork frozen state. The armed WP handler
+(`SetLiveCowParent`) is REUSED for every `ForkSnapshot` of the same parent VM,
+because the userfaultfd is created once by Firecracker over the parent's live mapping
+and delivered once at `Receive`; a fork does NOT get a fresh handler. Each `Freeze`
+(each fork) therefore allocates its OWN frozen epoch: a fresh FROZEN memfd + fresh
+1-bit-per-page selector (`newEpoch`, `internal/fork/wpfork_linux.go`). A co-located
+child of that fork imports THAT epoch's memfds, so fork B can never hand its child a
+page frozen for fork A, and fork A's still-live children keep reading fork A's
+point-in-time pages after fork B happens. The single `Serve` loop fans each
+write-protect fault into EVERY live epoch that has not yet captured the page (bit
+clear), copying the page's pre-write bytes: because all epochs share one mapping and
+one protection state, that pre-write value is the fork-time value for exactly those
+epochs whose freeze preceded the write and that have not yet seen a write to the page.
+An epoch that already froze the page is skipped, so a source write that lands AFTER a
+later fork never overwrites an earlier fork's frozen bytes. Epochs are retained until
+the handler `Close` (an earlier fork's child may still reference its memfds through
+`/proc`), and the memfds are sparse, so the cost is bounded by the pages actually
+rewritten, not by guest RAM per fork. Without this (a single frozen image reused
+across forks) a second fork would inherit the pages the first fork froze and hand its
+child stale bytes for any page rewritten between the two forks. Verified on real KVM
+by `internal/fork` `TestLiveCowRepeatedForkPerForkFrozenState` (the `firecracker-test`
+job): it forks one source twice with a source write of the SAME page P between and
+after the forks (P: `M1` at fork A, `M2` at fork B, `M3` after fork B) and asserts fork
+A's child reads `M1`, fork B's child reads `M2`, and `M3` leaks into neither; it FAILS
+on the shared-state code (fork B's fresh-epoch page-0-clear check trips, and the child
+reads fork A's stale value) and PASSES with per-fork epochs.
+
 ### Live copy-on-write fork: child-side memfd import (milestone m5)
 
 The child side of the same path boots the co-located child's guest RAM from the

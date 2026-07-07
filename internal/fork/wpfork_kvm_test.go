@@ -49,6 +49,9 @@ const (
 
 	wpTestMarker = "MITOS-M4B-ORIGINAL-FORK-TIME-PAGE"
 	wpTestNewVal = "MITOS-M4B-PARENT-OVERWROTE-THIS!!"
+	// wpTestThirdVal is the value a resumed source writes AFTER a SECOND fork, to
+	// prove it leaks into neither fork's child (the repeated-fork per-epoch gate).
+	wpTestThirdVal = "MITOS-M4B-SOURCE-WROTE-AFTER-FORKB"
 )
 
 type uffdioAPIArg struct{ API, Features, Ioctls uint64 }
@@ -881,4 +884,215 @@ func TestLiveCowForkVmstateOnlyNoMemFile(t *testing.T) {
 		t.Errorf("vmstate-only capture took %v, want far below the ~364ms Full mem write", capture)
 	}
 	t.Logf("item-1-of-#832 PASS: vmstate-only fork wrote NO mem file (%d MiB guest RAM stayed in the shared memfd); paused-window capture=%v (freeze=%v) vs ~364ms Full mem write; child inherited + no-leak", memMiB, capture, freeze)
+}
+
+// wpHandshake stands in for the patched Firecracker parent side and completes the m2
+// handshake against handle: it creates + registers the WP userfaultfd over the guest
+// mapping, runs handle.Receive concurrently with the dial + SCM_RIGHTS send, and
+// returns once the handler holds the uffd. It self-skips (via createWPUffd/registerWP)
+// when the runner kernel lacks write-protect. Unlike armFrozenLiveCowParent it does
+// NOT Freeze, so a caller can drive MULTIPLE forks (multiple Freeze calls) on the one
+// handler and one uffd, which is what the repeated-fork test needs.
+func wpHandshake(t *testing.T, handle WPForkHandle, guest []byte, udsPath string, size, pageSize uint64) {
+	t.Helper()
+	uffd, skip, reason := createWPUffd(t)
+	if skip {
+		t.Skipf("m2 precondition not met on this runner: %s", reason)
+	}
+	base := uint64(uintptr(unsafe.Pointer(&guest[0])))
+	if !registerWP(t, uffd, base, size) {
+		t.Skipf("m2 precondition not met: WP register/offer failed over the memfd mapping")
+	}
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var recvErr error
+	go func() {
+		defer wg.Done()
+		recvErr = handle.Receive()
+	}()
+	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: udsPath, Net: "unix"})
+	if err != nil {
+		t.Fatalf("dial WP UDS: %v", err)
+	}
+	body := []byte(fmt.Sprintf(`[{"base_host_virt_addr":%d,"size":%d,"offset":0,"page_size":%d}]`, base, size, pageSize))
+	sendUffd(t, conn, body, uffd)
+	_ = conn.Close()
+	wg.Wait()
+	if recvErr != nil {
+		t.Fatalf("handler Receive: %v", recvErr)
+	}
+}
+
+// overwriteAndWaitFrozen has the resumed source write val into page 0 (which takes a
+// WP fault and blocks until the handler copies the fork-time bytes into the CURRENT
+// epoch's FROZEN image and unprotects), then waits until the handler has marked page 0
+// frozen in the CURRENT epoch. freeze/handle are only used for the failure message.
+func overwriteAndWaitFrozen(t *testing.T, handle WPForkHandle, guest []byte, val string, freeze time.Duration) {
+	t.Helper()
+	writeDone := make(chan struct{})
+	go func() {
+		copy(guest[0:], val)
+		close(writeDone)
+	}()
+	select {
+	case <-writeDone:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("source overwrite %q never completed: WP fault not served (freeze=%v, faults=%d)", val, freeze, handle.FaultCount())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !handle.FrozenPage(0) {
+		if time.Now().After(deadline) {
+			t.Fatalf("handler never marked page 0 frozen after write %q; faults=%d", val, handle.FaultCount())
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestLiveCowRepeatedForkPerForkFrozenState is the CodeRabbit-Major (comment
+// 3538463403) correctness gate for REPEATED forks of ONE source. The armed parent WP
+// handler is REUSED across ForkSnapshot calls, and Freeze only reapplies
+// write-protection; the finding is that a SECOND fork must NOT inherit pages frozen by
+// the FIRST fork. It drives TWO forks of one source over the real WP handler and
+// asserts each fork's child reads that fork's POINT-IN-TIME value of the same page P:
+//
+//	t0: page P (page 0) holds M1.
+//	FORK A (Freeze). Capture fork A's child import (impA).
+//	t1: the resumed source overwrites P with M2. The WP handler freezes P at M1 into
+//	    fork A's epoch (fork A's fork-time value).
+//	FORK B (Freeze). Capture fork B's child import (impB). At fork B, P holds M2.
+//	t2: the resumed source overwrites P with M3. The WP handler freezes P at M2 into
+//	    fork B's epoch (fork B's fork-time value); fork A's epoch already has P (M1),
+//	    so it is NOT overwritten.
+//	ASSERT: fork A's child reads M1 at P (its fork-time value); fork B's child reads M2
+//	    at P (its fork-time value); the later M3 write leaks into NEITHER child.
+//
+// On the SHARED-state code (one frozenBM/frozen created once in Receive and reused by
+// every Freeze) fork A and fork B import the SAME frozen memfd, so both children read
+// whatever the single frozen image last holds (M2 after the t2 write): fork A's child
+// reads M2 instead of M1, VIOLATING inheritance across repeated forks. This test FAILS
+// there. With per-fork frozen epochs it PASSES. It skips off-KVM and under -race.
+func TestLiveCowRepeatedForkPerForkFrozenState(t *testing.T) {
+	requireKVMCIRunner(t)
+	const pageSize = 4096
+	const npages = 8
+	size := uint64(npages * pageSize)
+
+	guestFd, err := unix.MemfdCreate("mitos-guest-ram", unix.MFD_CLOEXEC)
+	if err != nil {
+		t.Fatalf("memfd_create guest: %v", err)
+	}
+	defer unix.Close(guestFd)
+	if err := unix.Ftruncate(guestFd, int64(size)); err != nil {
+		t.Fatalf("ftruncate guest: %v", err)
+	}
+	guest, err := unix.Mmap(guestFd, 0, int(size), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		t.Fatalf("mmap guest: %v", err)
+	}
+	defer unix.Munmap(guest)
+
+	copy(guest[0:], wpTestMarker) // page 0 (P): M1, the value at fork A
+	guest[pageSize] = byte(1)     // page 1: untouched, inheritance check for both forks
+
+	dir := t.TempDir()
+	exportPath := filepath.Join(dir, "memfd_export")
+	if err := os.WriteFile(exportPath, []byte(fmt.Sprintf("%d %d %d\n", os.Getpid(), guestFd, size)), 0o600); err != nil {
+		t.Fatalf("write export: %v", err)
+	}
+	udsPath := filepath.Join(dir, "wp.sock")
+
+	handle, err := StartWPForkHandler(WPForkConfig{UDSPath: udsPath, MemExportPath: exportPath})
+	if err != nil {
+		t.Fatalf("StartWPForkHandler: %v", err)
+	}
+	defer handle.Close()
+
+	wpHandshake(t, handle, guest, udsPath, size, pageSize)
+
+	// --- FORK A: freeze, start Serve (once, shared by both forks), capture fork A's
+	// child import while epoch A is current. ---
+	freezeA, err := handle.Freeze()
+	if err != nil {
+		t.Fatalf("Freeze A: %v", err)
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- handle.Serve() }()
+	impA, err := handle.ChildImport(dir)
+	if err != nil {
+		t.Fatalf("ChildImport A: %v", err)
+	}
+
+	// t1: the resumed source overwrites P (M1 -> M2). P is frozen at M1 into epoch A.
+	overwriteAndWaitFrozen(t, handle, guest, wpTestNewVal, freezeA)
+
+	// --- FORK B: freeze again (fresh epoch), capture fork B's child import. At this
+	// point P holds M2, which is fork B's fork-time value. ---
+	freezeB, err := handle.Freeze()
+	if err != nil {
+		t.Fatalf("Freeze B: %v", err)
+	}
+	if handle.FrozenPage(0) {
+		t.Fatal("fork B epoch must start with page 0 CLEAR (fresh per-fork frozen state)")
+	}
+	impB, err := handle.ChildImport(dir)
+	if err != nil {
+		t.Fatalf("ChildImport B: %v", err)
+	}
+
+	// t2: the resumed source overwrites P (M2 -> M3). P is frozen at M2 into epoch B;
+	// epoch A already froze P at M1, so this write must NOT touch epoch A.
+	overwriteAndWaitFrozen(t, handle, guest, wpTestThirdVal, freezeB)
+
+	// --- ASSERT per-fork inheritance. Fork A's child MUST read M1 at P; fork B's
+	// child MUST read M2 at P; neither may read the later M3 write. ---
+	childA, err := ComposeChildFromImport(impA)
+	if err != nil {
+		t.Fatalf("ComposeChildFromImport A: %v", err)
+	}
+	defer unix.Munmap(childA)
+	if got := string(childA[0:len(wpTestMarker)]); got != wpTestMarker {
+		t.Errorf("REPEATED-FORK INHERITANCE VIOLATED (fork A): child read %q at page P, want fork A's fork-time value %q", got, wpTestMarker)
+	}
+	if got := string(childA[0:len(wpTestNewVal)]); got == wpTestNewVal {
+		t.Errorf("fork A child leaked fork B's fork-time value (the between-fork write %q) at page P", wpTestNewVal)
+	}
+	if got := string(childA[0:len(wpTestThirdVal)]); got == wpTestThirdVal {
+		t.Errorf("fork A child leaked the post-fork-B source write %q at page P", wpTestThirdVal)
+	}
+	if got := childA[pageSize]; got != byte(1) {
+		t.Errorf("fork A child untouched page 1 byte = %#x, want %#x", got, byte(1))
+	}
+
+	childB, err := ComposeChildFromImport(impB)
+	if err != nil {
+		t.Fatalf("ComposeChildFromImport B: %v", err)
+	}
+	defer unix.Munmap(childB)
+	if got := string(childB[0:len(wpTestNewVal)]); got != wpTestNewVal {
+		t.Errorf("REPEATED-FORK INHERITANCE VIOLATED (fork B): child read %q at page P, want fork B's fork-time value %q", got, wpTestNewVal)
+	}
+	if got := string(childB[0:len(wpTestMarker)]); got == wpTestMarker {
+		t.Errorf("fork B child read fork A's stale frozen value %q at page P (per-fork state leaked)", wpTestMarker)
+	}
+	if got := string(childB[0:len(wpTestThirdVal)]); got == wpTestThirdVal {
+		t.Errorf("fork B child leaked the post-fork-B source write %q at page P", wpTestThirdVal)
+	}
+	if got := childB[pageSize]; got != byte(1) {
+		t.Errorf("fork B child untouched page 1 byte = %#x, want %#x", got, byte(1))
+	}
+
+	if err := handle.Close(); err != nil {
+		t.Fatalf("handler Close: %v", err)
+	}
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Errorf("Serve returned error after Close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Errorf("Serve did not return after Close")
+	}
+
+	t.Logf("repeated-fork per-fork-frozen-state PASS: fork A child=%q, fork B child=%q at page P; M3 leaked into neither; freezeA=%v freezeB=%v faults=%d",
+		wpTestMarker, wpTestNewVal, freezeA, freezeB, handle.FaultCount())
 }
