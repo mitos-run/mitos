@@ -45,6 +45,12 @@ type SandboxPoolReconciler struct {
 	// same --multi-vm-fork operator flag that enables the routing on the Sandbox
 	// reconciler; default off. A normal claim is unaffected.
 	MultiVM bool
+	// LiveCowFork starts this pool's warm husk pods with --live-cow-fork so a
+	// co-located fork child shares the parent's resident guest memory instead of
+	// restoring from the disk fork snapshot (milestone m4b). Set from the
+	// --live-cow-fork operator flag; DEFAULT OFF and SEPARATE from MultiVM so it
+	// canaries independently. A normal claim is unaffected.
+	LiveCowFork bool
 	// MultiVMForkVMs is how many co-located fork VMs a multi-VM warm pod reserves
 	// node memory for up front (beyond the source VM), so the co-location routing
 	// has room before a fork spills to a new pod. Only consulted when MultiVM is set;

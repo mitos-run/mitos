@@ -59,6 +59,16 @@ controller:
   # pods start with --multi-vm so they are co-location-capable. Off is the
   # unchanged new-pod-per-fork path. Only meaningful with enableHuskPods.
   multiVMFork: false
+  # EXPERIMENTAL, default off. When true, render --live-cow-fork: warm husk pods
+  # start with --live-cow-fork so a CO-LOCATED fork child shares the PARENT's
+  # resident guest memory (patched Firecracker memfd + userfaultfd write-protect)
+  # instead of restoring from the disk fork snapshot (milestone m4b), driving the
+  # hosted fork toward sub-100ms. SEPARATE from multiVMFork so it can be deployed
+  # off and canaried independently. Off is byte-for-byte the current disk
+  # co-location; on, the co-located child still falls back to the disk restore
+  # where the child-side memfd import is not yet complete, so it never breaks a
+  # fork. Only meaningful with enableHuskPods.
+  liveCowFork: false
   # Value for --husk-data-dir: the node template snapshot root the husk pods
   # mount; must match forkd's --data-dir.
   huskDataDir: /var/lib/mitos
