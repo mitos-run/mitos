@@ -522,7 +522,7 @@ shared-pod-netns residual of the multi-VM-per-pod mode (Surface 2, Guest to gues
 which is why it stays flag-gated behind that mode's per-VM tap + /30 isolation and a
 named security review before it ships.
 
-### Husk live copy-on-write fork (parent memory share, milestone m4b)
+### Husk live copy-on-write fork (parent memory share + child memfd import, milestones m4b/m5)
 
 The live-cow fork path (`--live-cow-fork`, `SandboxReconciler.LiveCowFork` ->
 warm husk pod `--live-cow-fork` -> `husk.Options.LiveCowFork`) lets a CO-LOCATED
@@ -575,6 +575,25 @@ Trust and residual, stated honestly:
   back to the disk snapshot restore. Turning the flag on therefore never breaks a
   fork; where the child-side memfd import is not yet complete it simply keeps
   restoring the child from disk.
+- Child-side memfd import (milestone m5): the co-located child boots its guest RAM
+  from the parent's live memory with ONE memory-attach, `MAP_PRIVATE` of the parent's
+  own exported guest memfd plus a per-page overlay from the handler's PRIVATE FROZEN
+  memfd (`internal/fork/childmemfd*.go`, `fork.ComposeChildFromImport`). The child
+  reads ONLY the parent's own m1-exported memfd (same pod/node trust boundary, the
+  SAME `/proc/<pid>/fd` read the parent-side handler already uses) and the handler's
+  FROZEN memfd; `MAP_PRIVATE` means every child write is copy-on-write and invisible
+  to the parent and to sibling children, so it opens NO cross-VM write channel and no
+  new tenant-facing input (the coordinates ride the host-local
+  `FIRECRACKER_MITOS_CHILD_MEMFD` export file the husk writes under the node-local
+  fork snapshot dir, not any guest-reachable surface). It performs no host-path write.
+  The per-page FROZEN selector preserves the point-in-time-T invariant end to end
+  (KVM-tested no-leak + inheritance in `TestLiveCowChildBootsFromSharedMemfd`), so
+  child memory independence holds exactly as on the disk-fork path. The disk `mem`
+  path is still passed to `LoadSnapshot`, so the child falls back to the disk restore
+  when the import is unavailable (never breaks a fork). Pending: the child Firecracker
+  restore path that READS this env is the remaining smallest Firecracker patch (the
+  shipped fork patches only the parent side); until it lands the env is set and the
+  child restores from disk.
 - Residual: a compromised controller can drive a live-cow-enabled spawn against a
   reachable warm husk pod, the SAME residual already stated for activate,
   fork-snapshot, and spawn-vm; and the path inherits the shared-pod-netns residual of

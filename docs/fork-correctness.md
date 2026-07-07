@@ -160,13 +160,61 @@ plumbing are unit-tested off KVM (`internal/fork` `TestLiveCowParentEnv`,
 `internal/firecracker` `TestLaunchEnv`, `internal/controller`
 `TestBuildHuskPodThreadsLiveCowFork`).
 
-Pending (documented, not a gap in what ships): the CHILD-side memfd import (booting
-the co-located child's guest RAM from the parent's live memory instead of the disk
-snapshot mem file) needs a matching Firecracker patch on the child restore side (the
-shipped fork patches the PARENT side only) plus a KVM node to measure the end-to-end
-fork latency. Until then a live-cow-enabled pod still restores the co-located child
-from the disk fork snapshot; the parent-side WP engine and the flag are landed,
-KVM-tested for the inheritance/no-leak invariant, and gated off by default.
+### Live copy-on-write fork: child-side memfd import (milestone m5)
+
+The child side of the same path boots the co-located child's guest RAM from the
+parent's live memory instead of the disk snapshot `mem` file. The child performs
+one memory-attach: `MAP_PRIVATE` of the parent's shared guest memfd, then a
+per-page overlay from the handler's FROZEN memfd for the pages the parent clobbered
+after the fork point (`fork.ComposeChildFromImport` /
+`composeChildGuestMemory`, `internal/fork/childmemfd*.go`). The per-page selector is
+the SAME point-in-time source selection the parent-side proof asserts: a frozen page
+(the parent overwrote it) is taken from FROZEN at its fork-time value; every other
+page is the `MAP_PRIVATE` view of the shared memfd, which still holds the fork-time
+value because the parent never wrote it (or the write is pinned in FROZEN). Because
+the attach is an `O(1)` mapping plus a copy of only the handful of clobbered pages,
+it does not read the guest RAM back off disk, which is the sub-100ms win.
+
+The parent's armed WP handler publishes the child's coordinates as a
+`ChildMemfdImport` (`ChildImport`: the parent memfd from the m1 export, the FROZEN
+memfd, a snapshot of the frozen bitmap, the page size). The husk writes that as the
+`FIRECRACKER_MITOS_CHILD_MEMFD` export file and sets the env on the child
+Firecracker (`Stub.liveCowChildImportEnv`, `SpawnVM`). The child Firecracker's
+memory backing comes from the memfd + FROZEN overlay while its CPU + device vmstate
+still restores from the snapshot `vmstate` file. FAIL-CLOSED: the disk `mem` path is
+STILL passed to `LoadSnapshot`, so a child Firecracker that does not honor the env
+(or a pod with no armed parent) restores from disk byte-for-byte; any error
+assembling the import logs and falls back to the disk restore. Off, or where the
+import is unavailable, the child restores from disk exactly as before.
+
+Verified on real KVM by `internal/fork` `TestLiveCowChildBootsFromSharedMemfd` (the
+`firecracker-test` job, `go test ./internal/fork/...`): it drives the PRODUCTION
+child import (`handle.ChildImport` -> `ComposeChildFromImport`) over a real memfd +
+real FROZEN image produced by the real WP handler, and asserts the child boots from
+the SHARED memfd, NOT disk, with BOTH halves of the invariant, NO LEAK (a page the
+resumed parent overwrote is read from FROZEN at its fork-time value, never the
+parent's post-fork write) and INHERITANCE (an untouched page is read live from the
+shared memfd). It also measures the child memory attach and asserts it is sub-100ms
+AND faster than a same-size disk mem-file restore baseline. On a runner whose kernel
+lacks write-protect it self-skips with the m2 precondition reason. The contract and
+env plumbing are unit-tested off KVM (`internal/fork`
+`TestChildMemfdEnv`/`TestChildMemfdImportRoundTrip`/`TestParseChildMemfdImportRejectsBad`,
+`internal/husk`
+`TestLiveCowChildImportEnvNoParent`/`TestLiveCowChildImportEnvArmed`/`TestLiveCowChildImportEnvFailClosed`).
+
+Pending (documented, not a gap in what ships): the child Firecracker's restore path
+does not yet READ `FIRECRACKER_MITOS_CHILD_MEMFD` (the shipped
+`mitos-run/firecracker` branch `mitos/uffd-wp-v1.15.0` patches only the PARENT side:
+m1 memfd export + m2 WP offer; its `snapshot_file` restore still `MAP_PRIVATE`s the
+disk mem file). The remaining work is the smallest child-restore Firecracker patch
+that maps the guest region `MAP_PRIVATE` from the passed memfd + FROZEN overlay when
+that env is set, built via the fork's `build-patched-fc` workflow and pinned by a new
+sha256 in `hack/install-firecracker-patched.sh`. Until it lands, the husk wiring sets
+the env and the child falls back to the disk restore (never breaks a fork); the
+memory-attach mechanism itself is KVM-proven through the Go code path above, so the
+Firecracker patch is a faithful port, not a new design. The parent-arm production
+wiring (starting the WP handler bound to the running source VM and passing it via
+`SetLiveCowParent`) is the other half of the same follow-up.
 
 ### Workspace resume from a memory snapshot
 
