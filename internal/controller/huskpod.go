@@ -550,20 +550,17 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 
 	// Live-cow write-protect needs a KERNEL-MODE userfaultfd over the guest RAM: the
 	// source Firecracker registers UFFD_WP so the KVM guest's own writes fault to the
-	// copy-before-unprotect handler (issue #832). Creating a kernel-mode userfaultfd
-	// from an unprivileged container requires CAP_SYS_PTRACE (the same gate the kernel
-	// applies via `sysctl_unprivileged_userfaultfd`); without it the `userfaultfd(2)`
-	// syscall returns EPERM, the source never offers the write-protect handshake, and
-	// every fork silently falls back to the Full snapshot. `/dev/userfaultfd` is not
-	// injected into the pod, so the source's userfaultfd path is the syscall this
-	// capability gates. It is added ONLY when --live-cow-fork is on, so a pool that
-	// does not use live-cow keeps the minimal NET_ADMIN-only set. Documented as a PSA
-	// exception in docs/threat-model.md; the capability is confined to the pod (not
-	// privileged, not hostPID), so it cannot ptrace another pod's processes.
+	// copy-before-unprotect handler (issue #832). The patched restore path creates
+	// that userfaultfd via the `/dev/userfaultfd` DEVICE (open + USERFAULTFD_IOC_NEW),
+	// NOT the `userfaultfd(2)` syscall: the container RuntimeDefault seccomp profile
+	// denies `userfaultfd(2)` with EPERM even when CAP_SYS_PTRACE is present, because
+	// CAP_SYS_PTRACE satisfies only the kernel gate, not the seccomp gate. The device
+	// is injected into every KVM husk pod by the kvm device plugin (mitos.run/kvm),
+	// which also sets the device-cgroup allow a plain hostPath cannot, and the ioctl
+	// device path is permitted by the same seccomp profile. So the husk-stub keeps the
+	// minimal NET_ADMIN-only capability set: no CAP_SYS_PTRACE is needed on a live-cow
+	// pool. Documented in docs/threat-model.md.
 	huskCaps := []corev1.Capability{"NET_ADMIN"}
-	if opts.LiveCowFork {
-		huskCaps = append(huskCaps, "SYS_PTRACE")
-	}
 
 	// Name-based egress: when the operator configured DNS upstream(s), pass them
 	// to the stub so the per-pod DNS proxy resolves and pins allowlisted names.
@@ -887,8 +884,8 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: pool.Name + "-husk-",
 			Namespace:    pool.Namespace,
-			Labels: huskPodLabels(pool.Name, opts.MultiVM),
-			Annotations: annotations,
+			Labels:       huskPodLabels(pool.Name, opts.MultiVM),
+			Annotations:  annotations,
 		},
 		Spec: corev1.PodSpec{
 			// A husk pod is long-lived: it holds its dormant (then activated) VM
