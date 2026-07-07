@@ -59,6 +59,16 @@ controller:
   # pods start with --multi-vm so they are co-location-capable. Off is the
   # unchanged new-pod-per-fork path. Only meaningful with enableHuskPods.
   multiVMFork: false
+  # EXPERIMENTAL, default off. When true, render --live-cow-fork: warm husk pods
+  # start with --live-cow-fork so a CO-LOCATED fork child shares the PARENT's
+  # resident guest memory (patched Firecracker memfd + userfaultfd write-protect)
+  # instead of restoring from the disk fork snapshot (milestone m4b), driving the
+  # hosted fork toward sub-100ms. SEPARATE from multiVMFork so it can be deployed
+  # off and canaried independently. Off is byte-for-byte the current disk
+  # co-location; on, the co-located child still falls back to the disk restore
+  # where the child-side memfd import is not yet complete, so it never breaks a
+  # fork. Only meaningful with enableHuskPods.
+  liveCowFork: false
   # Value for --husk-data-dir: the node template snapshot root the husk pods
   # mount; must match forkd's --data-dir.
   huskDataDir: /var/lib/mitos
@@ -434,6 +444,20 @@ database:
     name: ""
     # Key within that Secret holding the postgres://user:pass@host:5432/db DSN.
     key: "dsn"
+
+# Shared SaaS control-plane settings that span the gateway and console.
+saas:
+  # Optional process-wide pepper mixed into every API key hash (issue #733). When
+  # set, both the gateway and console source MITOS_API_KEY_PEPPER from this Secret
+  # so a stolen store dump alone cannot be brute-forced. OPT-IN and OFF by default:
+  # the SAME Secret MUST back both pods, and introducing a pepper invalidates any
+  # pre-existing keys (users must reissue them), so enable it deliberately, ideally
+  # at first install.
+  apiKeyPepperSecret:
+    # Name of the Secret in the release namespace. Empty leaves keys unpeppered.
+    name: ""
+    # Key within that Secret holding the pepper value.
+    key: "pepper"
 
 # Console (Deployment): the hosted/self-hosted web console (issue #214). The BFF
 # plus the embedded SPA, served by cmd/console. ONE image and ONE bundle serve

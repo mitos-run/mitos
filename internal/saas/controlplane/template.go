@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/apierr"
 	"mitos.run/mitos/internal/saas"
@@ -60,15 +62,18 @@ func (k *K8sControlPlane) ensureTemplate(_ context.Context, req saas.ForwardRequ
 	return jsonResp(http.StatusOK, desc), nil
 }
 
-// listTemplates handles the "template.list" op (GET /v1/templates). It lists all
-// SandboxPools across all namespaces and maps each to a templateDescriptor so the
-// response shape matches the standalone sandbox-server (GET /v1/templates returns
-// []templateInfo). SandboxPools are cluster-wide shared infrastructure, not
-// per-tenant data, so listing without a namespace filter is correct here.
-// A pool with ReadySnapshots > 0 is reported as ready: true.
-func (k *K8sControlPlane) listTemplates(ctx context.Context, _ saas.ForwardRequest) (saas.ForwardResponse, error) {
+// listTemplates handles the "template.list" op (GET /v1/templates). It lists the
+// SandboxPools in the caller's own namespace (NamespaceForOrg(req.OrgID), the
+// same namespace a create resolves its poolRef in) and maps each to a
+// templateDescriptor so the response shape matches the standalone sandbox-server
+// (GET /v1/templates returns []templateInfo). Scoping to the caller's namespace
+// keeps a tenant from enumerating pool names and readiness in another tenant's
+// namespace (issue #733, item 5); in single-tenant mode this is the shared
+// namespace, so the shared-pool model is unchanged. A pool with
+// ReadySnapshots > 0 is reported as ready: true.
+func (k *K8sControlPlane) listTemplates(ctx context.Context, req saas.ForwardRequest) (saas.ForwardResponse, error) {
 	var pools v1.SandboxPoolList
-	if err := k.c.List(ctx, &pools); err != nil {
+	if err := k.c.List(ctx, &pools, client.InNamespace(k.namespaceForOrg(req.OrgID))); err != nil {
 		return errResp(apierr.Get(apierr.CodeInternal).
 			WithCause("could not list available templates")), nil
 	}

@@ -136,6 +136,24 @@ API fails closed (refuses every request).
 {{- end -}}
 
 {{/*
+API key hash pepper env entry, shared by the gateway and console pods (issue
+#733). OPT-IN and OFF by default: renders nothing unless
+saas.apiKeyPepperSecret.name is set. The pepper is a SECRET, sourced via
+secretKeyRef ONLY, and the SAME Secret MUST back both pods so a key the console
+mints verifies at the gateway. Introducing a pepper invalidates any pre-existing
+keys (they must be reissued), so it is deliberately not enabled by default.
+*/}}
+{{- define "mitos.apiKeyPepper.env" -}}
+{{- if .Values.saas.apiKeyPepperSecret.name }}
+- name: MITOS_API_KEY_PEPPER
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.saas.apiKeyPepperSecret.name | quote }}
+      key: {{ .Values.saas.apiKeyPepperSecret.key | default "pepper" | quote }}
+{{- end }}
+{{- end -}}
+
+{{/*
 Product-telemetry env entries shared by the gateway and console pods. Telemetry
 is OPT-IN and OFF by default: this renders nothing unless telemetry.enabled is
 true AND telemetry.endpoint is set, so the binaries fail closed to a no-op

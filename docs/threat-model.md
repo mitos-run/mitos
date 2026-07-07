@@ -522,6 +522,68 @@ shared-pod-netns residual of the multi-VM-per-pod mode (Surface 2, Guest to gues
 which is why it stays flag-gated behind that mode's per-VM tap + /30 isolation and a
 named security review before it ships.
 
+### Husk live copy-on-write fork (parent memory share, milestone m4b)
+
+The live-cow fork path (`--live-cow-fork`, `SandboxReconciler.LiveCowFork` ->
+warm husk pod `--live-cow-fork` -> `husk.Options.LiveCowFork`) lets a CO-LOCATED
+fork child share the PARENT's resident guest memory through the Mitos-patched
+Firecracker (a `MAP_SHARED` memfd backing plus a userfaultfd write-protect offer,
+`mitos-run/firecracker` branch `mitos/uffd-wp-v1.15.0`) instead of restoring the
+child from the disk fork snapshot, driving the hosted fork toward sub-100ms. It is
+DEFAULT OFF and SEPARATE from `--multi-vm-fork` so it canaries independently; off
+is byte-for-byte the disk co-location (Husk fork snapshot row above). The patched
+Firecracker binary is behavior-identical to stock UNLESS the `FIRECRACKER_MITOS_*`
+env is set, and only the live-cow path sets it, so a pod with the flag off runs the
+stock VMM.
+
+The new component is the parent-side write-protect fork handler on the forkd/husk
+side (`internal/fork/wpfork*.go`, a Go port of the m2 reference C handler). At a
+fork point the patched parent Firecracker creates a userfaultfd over ITS OWN live
+guest mapping (requesting `UFFD_FEATURE_PAGEFAULT_FLAG_WP`), registers every region
+write-protect, and hands the uffd plus the region layout to this handler over a
+PRIVATE per-VM unix socket (`FIRECRACKER_MITOS_WP_UDS`) via `SCM_RIGHTS`. The
+handler FREEZES the guest (write-protects the whole region), the parent resumes,
+and on each write-protect fault the handler copies the page's pre-write (fork-time)
+bytes into a PRIVATE frozen memfd BEFORE it unprotects and wakes the parent's
+writer. That copy-before-unprotect ordering is the correctness invariant: a resumed
+parent can no longer leak a post-fork write forward into a child (see
+`docs/fork-correctness.md` and the KVM-tested inheritance + no-leak assertion in
+`internal/fork/wpfork_kvm_test.go`).
+
+Trust and residual, stated honestly:
+
+- The handler owns NO policy. The uffd is created BY the parent Firecracker over
+  the parent's own address space (userfaultfd registers ranges in the CREATING
+  process's mm, so an external process cannot register the parent's pages). The
+  handler RECEIVES that uffd and only write-protects / unprotects and copies
+  pre-write pages into a memfd IT created. It reads the parent's guest memory
+  READ-ONLY through `/proc/<pid>/fd/<fd>` (the m1 export the parent itself
+  published), and writes NOWHERE on the host filesystem.
+- The handler's only external input is the region layout the parent Firecracker
+  itself sends over the private per-VM socket, plus the parent's own memfd export
+  coordinates. It adds NO new tenant-facing input surface: the socket is host-local
+  and per-VM, not reachable by the guest.
+- The parent and every co-located child see a point-in-time-T image: a child reads a
+  clobbered page from the frozen memfd (fork-time bytes) and an untouched page live
+  from the shared memfd (cheap CoW), so per-VM memory independence holds exactly as
+  the disk-fork path guarantees it (each fork still runs the full fail-closed
+  RNG/clock/secret re-seed of the Husk fork snapshot row; live-cow changes only the
+  MEMORY SOURCE, not the fork-correctness re-seed).
+- Fail-closed: if the WP handler is not listening, the kernel lacks WP
+  (`CONFIG_HAVE_ARCH_USERFAULTFD_WP`), or the platform is non-Linux, the parent
+  Firecracker logs and stays on the paused-parent (m1) contract, and the husk falls
+  back to the disk snapshot restore. Turning the flag on therefore never breaks a
+  fork; where the child-side memfd import is not yet complete it simply keeps
+  restoring the child from disk.
+- Residual: a compromised controller can drive a live-cow-enabled spawn against a
+  reachable warm husk pod, the SAME residual already stated for activate,
+  fork-snapshot, and spawn-vm; and the path inherits the shared-pod-netns residual of
+  the multi-VM-per-pod mode it co-locates within. The uffd is confined to the
+  parent's own guest RAM (it cannot register another VM's pages), so it opens no
+  cross-VM memory read. This path is security-sensitive (`internal/fork`,
+  `internal/daemon`, `internal/husk`) and carries a named human review before it
+  ships on by default.
+
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin
 (`cmd/kvm-device-plugin`, `internal/deviceplugin`): the pod requests
 `mitos.run/kvm` like any extended resource and the kubelet bind-mounts
@@ -1400,7 +1462,7 @@ with `spec.expose` set and `Status.Phase==Ready` is reachable at
 | CSRF state and open-redirect defense | mitigated (unit-tested) | CSRF state: before redirecting to the OIDC provider the auth origin mints a signed CSRF state token (a `SessionCodec`-signed `{rd,path}` JSON payload, short TTL) stored in a `__Host-` state cookie. On the `/auth/callback` return the `state` query parameter is verified against the cookie value with constant-time compare; a missing, tampered, or expired state is rejected 400 before the code exchange runs. Open-redirect defense: the `rd` (redirect) parameter in `/start?rd=<label>` is validated against the live route table; an unknown label is rejected 400. The `path` (callback path) parameter rejects values beginning with `//` or containing a backslash or CRLF via `safeRelPath`, preventing scheme-relative or header-injection redirects. `internal/preview/oidc.go`. Unit-tested: state cookie round-trip; tampered state rejected; expired state rejected; unknown label in `rd` rejected. |
 | Verified-email audience rule: unverified email rejected | mitigated (unit-tested) | The `allowedEmailDomains` audience selector in the authorization pipeline checks BOTH that `email_verified == true` in the session identity AND that `emailDomain(identity.Email)` EXACTLY matches one of the listed domains (case-folded; a domain such as `evilacme.com` does NOT match an entry `acme.com`). An unverified email is rejected 403 regardless of its domain. In addition, `resolveOrgs` in `internal/preview/oidc.go` returns empty org IDs when `EmailVerified` is false, so the org/private tier also 403s for an unverified-email identity even if the Resolver or GroupsToOrgs fallback would otherwise return org memberships. `internal/preview/authz.go`, `internal/preview/oidc.go`. Unit-tested: unverified email with a matching domain is rejected by the audience check; verified email with matching domain is accepted; verified email with non-matching domain is rejected; callback with `email_verified=false` yields a grant with empty OrgIDs. |
 | ForwardAuth BYO-IdP subrequest: client header spoof prevention | mitigated (unit-tested) | The `ForwardAuth` function builds the subrequest from scratch (`http.NewRequestWithContext`), forwarding only `X-Forwarded-Method`, `X-Forwarded-Uri`, `X-Forwarded-Host`, `X-Forwarded-For`, and `Cookie`. `StripForwardAuthHeaders` deletes all `X-Auth-Request-*` keys from the inbound request BEFORE `ForwardAuth` is called and BEFORE the request is proxied upstream, so a client cannot inject a forged `X-Auth-Request-Email` or `X-Auth-Request-User` to claim an identity the auth service did not assert. Identity is built exclusively from the auth service RESPONSE headers. The network-layer CIDR check runs before the forwardAuth subrequest, so a request from a disallowed IP is rejected before the external auth service is contacted. `internal/preview/forwardauth.go`. Unit-tested: 2xx allow with identity from response; 401 deny; `StripForwardAuthHeaders` removes client-supplied `X-Auth-Request-*`; non-request headers are not removed; `X-Forwarded-For` is forwarded to the auth service. |
-| Verified-email to org resolution: bearer-gated in-cluster hop | mitigated (unit-tested) | The `POST /internal/identity/resolve` endpoint in the console binary resolves a verified email to an account ID and org IDs via `AccountService.FindOrCreateByEmail` and `Organizations`. The endpoint is protected by a shared bearer secret (`MITOS_IDENTITY_RESOLVE_TOKEN`, environment variable, never logged) compared with `hmac.Equal` (constant-time for equal-length inputs; a mismatched length returns early without iterating, which is acceptable here because the token is operator-configured and fixed-length in practice, and the empty-token guard fires before the compare so an unconfigured endpoint is always denied). The email-to-org mapping is NEVER logged; only the org count is logged. The resolver client (`internal/preview/resolve.go`) also never logs the token or email-to-org mapping; a non-empty configured URL is required or `ErrResolveDisabled` is returned immediately without making a request. `internal/saas/identity_resolve.go`, `cmd/console/main.go`. Unit-tested: bearer gate (missing, wrong, empty configured token); email resolves to account+orgs; bad body returns 400; empty URL returns `ErrResolveDisabled` with no HTTP request; non-2xx returns error without token in message. |
+| Verified-email to org resolution: bearer-gated in-cluster hop | mitigated (unit-tested; now served off the public listener) | The `POST /internal/identity/resolve` endpoint (with `/internal/session/resolve` and `/internal/approve-signup`) resolves a verified email to an account ID and org IDs via `AccountService.FindOrCreateByEmail` and `Organizations`. It is protected by a shared bearer secret (`MITOS_IDENTITY_RESOLVE_TOKEN`, environment variable, never logged) compared with `hmac.Equal` (constant-time for equal-length inputs; a mismatched length returns early, acceptable because the token is operator-configured and fixed-length, and the empty-token guard fires first so an unconfigured endpoint is always denied). PREVIOUSLY these M2M endpoints were mounted on the console's PUBLIC mux, so they were internet-reachable and the bearer was the only gate; identity/resolve additionally provisions accounts via `FindOrCreateByEmail`, so a leaked bearer allowed account creation and org-membership enumeration from the internet (GHSA-rcf5-cfv3-jxvv). FIX: they are now served ONLY on a dedicated cluster-internal listener (`--internal-addr`, default `:8091`, `cmd/console/internal_listener.go`), exactly like `/metrics`; the public `:8080` mux never mounts them, and no HTTPRoute forwards to `:8091`, so the endpoints are reachable only from in-cluster callers (the frontdoor session-resolve and the expose proxy identity-resolve, both pointed at the console Service internal port by the chart). An empty `--internal-addr` falls back to the public mux for legacy/dev only, with a loud startup warning. The email-to-org mapping is NEVER logged; only the org count is. `internal/saas/identity_resolve.go`, `cmd/console/internal_listener.go`, `cmd/console/main.go`. Unit-tested: bearer gate on the internal mux (`TestInternalMuxServesResolveBehindBearer`), unmounted-without-token is 404 (`TestInternalMuxDoesNotMountWithoutToken`), plus the existing resolve-behavior tests. Residual (follow-up): a resolve is a READ, so `FindOrCreateByEmail` should become a non-provisioning `FindByEmail` (an unknown email resolves to zero orgs, denying access, without creating an account); tracked separately to avoid a behavior change in this hardening PR. |
 | Authorization pipeline: fail-closed tier, network, audience | mitigated (unit-tested) | The `Authorize` function in `internal/preview/authz.go` applies three layers in sequence: (1) NETWORK: `route.Network` is a CIDR allowlist (`Route.Network []string`); if non-empty the client IP must fall within at least one listed CIDR (`NetworkAllows`). A nil or out-of-range IP against a non-empty allowlist is denied. Malformed CIDRs are skipped (fail closed: no match returns `DenyForbidden`). (2) TIER: `route.Sharing` selects the tier. `public` always allows (but `DenyForbidden` if audience fields are set, because audience evaluation requires an identity). `authenticated` requires a non-nil identity. `org`/`private` require a non-nil identity AND `route.OrgID` present in `identity.OrgIDs`. `link` requires a non-nil identity (the proxy decodes the link cookie before calling `Authorize`). Unknown or empty `Sharing` is `DenyForbidden` (fail closed; no default-deny coercion to a different tier). (3) AUDIENCE: `AllowedPrincipals` uses case-folded exact email match; `AllowedEmailDomains` requires `identity.EmailVerified == true` and an EXACT case-folded domain match (`containsDomainFolded`); a suffix like `evilacme.com` does NOT match an entry `acme.com`. Empty allowlist entries are skipped. `internal/preview/authz.go`. Unit-tested across all tier/network/audience combinations; CIDR gate; suffix-trick rejected; case-insensitive; empty entries guarded. |
 | OIDC live-IdP path: honest CI scope | partial | The OIDC authorization code flow (discovery, redirect to provider, callback with state validation, code exchange, ID token verify) is tested with a fake token verifier (`oidcauth.FakeVerifier`) in unit CI so the flow handlers can be exercised without a live issuer. The live-IdP path (a real `/.well-known/openid-configuration` discovery, a real code exchange) is maintainer-verified only; it is not covered by an automated CI job. PKCE is a documented follow-up. SAML and SCIM are deferred. This surface stays gated behind the external security review (issue #194) and the abuse-control envelope (issue #213). |
 
@@ -1422,6 +1484,20 @@ CDP.
 | Spoofable X-Forwarded-Host has no privileged effect | mitigated | The relay derives the rewritten discovery host from `X-Forwarded-Host` (set by the expose proxy from the client's Host) or, absent it, the client's own request Host. An authenticated client that spoofs `X-Forwarded-Host` only changes the host in the `webSocketDebuggerUrl` it gets back, an unreachable or self-chosen value: a self-inflicted bad URL. It does NOT steer the upstream (the expose proxy derives the forkd upstream solely from the route table, section 7c) and grants no cross-sandbox or cross-tenant access. |
 | Chromium `--no-sandbox`: the microVM is the boundary | mitigated | Chromium runs with `--no-sandbox`, disabling its in-process seccomp/namespace sandbox, the same posture as E2B Desktop and Browserbase. The containment boundary is the Firecracker microVM (sections 1 and 2): a hostile page or malicious script is confined to the one sandbox and cannot reach the host, the control plane, or sibling sandboxes. Rendering untrusted web content is the intended isolation use case. |
 | Chromium pinned to 147, behind the current security build | accepted, tracked | `images/computer-use/Dockerfile` pins `chromium=147.0.7727.137-1~deb13u1` (debian stable/main) and `apt-mark hold`s it. The newer debian-security rebuild `150.0.7871.46-1~deb13u1` SIGTRAPs on launch (TRAP_BRKPT from Chromium's own `IMMEDIATE_CRASH`, no diagnostic flushed) and never binds the CDP port, so the template does not start; reproduced on amd64 and arm64, independent of `--no-sandbox`, the container seccomp profile, and every headless/GPU flag combination tried. The pin trades a launchable browser for skipping the 150 security update. Exposure delta is bounded by the row above: the browser already runs `--no-sandbox` inside the Firecracker microVM, so an in-renderer CVE only reaches the already-untrusted guest, not the host, control plane, or sibling sandboxes. The CI CDP smoke (`docker-build`) proves the pinned image launches; it dumps filtered Chromium logs on failure so a future unlaunchable package is caught in CI, not in production. Revert to the security build once Debian ships a launchable 150+: tracked in #723. |
+
+## 7d. Front-door defense-in-depth hardening (issue #733)
+
+Non-exploitable hardening from an authorized battle-test of the deployed service
+(exploitable findings were handled privately per SECURITY.md). Each row is a
+defense-in-depth gap, not a live vulnerability.
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| Browser session cookie prefix | **mitigated** | The console session cookie is set with the `__Host-` prefix on a Secure connection (`__Host-mitos_session`), matching the expose subsystem's `__Host-mitos_expose`. The prefix makes the browser pin the cookie to the exact host with `Path=/` and no `Domain`, so a compromised sibling subdomain cannot set or overwrite it (cookie tossing). A plain-http self-host/dev deployment (where the browser rejects a `__Host-` cookie) falls back to the legacy unprefixed name; readers (`console.ReadSessionCookie`, the frontdoor) accept both, preferring the hardened one, and logout expires both so a pre-rollout cookie cannot keep a session alive. Code: `internal/saas/console/session_middleware.go`, `internal/saas/onboarding/http.go`, `internal/saas/oidcauth/handlers.go`, `internal/frontdoor/proxy.go`. |
+| Server-side session absolute max-age | **mitigated** | Session resolve now enforces an absolute lifetime (`saas.DefaultSessionMaxAge`, 30 days) in both the in-memory and Postgres session stores, so a leaked session token cannot stay valid indefinitely; an expired session is lazily reaped (in-memory) and filtered in the query (Postgres). Code: `internal/saas/session.go`, `internal/saas/pgstore/sessionstore.go`. Residual: IDLE (sliding) max-age needs a per-request last-seen write and is a documented follow-up; the absolute ceiling is enforced today. |
+| API key hash pepper | **mitigated (opt-in)** | The gateway and console can mix a process-wide pepper into every API key hash (`saas.WithSalt` from `MITOS_API_KEY_PEPPER`, chart value `saas.apiKeyPepperSecret`), so a bare store dump is not directly replayable. Opt-in and OFF by default because introducing a pepper invalidates pre-existing keys and the SAME value must back both pods. Brute force is already infeasible (keys carry 256 bits of entropy); the pepper is a second barrier. Code: `internal/saas/keys.go`, `cmd/gateway/main.go`, `cmd/console/main.go`. |
+| Create `replicas` upper bound | **mitigated** | The control-plane create path caps `replicas` at request validation (`maxCreateReplicas` = 64), refusing a larger value with an LLM-legible 400 before any Sandbox is built, so a huge value cannot churn the controller. Real fleet size is still separately bounded by controller replica admission and the replica-weighted live-usage cap. Code: `internal/saas/controlplane/forward.go`. |
+| Pool-name enumeration scope | **mitigated** | `template.list` lists SandboxPools in the caller's own namespace (`NamespaceForOrg(orgID)`, the same namespace a create resolves its poolRef in) instead of cluster-wide, so a tenant cannot enumerate pool names and readiness in another tenant's namespace. In single-tenant mode this is the shared namespace, so the shared-pool model is unchanged. Code: `internal/saas/controlplane/template.go`. |
 
 ## 8. What we explicitly do NOT claim
 

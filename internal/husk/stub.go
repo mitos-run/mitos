@@ -498,6 +498,16 @@ type Options struct {
 	// today) keeps the single-VM path byte-for-byte unchanged. A later increment
 	// migrates the single-VM state onto the per-vmInstance map behind this flag.
 	MultiVM bool
+	// LiveCowFork opts into the experimental live copy-on-write fork path (husk
+	// live-cow fork, milestone m4b): a CO-LOCATED fork child shares the PARENT's
+	// resident guest memory through the patched Firecracker (MAP_SHARED memfd +
+	// userfaultfd write-protect) instead of restoring from the disk fork snapshot,
+	// so the hosted fork approaches sub-100ms. It DEFAULTS false and is SEPARATE
+	// from MultiVM so it can be deployed off and canaried independently. When false
+	// (every caller today) the co-located fork path is byte-for-byte the disk
+	// snapshot restore. It is a no-op off Linux (userfaultfd write-protect is
+	// Linux-only); the path fails closed to the disk restore.
+	LiveCowFork bool
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -595,7 +605,12 @@ type Stub struct {
 	// single-VM state onto (map[vmID]*vmInstance keyed per fork); it is nil unless
 	// a caller opts in, so increment 1 changes no runtime behavior.
 	multiVM   bool
-	instances map[vmID]*vmInstance
+	// liveCowFork gates the live copy-on-write co-located fork path (Options
+	// .LiveCowFork, milestone m4b). Default false keeps the co-located fork on the
+	// disk snapshot restore byte-for-byte; separate from multiVM so it canaries
+	// independently.
+	liveCowFork bool
+	instances   map[vmID]*vmInstance
 	// closing is set (under mu) when closeAllInstances begins teardown, so a
 	// concurrent create can no longer add a VM that would outlive Close. Guarded
 	// by mu; only meaningful on the multi-VM path.
@@ -646,6 +661,7 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		memStat:            opts.MemStat,
 		egressBytes:        opts.EgressBytes,
 		multiVM:            opts.MultiVM,
+		liveCowFork:        opts.LiveCowFork,
 	}
 	// Multi-VM scaffold (#764), default off: allocate the per-fork instance map
 	// ONLY when a caller opts in. No production caller sets MultiVM in increment
