@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.27.0](https://github.com/mitos-run/mitos/compare/v1.26.3...v1.27.0) (2026-07-07)
+
+
+### Features
+
+* **controller:** cross-fork co-location reservation so concurrent same-source forks never over-admit ([#814](https://github.com/mitos-run/mitos/issues/814)) ([106f150](https://github.com/mitos-run/mitos/commit/106f15070e7e6ef2c5636505a1c7f8e3e756518c))
+
 ## [1.26.3](https://github.com/mitos-run/mitos/compare/v1.26.2...v1.26.3) (2026-07-07)
 
 
