@@ -375,6 +375,17 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/sandbox-agent /tmp/mitos-test/agent
           ls -lh /tmp/mitos-test/agent
 
+      - name: Guest agent RLIMIT_NOFILE tests (issue #786)
+        run: |
+          # Run the sys::rlimit suite on this Linux host: the pure parse/resolve
+          # unit tests plus the Linux-gated integration test that spawns a child
+          # and asserts its soft RLIMIT_NOFILE is actually raised. Scoped to the
+          # module so it stays deterministic and does not require the booted-VM
+          # or Python-kernel fixtures the other guest tests need.
+          source "$HOME/.cargo/env" 2>/dev/null || true
+          cd guest/agent-rs
+          cargo test --lib sys::rlimit
+
       # OCI image -> rootfs pipeline proof (issue #10). This is the gate that
       # proves Engine.CreateTemplate builds a bootable template FROM A REAL OCI
       # IMAGE, not a hand-built rootfs: pull busybox:stable, flatten its layers,
