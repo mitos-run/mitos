@@ -251,10 +251,23 @@ regression where the pure memory budget floored every realistically sized multi-
 pod to 0 co-location (limit = request + modest headroom), so with the flag on every
 fork silently spilled to the new-pod path and a prod canary hit
 re-get-fork-child-pod-not-found. A legacy pod carrying no reservation stamp keeps the
-prior limit-based floor(limit / request) - 1 budget. Deferred to a follow-up: a
-dedicated node-budget check for the co-located dimension and the
-grow-the-pod-with-in-place-resize option (grow the reservation lazily as forks join,
-instead of reserving the bounded max up front).
+prior limit-based floor(limit / request) - 1 budget.
+
+The per-pod budget is now enforced ACROSS CONCURRENT same-source forks, not only per
+fork. coLocatedForkVMBudget is the WHOLE-POD ceiling; the co-location admission
+(reconcileHuskFork) subtracts the co-located VMs OTHER SandboxForks already placed in
+the source pod (coLocatedVMsInPodByOtherForks, reading status.Children[].Pod +
+status.Children[].VMID, the co-location ledger) and admits this fork's children only
+against the REMAINING room, spilling the overflow to a new pod. This closes the former
+per-fork gap where N concurrent forks of one source each admitted up to the full
+ceiling and over-admitted VMs into the pod (an intra-pod OOM risk under memory.max).
+The occupancy read is uncached (APIReader) and the controller reconciles serially
+(default MaxConcurrentReconciles 1), so two same-source forks never evaluate against a
+stale view; the read rounds toward spilling (conservative on error, under-admit never
+over-admit). Deferred to a follow-up: a dedicated node-budget check for the co-located
+dimension, the grow-the-pod-with-in-place-resize option (grow the reservation lazily as
+forks join, instead of reserving the bounded max up front), and a fully race-free
+shared reservation should MaxConcurrentReconciles ever be raised above 1.
 
 ### Guarantee B: a swarm always survives node loss by reconstructing from durable state
 
