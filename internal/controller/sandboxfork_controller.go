@@ -837,6 +837,21 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 			if ok {
 				forks = append(forks, spawnedChild)
 				ready++
+				// Persist the co-located child to status IMMEDIATELY, before spawning the
+				// next slot or returning. The cross-fork reservation
+				// (coLocatedVMsInPodByOtherForks) counts co-located VMs from RECORDED
+				// status, so a live VM that exists in srcPod but is not yet recorded would
+				// let a concurrent same-source fork read stale occupancy and over-admit.
+				// Writing after each spawn shrinks that window from the whole fan-out to a
+				// single spawn-then-write. The final batched Status().Update below is then
+				// idempotent (Children already carries this child).
+				fork.Status.Children = forks
+				if err := r.Status().Update(ctx, fork); err != nil {
+					// A conflict means a concurrent writer advanced the fork; returning the
+					// error requeues so the next pass re-reads and recounts occupancy fresh,
+					// never over-admitting.
+					return ctrl.Result{}, err
+				}
 			}
 			// A failed spawn is NOT wedged: the slot is left not-ready with the cause
 			// logged (issue #28), and the reconcile requeues below because
