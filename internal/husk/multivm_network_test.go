@@ -128,7 +128,7 @@ func TestMultiVMActivateProgramsDistinctTapPerVMID(t *testing.T) {
 
 	const second vmID = "vm-2"
 	for _, id := range []vmID{defaultVMID, second} {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 		req := ActivateRequest{

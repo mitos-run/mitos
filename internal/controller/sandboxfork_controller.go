@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 
+	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -198,6 +200,39 @@ func (r *SandboxReconciler) multiVMForkEnabled() bool {
 // huskForkFinalizer guards a husk fork so its node-local fork snapshot is
 // removed from the source pod before the Sandbox object is deleted.
 const huskForkFinalizer = "mitos.run/husk-fork-snapshot"
+
+// logForkStage emits one hosted-fork stage boundary: it logs the controller-side
+// RPC round-trip (network + husk) plus the husk-reported per-stage breakdown of
+// the work inside that RPC, and observes every stage into the
+// mitos_fork_stage_duration_seconds histogram. It is how a SINGLE hosted fork
+// yields an attributable breakdown: at each control op (fork-snapshot, spawn-vm,
+// activate) the round-trip is one series (stage) and the stub's sub-stages
+// (fc_boot, vmstate_restore, guest_ready, ...) are their own series, so the gap
+// between the round-trip and the sub-stage sum is the control-plane / network
+// overhead. name is the fixed round-trip stage label; huskLatencyMs is the stub's
+// own total for the op; huskStages is the stub's sub-stage split (nil for a stub
+// that did not report it, e.g. an older peer or an AlreadyActive re-drive). Only
+// fixed stage names and millisecond durations are logged or labeled: no secret,
+// token, entropy, or id value is ever emitted. Timing/observability only.
+func logForkStage(logger logr.Logger, id, name string, rpc time.Duration, huskLatencyMs float64, huskStages map[string]float64) {
+	observeForkStage(name, rpc.Seconds())
+	kv := []any{
+		"fork", id,
+		"stage", name,
+		"rpcMs", float64(rpc.Microseconds()) / 1000.0,
+		"huskLatencyMs", huskLatencyMs,
+	}
+	names := make([]string, 0, len(huskStages))
+	for stage := range huskStages {
+		names = append(names, stage)
+	}
+	sort.Strings(names)
+	for _, stage := range names {
+		observeForkStage(stage, huskStages[stage]/1000.0)
+		kv = append(kv, stage+"Ms", huskStages[stage])
+	}
+	logger.Info("fork stage timing", kv...)
+}
 
 // reconcileFromSandbox owns the fork engine for a source.fromSandbox Sandbox: a
 // live fork of the named source Sandbox into replicas indexed sibling children,
@@ -601,6 +636,20 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
 	}
 
+	// Attribute the end-to-end fork latency across the level-triggered reconcile
+	// passes. A hosted co-location fork reaches Ready over several ~1s requeue
+	// passes, so no single pass sees the whole wall-clock; stamp the start on the
+	// first working pass (source resolved Ready, source pod reachable) and count
+	// each pass that advances the fan-out to a status write. Both are persisted by
+	// the Status().Update calls this pass already makes, so the total (from
+	// ForkStartedAt to Ready) and the pass count are attributable even though the
+	// work is split across passes. Timing/observability only; drives no behavior.
+	if fork.Status.ForkStartedAt == nil {
+		startNow := metav1.Now()
+		fork.Status.ForkStartedAt = &startNow
+	}
+	fork.Status.ForkReconcilePasses++
+
 	controlPort := r.HuskControlPort
 	if controlPort == 0 {
 		controlPort = HuskControlPort
@@ -683,12 +732,19 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// read-only at HuskSnapshotDir.
 		tlsConf, err := r.huskDialTLS(snapCtx, fork.Namespace)
 		var snapRes husk.ForkSnapshotResult
+		snapStart := time.Now()
 		if err == nil {
 			snapRes, err = forkSnap(snapCtx, srcAddr, tlsConf, husk.ForkSnapshotRequest{
 				ForkID:      forkID,
 				SnapshotDir: huskForksInPodDir(forkID),
 				PauseSource: fork.Spec.Source.FromSandbox.PauseSource,
 			})
+		}
+		// Time the fork-snapshot RPC round-trip and record the husk-reported
+		// paused-window sub-stages (pause, create_snapshot, rootfs_freeze, resume),
+		// so the one-time source pause cost is attributable in the fork breakdown.
+		if err == nil && snapRes.OK {
+			logForkStage(logger, forkID, "fork_snapshot_rpc", time.Since(snapStart), snapRes.LatencyMs, snapRes.Stages)
 		}
 		if err != nil || !snapRes.OK {
 			msg := "fork snapshot did not complete"
@@ -907,6 +963,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		addr := net.JoinHostPort(child.Status.PodIP, strconv.Itoa(controlPort))
 		tlsConf, err := r.huskDialTLS(ctx, fork.Namespace)
 		var actRes husk.ActivateResult
+		actStart := time.Now()
 		if err == nil {
 			actRes, err = activate(ctx, addr, tlsConf, husk.ActivateRequest{
 				// The child reads the FORK snapshot here (its <dataDir>/forks/<fork-id>
@@ -945,6 +1002,15 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// stable token persisted above, so ADOPT it as ready rather than retrying a
 		// non-dormant VM forever.
 
+		// New-pod fork child: time the activate RPC round-trip and record the
+		// husk-reported activate sub-stages (vmstate_restore, guest_ready,
+		// handshake, ...). AlreadyActive re-drives carry no fresh stub-side timing
+		// (LatencyMs 0, empty Stages), so this attributes only the pass that did the
+		// real activation work.
+		if actRes.OK {
+			logForkStage(logger, childName, "activate_rpc", time.Since(actStart), actRes.LatencyMs, actRes.Stages)
+		}
+
 		forks = append(forks, v1.SandboxChild{
 			Name:      childName,
 			SandboxID: child.Name,
@@ -973,6 +1039,22 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	if fork.Status.ReadyReplicas < effectiveReplicas(fork) {
 		// Children still coming up; requeue to drive them Ready.
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
+	}
+	// Fan-out complete: emit the single-fork end-to-end breakdown. The total is
+	// the wall-clock from the first working pass (ForkStartedAt) to Ready NOW,
+	// attributed across the level-triggered reconcile passes, so a level of the
+	// ~728 ms hosted fork that lives in requeue wait between passes (rather than in
+	// any one RPC) is visible as total >> the sum of the per-RPC stages. The
+	// per-stage RPC and husk sub-stage lines were emitted at each boundary above.
+	if fork.Status.ForkStartedAt != nil {
+		total := time.Since(fork.Status.ForkStartedAt.Time)
+		observeForkStage("total", total.Seconds())
+		logger.Info("fork timing complete",
+			"fork", fork.Name,
+			"replicas", effectiveReplicas(fork),
+			"reconcilePasses", fork.Status.ForkReconcilePasses,
+			"totalMs", float64(total.Microseconds())/1000.0,
+		)
 	}
 	return ctrl.Result{}, nil
 }
@@ -1109,6 +1191,7 @@ func (r *SandboxReconciler) spawnForkChildInSourcePod(ctx context.Context, a spa
 	addr := net.JoinHostPort(a.srcPod.Status.PodIP, strconv.Itoa(a.controlPort))
 	tlsConf, err := r.huskDialTLS(ctx, a.fork.Namespace)
 	var spRes husk.SpawnVMResult
+	spawnStart := time.Now()
 	if err == nil {
 		spRes, err = a.spawnVM(ctx, addr, tlsConf, husk.SpawnVMRequest{
 			VMID: vmID,
@@ -1156,6 +1239,16 @@ func (r *SandboxReconciler) spawnForkChildInSourcePod(ctx context.Context, a spa
 	// OK, or AlreadyActive: a prior spawn brought this VM up but its ack or
 	// bookkeeping was lost. Either way the VM is active with the stable token
 	// persisted above, so ADOPT it as ready.
+
+	// Co-located fork child: time the spawn-vm RPC round-trip and record the
+	// husk-reported prepare + activate sub-stages (fc_boot, rootfs_clone,
+	// vmstate_restore, guest_ready, handshake, ...). This is the core of the
+	// hosted co-location fork latency, so its breakdown is the primary signal for
+	// targeting the bottleneck. AlreadyActive re-drives carry no fresh stub-side
+	// timing (LatencyMs 0, empty Stages) and so add nothing to the breakdown.
+	if spRes.OK {
+		logForkStage(logger, a.childName, "spawn_vm_rpc", time.Since(spawnStart), spRes.LatencyMs, spRes.Stages)
+	}
 	return v1.SandboxChild{
 		Name:      a.childName,
 		SandboxID: a.srcPod.Name,

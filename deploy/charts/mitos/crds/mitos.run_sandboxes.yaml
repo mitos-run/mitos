@@ -773,12 +773,36 @@ spec:
                   pass. Unchanged from v1alpha1.
                 format: date-time
                 type: string
+              forkReconcilePasses:
+                description: |-
+                  ForkReconcilePasses counts the husk fork reconcile passes that advanced the
+                  fan-out (each pass that reached a status write). For a level-triggered
+                  controller the pass count is a first-class part of the latency breakdown:
+                  control-plane round-trips (one ~1s requeue per pass) can dominate the
+                  end-to-end fork latency, so the pass count says how much of the total is
+                  requeue wait versus real per-stage work. Timing/observability only. NEW
+                  field.
+                format: int32
+                type: integer
               forkSnapshotTaken:
                 description: |-
                   ForkSnapshotTaken is the exactly-once fork-snapshot guard for a replicas >
                   1 Sandbox, carried so the controller-restart correctness holds. Maps from
                   SandboxForkStatus.forkSnapshotTaken.
                 type: boolean
+              forkStartedAt:
+                description: |-
+                  ForkStartedAt is when the husk fork fan-out began its first working
+                  reconcile pass (the source pod resolved Ready and the controller started
+                  the snapshot/spawn work). A hosted co-location fork is LEVEL-TRIGGERED and
+                  reaches Ready across several ~1s requeue passes, so the wall-clock latency
+                  of the whole fork is NOT observable inside one pass; persisting the start
+                  timestamp lets the controller attribute the true end-to-end latency (from
+                  here to Ready) even though the work is split across passes. Set exactly
+                  once and never rewritten. Timing/observability only; it drives no fork
+                  behavior. NEW field.
+                format: date-time
+                type: string
               node:
                 description: |-
                   Node is the node the sandbox VM runs on. Unchanged from v1alpha1. It is the

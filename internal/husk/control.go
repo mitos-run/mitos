@@ -118,6 +118,16 @@ type ActivateResult struct {
 	VsockPath string  `json:"vsock_path,omitempty"`
 	LatencyMs float64 `json:"latency_ms"`
 	Error     string  `json:"error,omitempty"`
+	// Stages is the per-stage timing breakdown of this activate, in
+	// milliseconds, keyed by a fixed stage name (verify, egress_filter,
+	// vmstate_restore, resume, guest_ready, handshake, serve_api). It is how the
+	// controller attributes WHAT dominates a hosted fork: the stub already
+	// reported the total LatencyMs, and Stages splits that total across the
+	// steps so a caller sees, for example, that guest_ready is most of it. The
+	// keys are a fixed vocabulary (never a secret or an id), the values carry no
+	// secret, and omitempty keeps a stub that does not fill it off the wire, so
+	// an older peer stays byte-for-byte compatible. Timing/observability only.
+	Stages map[string]float64 `json:"stages,omitempty"`
 	// AlreadyActive is set when Activate was refused because the stub is ALREADY
 	// in the active state (a prior Activate succeeded). It is not OK, but it tells
 	// an idempotent caller that the VM is in fact activated, so a re-drive that
@@ -291,6 +301,13 @@ type ForkSnapshotResult struct {
 	SnapshotDir string  `json:"snapshot_dir,omitempty"`
 	LatencyMs   float64 `json:"latency_ms"`
 	Error       string  `json:"error,omitempty"`
+	// Stages is the per-stage timing breakdown of this fork snapshot, in
+	// milliseconds, keyed by a fixed stage name (pause, create_snapshot,
+	// rootfs_freeze, resume). It splits the total LatencyMs across the paused
+	// checkpoint window so a caller sees whether the snapshot cost is the
+	// CreateSnapshot memory write or the rootfs freeze. Fixed keys, no secret,
+	// omitempty for older-peer compatibility. Timing/observability only.
+	Stages map[string]float64 `json:"stages,omitempty"`
 }
 
 // RemoveForkSnapshotRequest asks the source stub to delete a fork snapshot dir it
@@ -372,6 +389,14 @@ type SpawnVMResult struct {
 	LatencyMs     float64 `json:"latency_ms"`
 	Error         string  `json:"error,omitempty"`
 	AlreadyActive bool    `json:"already_active,omitempty"`
+	// Stages is the per-stage timing breakdown of this spawn-vm, in
+	// milliseconds, merging the prepare sub-stages (fc_boot, verify_prepare,
+	// rootfs_clone) with the activate sub-stages (vmstate_restore, guest_ready,
+	// handshake, ...). A co-located fork child is a fresh Firecracker prepared
+	// then activated INSIDE the source pod, so this breakdown is the core of the
+	// hosted-fork latency the controller reports. Fixed keys, no secret,
+	// omitempty for older-peer compatibility. Timing/observability only.
+	Stages map[string]float64 `json:"stages,omitempty"`
 }
 
 func readSpawnVMRequest(r *bufio.Reader) (SpawnVMRequest, error) {

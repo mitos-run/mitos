@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	"mitos.run/mitos/internal/cas"
@@ -155,6 +157,43 @@ func deriveVMNetwork(id vmID, base *vsock.NotifyForkedNetwork) *vsock.NotifyFork
 	return &n
 }
 
+// stageMs returns the milliseconds elapsed since t, the unit the fork stage
+// breakdown records (matching LatencyMs). It is a pure timing helper; it records
+// no secret.
+func stageMs(t time.Time) float64 { return float64(time.Since(t).Microseconds()) / 1000.0 }
+
+// formatStages renders a stage map as a deterministic "name=1.23 name=4.56"
+// string (keys sorted) for a single-line log. It carries only stage names and
+// millisecond durations, never a secret.
+func formatStages(stages map[string]float64) string {
+	if len(stages) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(stages))
+	for name := range stages {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	for i, name := range names {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "%s=%.2f", name, stages[name])
+	}
+	return b.String()
+}
+
+// recordStage stores dur under name in stages when stages is non-nil. The stage
+// maps are the per-stage fork breakdown the controller logs and observes; a nil
+// map (a caller that did not ask for timing) is a no-op so the fast path stays
+// allocation-free. name is a fixed vocabulary value, never a secret or an id.
+func recordStage(stages map[string]float64, name string, since time.Time) {
+	if stages != nil {
+		stages[name] = stageMs(since)
+	}
+}
+
 // prepareInstance brings up a DORMANT Firecracker VMM for one vmID and records it
 // on the per-VM instance, allocating the instance on first use. It mirrors the
 // single-VM Prepare (state gate, snapshot verify at prepare, per-activation rootfs
@@ -173,7 +212,11 @@ func deriveVMNetwork(id vmID, base *vsock.NotifyForkedNetwork) *vsock.NotifyFork
 // environment at launch. SpawnVM passes the FIRECRACKER_MITOS_CHILD_MEMFD entry
 // here so a co-located live-cow child boots its guest RAM from the parent's shared
 // memfd; every other caller passes none, preserving the prior behavior.
-func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride string, extraEnv ...string) error {
+// stages, when non-nil, is filled with this prepare's per-stage timing (fc_boot,
+// verify_prepare, rootfs_clone) in milliseconds; a nil map disables timing with
+// no allocation. It is written under the instance lock, so a caller reads it only
+// after prepareInstance returns. Timing/observability only.
+func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride string, stages map[string]float64, extraEnv ...string) error {
 	if err := checkVMID(id); err != nil {
 		return err
 	}
@@ -212,10 +255,12 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride s
 			return fmt.Errorf("husk: create per-VM workdir for vm %q: %w", id, err)
 		}
 	}
+	fcBootStart := time.Now()
 	vm, err := s.start(cfg)
 	if err != nil {
 		return fmt.Errorf("husk: prepare dormant VMM for vm %q: %w", id, err)
 	}
+	recordStage(stages, "fc_boot", fcBootStart)
 	inst.vm = vm
 
 	// Snapshot verify at prepare time (pre-paid, dormant), the same fail-closed
@@ -223,6 +268,7 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride s
 	// dir + expected digest. The snapshot is read-only and content-addressed, so
 	// verifying once here is equivalent to verifying at activate.
 	if s.prepareSnapshotDir != "" && s.prepareExpectedDigest != "" {
+		verifyStart := time.Now()
 		for _, name := range []string{"mem", "vmstate"} {
 			f := filepath.Join(s.prepareSnapshotDir, name)
 			if err := waitForFile(ctx, f, rootfsTemplateWait); err != nil {
@@ -239,6 +285,7 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride s
 			inst.vm = nil
 			return fmt.Errorf("husk: prepare-time snapshot verification failed for vm %q: %w", id, err)
 		}
+		recordStage(stages, "verify_prepare", verifyStart)
 		inst.prepareVerified = true
 	}
 
@@ -263,11 +310,13 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride s
 			inst.vm = nil
 			return fmt.Errorf("husk: per-activation rootfs source %s not ready for vm %q: %w", rootfsSrc, id, err)
 		}
+		cloneStart := time.Now()
 		if err := s.reflink(rootfsSrc, clonePath); err != nil {
 			_ = inst.vm.Close()
 			inst.vm = nil
 			return fmt.Errorf("husk: clone per-activation rootfs for vm %q: %w", id, err)
 		}
+		recordStage(stages, "rootfs_clone", cloneStart)
 		inst.rootfsClonePath = clonePath
 	}
 
@@ -330,6 +379,12 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	vmStateFile := filepath.Join(req.SnapshotDir, "vmstate")
 
 	start := time.Now()
+	// Per-stage timing of the activate, so the controller can attribute WHAT
+	// dominates a hosted fork instead of seeing only the total. Each block below
+	// records its own elapsed under a fixed stage name; mark is reset after each.
+	// Timing/observability only, under the instance lock this method already holds.
+	stages := make(map[string]float64, 6)
+	mark := time.Now()
 
 	// Verify-on-activate gate, with the same prepare-time fast path the single-VM
 	// Activate uses: skip the re-hash only when THIS instance verified this exact
@@ -348,6 +403,8 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
 		}
 	}
+	recordStage(stages, "verify", mark)
+	mark = time.Now()
 
 	// Per-VM in-pod egress filter. Derive this vmID's OWN /30 (deriveVMNetwork:
 	// the primary VM keeps the base link, every secondary gets a distinct guest
@@ -381,6 +438,8 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		}}
 		inst.activeTap = tap
 	}
+	recordStage(stages, "egress_filter", mark)
+	mark = time.Now()
 
 	// Load PAUSED so the rootfs drive can be rebound before the guest runs, then
 	// resume explicitly, exactly as the single-VM path does.
@@ -388,6 +447,8 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		werr := fmt.Errorf("husk: load snapshot from %s for vm %q: %w", req.SnapshotDir, id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
+	recordStage(stages, "vmstate_restore", mark)
+	mark = time.Now()
 	if inst.rootfsClonePath != "" {
 		if err := inst.vm.PatchDrive("rootfs", inst.rootfsClonePath); err != nil {
 			werr := fmt.Errorf("husk: rebind rootfs drive to per-activation clone for vm %q: %w", id, err)
@@ -398,12 +459,16 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		werr := fmt.Errorf("husk: resume vm %q after rootfs rebind: %w", id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
+	recordStage(stages, "resume", mark)
+	mark = time.Now()
 
 	vsockPath := inst.vm.VsockHostPath(firecracker.VsockRelPath)
 	if err := s.ready(ctx, vsockPath, s.readyTimeout); err != nil {
 		werr := fmt.Errorf("husk: guest not ready after activate for vm %q: %w", id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
+	recordStage(stages, "guest_ready", mark)
+	mark = time.Now()
 
 	// Fork-correctness handshake with a fresh per-VM generation + entropy. Each
 	// instance owns its own generation counter, so two VMs never share it. The
@@ -423,6 +488,8 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		werr := fmt.Errorf("husk: fork-correctness handshake failed for vm %q: %w", id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
+	recordStage(stages, "handshake", mark)
+	mark = time.Now()
 
 	if s.onActivated != nil {
 		if err := s.onActivated(vsockPath, req.Token); err != nil {
@@ -430,13 +497,19 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
 		}
 	}
+	recordStage(stages, "serve_api", mark)
 
 	latency := time.Since(start)
+	// Structured per-stage timing to the stub log (stderr), so a single activate
+	// is legible on the node even without the controller-side breakdown. Stage
+	// names and durations only; no secret, token, or entropy value is logged.
+	fmt.Fprintf(os.Stderr, "husk: activate vm %q stage timing ms: %s total=%.2f\n", id, formatStages(stages), float64(latency.Microseconds())/1000.0)
 	inst.state = StateActive
 	return ActivateResult{
 		OK:        true,
 		VsockPath: vsockPath,
 		LatencyMs: float64(latency.Microseconds()) / 1000.0,
+		Stages:    stages,
 	}, nil
 }
 
@@ -502,14 +575,27 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 			fmt.Fprintf(os.Stderr, "husk: live-cow fork enabled for co-located child vm %q but no armed live-cow parent; restoring from disk fork snapshot this pass\n", req.VMID)
 		}
 	}
-	if err := s.prepareInstance(ctx, id, rootfsSrcOverride, childMemfdEnv...); err != nil {
+	// Per-stage timing of the whole spawn (prepare + activate), so the controller
+	// attributes WHAT dominates a co-located fork child: fc_boot / rootfs_clone
+	// come from prepare, vmstate_restore / guest_ready / handshake from activate.
+	prepStart := time.Now()
+	prepStages := make(map[string]float64, 3)
+	if err := s.prepareInstance(ctx, id, rootfsSrcOverride, prepStages, childMemfdEnv...); err != nil {
 		return SpawnVMResult{
 			OK:    false,
 			VMID:  req.VMID,
 			Error: fmt.Errorf("husk: spawn-vm prepare vm %q: %w", req.VMID, err).Error(),
 		}
 	}
+	prepStages["prepare_total"] = stageMs(prepStart)
 	res, _ := s.activateInstance(ctx, id, req.Activate)
+	// Merge the prepare and activate stage maps into one breakdown for the spawn.
+	// prepare and activate use disjoint stage names, so neither overwrites the
+	// other; the merged map is what the controller logs and observes.
+	stages := prepStages
+	for name, dur := range res.Stages {
+		stages[name] = dur
+	}
 	return SpawnVMResult{
 		OK:            res.OK,
 		VMID:          req.VMID,
@@ -517,6 +603,7 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 		LatencyMs:     res.LatencyMs,
 		Error:         res.Error,
 		AlreadyActive: res.AlreadyActive,
+		Stages:        stages,
 	}
 }
 
@@ -817,11 +904,18 @@ func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapsh
 	}
 
 	start := time.Now()
+	// Per-stage timing of the paused checkpoint window, so the controller sees
+	// whether the fork-snapshot cost is the CreateSnapshot memory write or the
+	// rootfs freeze. Timing/observability only, under the instance lock.
+	stages := make(map[string]float64, 4)
+	mark := time.Now()
 
 	if err := inst.vm.Pause(); err != nil {
 		werr := fmt.Errorf("husk: pause source vm %q for fork snapshot: %w", id, err)
 		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 	}
+	recordStage(stages, "pause", mark)
+	mark = time.Now()
 
 	if err := inst.vm.CreateSnapshot(memFile, vmStateFile); err != nil {
 		// Best effort: resume the source so a transient snapshot error does not leave
@@ -833,6 +927,8 @@ func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapsh
 		werr := fmt.Errorf("husk: create fork snapshot in %s for vm %q: %w", req.SnapshotDir, id, err)
 		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 	}
+	recordStage(stages, "create_snapshot", mark)
+	mark = time.Now()
 
 	// Freeze THIS instance's source rootfs INSIDE the paused window, as a
 	// point-in-time pair with the mem+vmstate checkpoint, exactly as the single-VM
@@ -847,6 +943,8 @@ func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapsh
 			return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 		}
 	}
+	recordStage(stages, "rootfs_freeze", mark)
+	mark = time.Now()
 
 	// ALWAYS resume the source after the checkpoint: the pause is only the brief
 	// quiescence CreateSnapshot requires, and the memory + frozen rootfs are a
@@ -857,12 +955,15 @@ func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapsh
 		werr := fmt.Errorf("husk: resume source vm %q after fork snapshot: %w", id, err)
 		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
 	}
+	recordStage(stages, "resume", mark)
 
 	latency := time.Since(start)
+	fmt.Fprintf(os.Stderr, "husk: fork-snapshot vm %q stage timing ms: %s total=%.2f\n", id, formatStages(stages), float64(latency.Microseconds())/1000.0)
 	return ForkSnapshotResult{
 		OK:          true,
 		SnapshotDir: req.SnapshotDir,
 		LatencyMs:   float64(latency.Microseconds()) / 1000.0,
+		Stages:      stages,
 	}, nil
 }
 

@@ -73,7 +73,7 @@ func TestMultiVMTwoRealFirecrackersKVM(t *testing.T) {
 	ids := []vmID{defaultVMID, "vm-2"}
 	vsockByID := map[vmID]string{}
 	for _, id := range ids {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 		res, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: snapDir})
