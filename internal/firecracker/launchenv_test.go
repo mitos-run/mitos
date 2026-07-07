@@ -30,3 +30,30 @@ func TestLaunchEnv(t *testing.T) {
 		}
 	}
 }
+
+// TestLaunchEnvOverridesInheritedDuplicate guards the CodeRabbit fix: a stale
+// inherited FIRECRACKER_MITOS_* must NOT shadow the armed value. exec resolves
+// duplicate names by the first occurrence, so launchEnv must drop the inherited
+// key rather than append behind it.
+func TestLaunchEnvOverridesInheritedDuplicate(t *testing.T) {
+	t.Setenv("FIRECRACKER_MITOS_SHARED_MEM", "stale-inherited")
+	extra := []string{"FIRECRACKER_MITOS_SHARED_MEM=armed"}
+	got := launchEnv(extra)
+
+	var seen int
+	for _, kv := range got {
+		if kv == "FIRECRACKER_MITOS_SHARED_MEM=armed" {
+			seen++
+		}
+		if kv == "FIRECRACKER_MITOS_SHARED_MEM=stale-inherited" {
+			t.Errorf("stale inherited value survived: %q", kv)
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("armed FIRECRACKER_MITOS_SHARED_MEM must appear exactly once, got %d", seen)
+	}
+	// The armed value must be the last occurrence so exec resolves to it.
+	if got[len(got)-1] != "FIRECRACKER_MITOS_SHARED_MEM=armed" {
+		t.Errorf("armed value must be last (exec picks first, but there must be no earlier dup); tail = %q", got[len(got)-1])
+	}
+}
