@@ -196,6 +196,16 @@ func (e *MockEngine) SetDiskHeadroom(free, total int64) {
 	e.diskTotalBytes = total
 }
 
+// SetForkErr sets (or clears, with nil) the error every Fork returns, under the
+// same lock Fork reads it with. Tests that flip ForkErr while a forkd mock gRPC
+// server is still serving Fork calls MUST use this rather than assigning the
+// field directly, or the unlocked write races the locked read in Fork.
+func (e *MockEngine) SetForkErr(err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.ForkErr = err
+}
+
 func (e *MockEngine) Fork(snapshotID, sandboxID string, opts ForkOpts) (*ForkResult, error) {
 	start := time.Now()
 

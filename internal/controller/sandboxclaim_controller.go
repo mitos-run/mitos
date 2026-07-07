@@ -118,6 +118,28 @@ type SandboxReconciler struct {
 	forkSnapshot       huskForkSnapshotter
 	removeForkSnapshot huskForkSnapshotRemover
 
+	// MultiVMFork routes a husk fork child into an ADDITIONAL VM spawned INSIDE the
+	// SOURCE pod (SpawnVMOnHusk) instead of a brand-new child pod, when the source
+	// pod is multi-VM capable. EXPERIMENTAL, DEFAULT OFF: off is byte-for-byte the
+	// buildForkChildPod new-pod path, so nothing changes unless an operator opts in
+	// AND the source pod runs a --multi-vm husk stub (huskPodMultiVMCapable).
+	// Co-location is gated by the per-pod MEMORY ACCOUNTING (L1.7b, guarantee A,
+	// coLocatedForkVMBudget): a child co-locates only while the source pod's memory
+	// budget (floor(memory.max / per-VM guest RAM) minus the source VM's own slot)
+	// has room at the CoW worst case, and every child past the budget spills to a
+	// new pod so a fork never overcommits the pod. Only used when EnableHuskPods is
+	// true.
+	MultiVMFork bool
+
+	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
+	// Nil defaults to SpawnVMOnHusk; tests inject a fake.
+	spawnVM huskVMSpawner
+
+	// multiVMForkGate, when non-nil, overrides MultiVMFork so a test can toggle the
+	// routing race-safely on the shared reconciler (the field itself is never
+	// mutated after setup). Nil (the production default) reads MultiVMFork. Tests only.
+	multiVMForkGate func() bool
+
 	// KMS is the envelope-encryption Wrapper used to wrap a template's at-rest DEK
 	// on the fork path (an idempotent read of the controller-owned Secret created
 	// at build time). REQUIRED when any reconciled template is Encrypted;
@@ -919,6 +941,14 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 	claim.Status.Phase = v1.SandboxReady
 	claim.Status.Endpoint = endpoint
 	claim.Status.Node = pod.Spec.NodeName
+	// Surface the shared-host mapping on the CRD (fork-primitive-multinode plan,
+	// "the k8s interface and observability"): Pod is the husk HOST pod backing
+	// this sandbox and VMID is the intra-pod VM identity. On today's single-VM
+	// path VMID is the default primary identity, so the (Pod, VMID) pair is
+	// populated and correct for the 1:1 case; multi-VM co-location (fork routing)
+	// lands in a later increment. This is a purely additive status write.
+	claim.Status.Pod = pod.Name
+	claim.Status.VMID = v1.DefaultVMID
 	claim.Status.SandboxID = pod.Name
 	claim.Status.StartedAt = &now
 	setCondition(&claim.Status.Conditions, metav1.Condition{

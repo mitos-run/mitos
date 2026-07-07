@@ -117,6 +117,13 @@ spec:
             # Cluster-internal metrics listener (issue #617); scraped by the
             # console PodMonitor, never exposed through the Service or Ingress.
             - --metrics-addr=:9100
+            # Cluster-internal listener for the bearer-gated machine-to-machine
+            # /internal/* endpoints (identity/resolve, session/resolve,
+            # approve-signup). Served ONLY here, never on the public :8080 mux, so
+            # they are not internet-reachable (GHSA-rcf5-cfv3-jxvv). The frontdoor
+            # and expose proxy reach it via the mitos-console Service internal
+            # port; no HTTPRoute forwards to it.
+            - --internal-addr=:8091
           env:
             # Capabilities the binary serves at /console/capabilities. ONE bundle,
             # behavior driven entirely by these server-controlled values.
@@ -331,6 +338,8 @@ spec:
               containerPort: 8080
             - name: metrics
               containerPort: 9100
+            - name: internal
+              containerPort: 8091
           resources:
             {{- toYaml .Values.console.resources | nindent 12 }}
           securityContext:
@@ -367,6 +376,13 @@ spec:
     - name: http
       port: 80
       targetPort: http
+    # Cluster-internal port for the bearer-gated /internal/* M2M endpoints. This
+    # port is NOT fronted by any HTTPRoute/Ingress, so it is reachable only from
+    # in-cluster callers (the frontdoor and expose proxy), never the internet
+    # (GHSA-rcf5-cfv3-jxvv).
+    - name: internal
+      port: 8091
+      targetPort: internal
 {{- if .Values.console.ingress.enabled }}
 ---
 apiVersion: networking.k8s.io/v1
