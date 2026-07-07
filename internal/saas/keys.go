@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -74,6 +75,24 @@ type KeyServiceOption func(*KeyService)
 // WithSalt sets the hash pepper. The value is never logged.
 func WithSalt(salt []byte) KeyServiceOption {
 	return func(s *KeyService) { s.salt = append([]byte(nil), salt...) }
+}
+
+// EnvKeyPepper is the environment variable that holds the process-wide API key
+// hash pepper. When set, the SAME value MUST be configured on every component
+// that creates or verifies keys (gateway, console, CLI); a mismatch makes keys
+// fail to verify. It is opt-in: unset keeps the current unsalted hash, so an
+// existing store keeps working until the pepper is deliberately introduced (at
+// which point pre-existing keys must be reissued).
+const EnvKeyPepper = "MITOS_API_KEY_PEPPER"
+
+// KeyPepperFromEnv reads the API key pepper from EnvKeyPepper. It returns the
+// pepper bytes and whether a non-empty value was set. The value is never logged.
+func KeyPepperFromEnv() ([]byte, bool) {
+	v := os.Getenv(EnvKeyPepper)
+	if v == "" {
+		return nil, false
+	}
+	return []byte(v), true
 }
 
 // WithClock sets the time source (for deterministic tests).

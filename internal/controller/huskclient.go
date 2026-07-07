@@ -157,6 +157,46 @@ func HydrateWorkspaceOnHusk(ctx context.Context, addr string, tlsConf *tls.Confi
 	return res, nil
 }
 
+// SpawnVMOnHusk dials a husk stub's network control at addr over mTLS and runs
+// the spawn-vm op: it asks a RUNNING husk pod to bring up an ADDITIONAL
+// same-tenant VM (req.VMID) inside the same pod using the experimental multi-VM
+// engine, then returns the spawned VM's result (its vsock path when OK). The
+// husk stub fails the op closed unless it runs with --multi-vm, so a single-VM pod
+// is never driven to host a second VM.
+//
+// SECURITY: req.Activate carries tenant SECRETS (Secrets, Token), so the channel
+// MUST be mTLS. tlsConf pins the husk server identity and presents the controller
+// client certificate the husk server authorizes; a nil tlsConf is refused so the
+// control surface is never driven unauthenticated. Secret VALUES are never logged
+// here: errors carry only the operation, the address, and the transport error,
+// never the request payload; the returned SpawnVMResult.Error likewise never
+// carries secrets (the stub guarantees this).
+func SpawnVMOnHusk(ctx context.Context, addr string, tlsConf *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error) {
+	if tlsConf == nil {
+		return husk.SpawnVMResult{}, fmt.Errorf("spawn-vm on husk %s: refusing to drive the control channel unauthenticated", addr)
+	}
+	dialer := &tls.Dialer{Config: tlsConf}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return husk.SpawnVMResult{}, fmt.Errorf("dial husk control %s: %w", addr, err)
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	if err := husk.WriteControlOp(conn, husk.OpSpawnVM); err != nil {
+		return husk.SpawnVMResult{}, fmt.Errorf("send spawn-vm op to %s: %w", addr, err)
+	}
+	if err := husk.WriteSpawnVMRequest(conn, req); err != nil {
+		return husk.SpawnVMResult{}, fmt.Errorf("send spawn-vm request to %s: %w", addr, err)
+	}
+	res, err := husk.ReadSpawnVMResult(conn)
+	if err != nil {
+		return husk.SpawnVMResult{}, fmt.Errorf("read spawn-vm result from %s: %w", addr, err)
+	}
+	return res, nil
+}
+
 // RemoveForkSnapshotOnHusk dials the source husk stub and asks it to delete a
 // fork snapshot dir it previously created (the GC counterpart of
 // ForkSnapshotOnHusk). It is best-effort from the caller's perspective: the

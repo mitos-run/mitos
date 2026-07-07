@@ -198,6 +198,50 @@ func TestCreateNoPoolNoDefaultRejected(t *testing.T) {
 	}
 }
 
+// TestCreateRejectsSecretRefInSingleTenant asserts that in single-tenant mode
+// (all orgs share one namespace) a create carrying a client-supplied secretRef
+// is refused before any object is built. Otherwise a tenant could name any
+// Secret in the shared namespace, including platform secrets and other tenants'
+// secrets, and have its value mounted into its own sandbox (GHSA-pgv2-9w24-j7wh).
+func TestCreateRejectsSecretRefInSingleTenant(t *testing.T) {
+	c := newFakeClient(t)
+	cp := New(c, WithSingleTenantNamespace("mitos"), WithPollInterval(5*time.Millisecond))
+	body := `{"pool":"default","secrets":[{"name":"x","secretRef":{"name":"mitos-db","key":"dsn"},"envVar":"STOLEN"}]}`
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{OrgID: orgA, Op: "sandbox.create", Body: []byte(body)})
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", resp.Status, resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), "invalid_input") {
+		t.Errorf("expected invalid_input rejection, got: %s", resp.Body)
+	}
+	var list v1.SandboxList
+	_ = c.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Errorf("created %d sandboxes for a rejected secretRef request", len(list.Items))
+	}
+}
+
+// TestCreateRejectsWorkspaceRefInSingleTenant asserts that in single-tenant mode
+// a create naming a workspace is refused: a shared namespace makes a bare
+// workspace name reachable across orgs (GHSA-pgv2-9w24-j7wh).
+func TestCreateRejectsWorkspaceRefInSingleTenant(t *testing.T) {
+	c := newFakeClient(t)
+	cp := New(c, WithSingleTenantNamespace("mitos"), WithPollInterval(5*time.Millisecond))
+	body := `{"pool":"default","workspace":"victim-workspace"}`
+	resp, _ := cp.Forward(context.Background(), saas.ForwardRequest{OrgID: orgA, Op: "sandbox.create", Body: []byte(body)})
+	if resp.Status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", resp.Status, resp.Body)
+	}
+	if !strings.Contains(string(resp.Body), "invalid_input") {
+		t.Errorf("expected invalid_input rejection, got: %s", resp.Body)
+	}
+	var list v1.SandboxList
+	_ = c.List(context.Background(), &list)
+	if len(list.Items) != 0 {
+		t.Errorf("created %d sandboxes for a rejected workspace request", len(list.Items))
+	}
+}
+
 // TestUnknownOperationSaysRouteNotSandbox asserts an unmatched route (which
 // opFromPath maps to a nonexistent "sandbox.<method>" op) does not tell the
 // caller "no such sandbox": it hit a route the gateway does not expose, not a
@@ -763,12 +807,14 @@ func TestEnsureTemplateRejectsEmptyID(t *testing.T) {
 // existing SandboxPools to template descriptors. A pool with ReadySnapshots > 0
 // returns ready: true; one with none returns ready: false.
 func TestListTemplatesReturnsPoolDescriptors(t *testing.T) {
+	// template.list is scoped to the caller's own namespace (issue #733, item 5),
+	// so the pools live in orgA's namespace, the same one a create resolves in.
 	readyPool := &v1.SandboxPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "python", Namespace: "mitos-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: "python", Namespace: tenant.NamespaceForOrg(orgA)},
 		Status:     v1.SandboxPoolStatus{ReadySnapshots: 3},
 	}
 	emptyPool := &v1.SandboxPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "mitos-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: tenant.NamespaceForOrg(orgA)},
 		Status:     v1.SandboxPoolStatus{ReadySnapshots: 0},
 	}
 	c := newFakeClient(t, readyPool, emptyPool)

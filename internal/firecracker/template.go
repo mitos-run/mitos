@@ -192,6 +192,108 @@ func (tm *TemplateManager) startWorkloadGRPC(vsockPath string, w *WorkloadSpec) 
 	return nil
 }
 
+// warmKernelCode is the trivial cell the pre-snapshot warmup runs to force the
+// code-interpreter kernel (ipykernel behind /opt/mitos/kernel_driver.py) to
+// start, so every fork wakes with a warm kernel instead of paying the ~5s lazy
+// start on its first run_code.
+//
+// FORK-CORRECTNESS INVARIANT: this cell must NOT touch random, numpy, uuid, or
+// anything else that draws randomness. CPython seeds its Mersenne Twister
+// lazily from os.urandom on first use; keeping the PRNGs unseeded at snapshot
+// time means each fork seeds fresh after the per-fork CRNG reseed instead of
+// inheriting one shared PRNG state (docs/fork-correctness.md, run_code kernel
+// caveat). Pinned by TestWarmKernelCode_NeverDrawsRandomness.
+const warmKernelCode = "pass"
+
+// warmKernelTimeoutSecs bounds the warmup cell. The ipykernel boot is ~5s on a
+// production node, but CI and first-boot bytecode compilation can be far
+// slower, so this is generous; the cell itself is a no-op.
+const warmKernelTimeoutSecs = 120
+
+// warmKernelGRPC runs the trivial warmup cell through Sandbox.RunCodeStream so
+// the kernel is live when the caller snapshots. Modeled on startWorkloadGRPC:
+// connect via the waitReady seam, open the stream, drain to the terminal
+// exit_code frame. Any failure (no kernel in the image, a nonzero exit, a
+// transport error) is returned to the caller; the fail-open decision lives in
+// maybeWarmKernel. No code output is logged (it could echo user-adjacent data;
+// the warmup cell itself is a constant).
+func (tm *TemplateManager) warmKernelGRPC(vsockPath string) error {
+	waitReady := tm.waitReady
+	if waitReady == nil {
+		waitReady = guestgrpc.WaitReady
+	}
+	ctx := context.Background()
+	client, err := waitReady(ctx, vsockPath, initReadyTimeout)
+	if err != nil {
+		return fmt.Errorf("connect to guest agent for kernel warmup: %w", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// Client margin over the guest-requested timeout, like startWorkloadGRPC:
+	// the guest must get the chance to report its own timeout cleanly instead
+	// of the client racing it into an ambiguous context error.
+	wctx, cancel := context.WithTimeout(ctx, (warmKernelTimeoutSecs+30)*time.Second)
+	defer cancel()
+	stream, err := client.Sandbox.RunCodeStream(wctx, &sandboxv1.RunCodeStreamRequest{
+		Code:           warmKernelCode,
+		Language:       "python",
+		TimeoutSeconds: warmKernelTimeoutSecs,
+	})
+	if err != nil {
+		return fmt.Errorf("kernel warmup RunCodeStream open: %w", err)
+	}
+
+	var kernelErr *sandboxv1.RunError
+	var exitCode int32
+	sawExit := false
+	for {
+		msg, rerr := stream.Recv()
+		if rerr != nil {
+			// io.EOF is the normal stream-end signal after the exit_code frame.
+			if errors.Is(rerr, io.EOF) {
+				break
+			}
+			return fmt.Errorf("kernel warmup RunCodeStream recv: %w", rerr)
+		}
+		switch v := msg.Msg.(type) {
+		case *sandboxv1.RunCodeResponse_Error:
+			kernelErr = v.Error
+		case *sandboxv1.RunCodeResponse_ExitCode:
+			exitCode = v.ExitCode
+			sawExit = true
+		}
+	}
+	if kernelErr != nil {
+		return fmt.Errorf("kernel warmup cell failed: %s: %s", kernelErr.GetName(), kernelErr.GetValue())
+	}
+	if !sawExit {
+		return errors.New("kernel warmup stream ended without an exit_code frame")
+	}
+	if exitCode != 0 {
+		return fmt.Errorf("kernel warmup cell exited %d", exitCode)
+	}
+	return nil
+}
+
+// maybeWarmKernel runs the pre-snapshot kernel warmup when enabled, failing
+// OPEN on any warmup error: an image without the kernel (KernelUnavailable, a
+// nonzero exit, the driver missing) logs a warning and the build continues, so
+// warm_kernel can never break a non-python template build. The cost of failing
+// open is only the old behavior: forks start the kernel lazily on first
+// run_code.
+func (tm *TemplateManager) maybeWarmKernel(id, vsockPath string, enabled bool) {
+	if !enabled {
+		return
+	}
+	warm := tm.warmKernel
+	if warm == nil {
+		warm = tm.warmKernelGRPC
+	}
+	if err := warm(vsockPath); err != nil {
+		log.Printf("warning: template %s: kernel warmup failed (%v); continuing without a warm kernel, forks will start it lazily on first run_code", id, err)
+	}
+}
+
 // VsockRelPath is the vsock uds_path configured before snapshot and thus
 // baked into every template snapshot. It is deliberately RELATIVE so that
 // each restored Firecracker process binds it against its own working
@@ -242,6 +344,12 @@ type TemplateManager struct {
 	// Injectable seam: nil uses the production gRPC Control.StartWorkload path
 	// (startWorkloadGRPC). A workload that never becomes ready fails the build.
 	startWorkload func(vsockPath string, w *WorkloadSpec) error
+
+	// warmKernel runs the pre-snapshot code-interpreter warmup cell so a fork
+	// wakes with a warm kernel. Injectable seam: nil uses the production gRPC
+	// Sandbox.RunCodeStream path (warmKernelGRPC). Warmup failures fail OPEN
+	// (see maybeWarmKernel); they never fail the build.
+	warmKernel func(vsockPath string) error
 }
 
 // WorkloadSpec is the serving workload the build starts and snapshots while it is
@@ -326,7 +434,11 @@ type TemplateResult struct {
 // has started, with its pid and jailer artifacts, so the caller can journal the
 // in-flight build and reap it if forkd dies ungracefully before the deferred Kill
 // runs (#469). It is called synchronously, before the long boot/init/snapshot steps.
-func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands []string, workload *WorkloadSpec, onStarted func(pid int, js JailerState)) (*TemplateResult, error) {
+// warmKernel, when true, runs one trivial run_code cell after the workload start
+// and BEFORE the pause/snapshot, so the code-interpreter kernel is captured live
+// and every fork skips its ~5s lazy start; warmup failures fail open (see
+// maybeWarmKernel), so non-python images build unchanged.
+func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands []string, workload *WorkloadSpec, warmKernel bool, onStarted func(pid int, js JailerState)) (*TemplateResult, error) {
 	// Re-assert the allowlist barrier locally: the id is validated at the forkd
 	// gRPC boundary (validateSandboxID), but a defense-in-depth check here keeps
 	// every path that joins the id provably free of separators and traversal,
@@ -487,6 +599,15 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 			return nil, fmt.Errorf("start serving workload: %w", err)
 		}
 	}
+
+	// Warm the code-interpreter kernel BEFORE the pause/snapshot when requested,
+	// so every fork inherits a LIVE kernel instead of cold-starting it on its
+	// first run_code (~5s vs ~200ms). Runs AFTER init and the workload start so
+	// the warmed kernel sees the fully built image. Fails open: an image without
+	// the kernel logs and continues, and the warmup cell deliberately draws no
+	// randomness so the kernel's Python PRNGs stay unseeded in the snapshot
+	// (docs/fork-correctness.md, run_code kernel caveat).
+	tm.maybeWarmKernel(id, vsockPath, warmKernel)
 
 	// Pause the VM before snapshot
 	if err := client.Pause(); err != nil {

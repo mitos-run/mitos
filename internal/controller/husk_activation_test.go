@@ -75,8 +75,10 @@ func (f *fakeActivator) callCount() int {
 
 // makeDormantHuskPod creates a husk pod and forces it Running+Ready with a
 // PodIP, simulating a warm dormant slot (envtest has no kubelet, so the test
-// drives the status directly).
-func makeDormantHuskPod(t *testing.T, poolName, podIP string) *corev1.Pod {
+// drives the status directly). Optional mutators adjust the pod spec before
+// creation (e.g. to give a fork SOURCE pod the placement nodeSelector and
+// tolerations a real warm pod carries).
+func makeDormantHuskPod(t *testing.T, poolName, podIP string, mutate ...func(*corev1.Pod)) *corev1.Pod {
 	t.Helper()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -94,6 +96,9 @@ func makeDormantHuskPod(t *testing.T, poolName, podIP string) *corev1.Pod {
 				Image: "mitos-husk-stub:test",
 			}},
 		},
+	}
+	for _, m := range mutate {
+		m(pod)
 	}
 	// reconcileHuskPods stamps a controller owner reference to the pool on every
 	// husk pod it creates, and selectDormantHuskPod now REQUIRES it before a pod
@@ -253,6 +258,33 @@ func TestHuskClaimActivatesDormantPod(t *testing.T) {
 	// Secret value never logged.
 	if strings.Contains(string(logBuf.Bytes()[logStart:]), "super-secret-value-XYZ") {
 		t.Error("secret value leaked into the controller log")
+	}
+}
+
+// TestHuskClaimStampsHostPodAndVMID proves the husk-backed ready-stamp surfaces
+// the shared-host mapping on the CRD (fork-primitive-multinode plan, "the k8s
+// interface and observability"): status.Pod carries the husk HOST pod name and
+// status.VMID carries the intra-pod VM identity. On today's single-VM path VMID
+// is the default primary identity, so the (Pod, VMID) pair is populated and
+// correct for the 1:1 case; multi-VM co-location lands in a later increment.
+func TestHuskClaimStampsHostPodAndVMID(t *testing.T) {
+	pod := makeDormantHuskPod(t, "husk-vmid-pool", "10.1.2.55")
+
+	act := &fakeActivator{result: husk.ActivateResult{OK: true, VsockPath: "/run/husk/vm/vsock", LatencyMs: 1.0}}
+	setHuskTestActivator(act.activate)
+	t.Cleanup(func() { setHuskTestActivator(nil) })
+
+	claim := makeHuskClaim(t, "husk-vmid", v1.SandboxSpec{})
+
+	got := waitClaimPhase(t, claim.Name, func(c *v1.Sandbox) bool {
+		return c.Status.Phase == v1.SandboxReady
+	})
+
+	if got.Status.Pod != pod.Name {
+		t.Errorf("status.Pod = %q, want the husk host pod %q", got.Status.Pod, pod.Name)
+	}
+	if got.Status.VMID != v1.DefaultVMID {
+		t.Errorf("status.VMID = %q, want the default primary identity %q", got.Status.VMID, v1.DefaultVMID)
 	}
 }
 

@@ -4,10 +4,42 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/pgstore"
 )
+
+// TestPgSessionStoreExpiry asserts an absolute max-age is enforced at Resolve:
+// a session whose created_at is older than the configured max-age no longer
+// resolves, while a fresh one does (issue #733, item 2).
+func TestPgSessionStoreExpiry(t *testing.T) {
+	dsn := testDSN(t)
+	pg, err := pgstore.Open(context.Background(), dsn)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(pg.Close)
+	truncateTables(t, dsn, "sessions")
+	s := pgstore.NewPgSessionStore(pg.Pool(), pgstore.WithPgSessionMaxAge(24*time.Hour))
+
+	// A fresh session resolves.
+	s.IssueSession("acct1", "fresh", "browser")
+	if acct, err := s.Resolve("fresh"); err != nil || acct != "acct1" {
+		t.Fatalf("fresh Resolve = (%q, %v), want (acct1, nil)", acct, err)
+	}
+
+	// Backdate a session past the max-age; it must not resolve.
+	staleID := s.IssueSession("acct1", "stale", "browser")
+	if _, err := pg.Pool().Exec(context.Background(),
+		`UPDATE sessions SET created_at = now() - interval '48 hours' WHERE id = $1`,
+		staleID); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	if _, err := s.Resolve("stale"); !errors.Is(err, saas.ErrSessionInvalid) {
+		t.Fatalf("stale Resolve err = %v, want ErrSessionInvalid", err)
+	}
+}
 
 func TestPgSessionStore(t *testing.T) {
 	dsn := testDSN(t)

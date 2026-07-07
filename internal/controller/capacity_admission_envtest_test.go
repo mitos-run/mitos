@@ -76,6 +76,17 @@ func waitForPhase(t *testing.T, name string, want v1.SandboxPhase, timeout time.
 	return last
 }
 
+// waitForSettledNoCapacity waits for the claim's Ready reason to settle to
+// NoCapacity (a claim can transiently pend with PoolNotFound before its pool is
+// visible to the reconciler cache) and returns the re-fetched claim, so callers
+// assert against the settled state and never race a transient reason.
+func waitForSettledNoCapacity(t *testing.T, name string) v1.Sandbox {
+	t.Helper()
+	waitForPhase(t, name, v1.SandboxPending, 15*time.Second)
+	waitForReadyReason(t, name, "NoCapacity")
+	return getClaim(t, name)
+}
+
 // TestClaimPendsThenReadyOnFreedCapacity drives the capacity-aware admission
 // path: the only node reports a full memory budget, so the claim pends with a
 // NoCapacity condition (not Ready, not Failed); freeing the node lets the claim
@@ -96,7 +107,7 @@ func TestClaimPendsThenReadyOnFreedCapacity(t *testing.T) {
 	makeCapacityFixture(t, "cap1")
 
 	// The claim must pend (not Ready, not Failed) while capacity is exhausted.
-	pending := waitForPhase(t, "cap1", v1.SandboxPending, 15*time.Second)
+	pending := waitForSettledNoCapacity(t, "cap1")
 	if got := counterValue(t, "mitos_claim_pending_total", nil); got <= pendingBefore {
 		t.Fatalf("claim_pending_total = %v, want > %v", got, pendingBefore)
 	}
@@ -190,11 +201,11 @@ func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
 	// The node has memory headroom so admits() selects it; the forkd Fork RPC is
 	// what rejects, exactly the race the schedule-time count check cannot close.
 	testRegistry.SetNodeMemory("cap-node-3", 16*gib, 0)
-	engine.ForkErr = fork.ErrAtCapacity // -> gRPC ResourceExhausted
+	engine.SetForkErr(fork.ErrAtCapacity) // -> gRPC ResourceExhausted
 
 	makeCapacityFixture(t, "cap3")
 
-	pending := waitForPhase(t, "cap3", v1.SandboxPending, 15*time.Second)
+	pending := waitForSettledNoCapacity(t, "cap3")
 	cond := meta.FindStatusCondition(pending.Status.Conditions, "Ready")
 	if cond == nil || cond.Reason != "NoCapacity" {
 		t.Fatalf("Ready condition = %+v, want reason NoCapacity (re-pend, not terminal)", cond)
@@ -216,7 +227,7 @@ func TestClaimRePendsOnForkdResourceExhausted(t *testing.T) {
 
 	// Clearing the reject lets a later reconcile place the claim and go Ready,
 	// proving the re-pend was recoverable (not a dead end).
-	engine.ForkErr = nil
+	engine.SetForkErr(nil)
 	ready := waitForPhase(t, "cap3", v1.SandboxReady, 15*time.Second)
 	if ready.Status.Node != "cap-node-3" {
 		t.Fatalf("ready node = %q, want cap-node-3", ready.Status.Node)
@@ -235,11 +246,11 @@ func TestClaimRePendsOnForkdUnavailable(t *testing.T) {
 	defer stop()
 
 	testRegistry.SetNodeMemory("cap-node-4", 16*gib, 0)
-	engine.ForkErr = status.Error(codes.Unavailable, "node draining")
+	engine.SetForkErr(status.Error(codes.Unavailable, "node draining"))
 
 	makeCapacityFixture(t, "cap4")
 
-	pending := waitForPhase(t, "cap4", v1.SandboxPending, 15*time.Second)
+	pending := waitForSettledNoCapacity(t, "cap4")
 	cond := meta.FindStatusCondition(pending.Status.Conditions, "Ready")
 	if cond == nil || cond.Reason != "NoCapacity" {
 		t.Fatalf("Ready condition = %+v, want reason NoCapacity (re-pend, not terminal)", cond)

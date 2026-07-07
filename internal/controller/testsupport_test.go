@@ -48,8 +48,15 @@ func (r *SandboxPoolReconciler) BuildHuskPodForTest(pool *v1.SandboxPool, templa
 
 // BuildForkChildPodForTest exposes buildForkChildPod to the external
 // controller_test package so the fork child pod spec can be unit-tested.
-func BuildForkChildPodForTest(fork *v1.Sandbox, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
-	return buildForkChildPod(fork, childName, opts, scheme)
+func BuildForkChildPodForTest(fork *v1.Sandbox, srcPod *corev1.Pod, childName string, opts HuskPodOptions, scheme *runtime.Scheme) *corev1.Pod {
+	return buildForkChildPod(fork, srcPod, childName, opts, scheme)
+}
+
+// CoLocatedForkVMBudgetForTest exposes coLocatedForkVMBudget to the external
+// controller_test package so the per-pod co-location budget a source husk pod
+// grants (guarantee A) can be unit-tested against the real pod builder's output.
+func CoLocatedForkVMBudgetForTest(pod *corev1.Pod) int {
+	return coLocatedForkVMBudget(pod)
 }
 
 // SetForkSnapshotForTest installs the fork-snapshot seam (tests only).
@@ -61,6 +68,23 @@ func (r *SandboxReconciler) SetForkSnapshotForTest(fn func(ctx context.Context, 
 func (r *SandboxReconciler) SetForkSnapshotRemoverForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error)) {
 	r.removeForkSnapshot = fn
 }
+
+// SetForkVMSpawnerForTest installs the spawn-vm seam the MultiVMFork routing dials
+// through (tests only).
+func (r *SandboxReconciler) SetForkVMSpawnerForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error)) {
+	r.spawnVM = fn
+}
+
+// SetMultiVMForkGateForTest installs the race-safe MultiVMFork toggle a test flips
+// per-case on the shared reconciler (tests only). A nil gate reads the MultiVMFork
+// field.
+func (r *SandboxReconciler) SetMultiVMForkGateForTest(gate func() bool) {
+	r.multiVMForkGate = gate
+}
+
+// HuskMultiVMLabel exposes the multi-VM-capable husk pod label to the external
+// controller_test package, so a test can stamp a source pod as multi-VM capable.
+const HuskMultiVMLabel = huskMultiVMLabel
 
 // SkipForkLabel restricts the reconciler to sandboxes WITHOUT the given label,
 // for the husk-fork harness; an alias of SkipLabel on the consolidated reconciler.
@@ -466,7 +490,7 @@ func startFakeForkdNodeFull(registry *NodeRegistry, nodeName string, serverTLS, 
 	engine = fork.NewMockEngine()
 	engine.ForkDelay = 0
 	for _, tmpl := range templates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false, false); err != nil {
 			return nil, nil, nil, nil, err
 		}
 	}

@@ -29,6 +29,14 @@ func (k *K8sControlPlane) ResolveRuntime(ctx context.Context, orgID, id string) 
 			WithCause(fmt.Sprintf("no sandbox %q exists for this organization", id))
 		return saas.RuntimeTarget{}, &e
 	}
+	// A multi-child fork fan-out cannot be addressed by one id: refuse it typed
+	// rather than silently routing everything to child 0. This guard runs
+	// BEFORE the terminal gate so a fan-out whose first child happens to be
+	// reaped still gets the single-child limitation, never child 0's
+	// idle_timeout speaking for the whole fan-out.
+	if aerr := multiChildRuntimeError(sb); aerr != nil {
+		return saas.RuntimeTarget{}, aerr
+	}
 	// Terminal phases answer with the typed error BEFORE any dial, mirroring
 	// proxy(): a Terminated claim keeps its stale endpoint after the VM stopped
 	// (issue #688), so the PTY must get the documented idle_timeout error, not
@@ -36,16 +44,19 @@ func (k *K8sControlPlane) ResolveRuntime(ctx context.Context, orgID, id string) 
 	if aerr := terminalRuntimeError(sb); aerr != nil {
 		return saas.RuntimeTarget{}, aerr
 	}
-	if sb.Status.Endpoint == "" {
+	// Fork-aware endpoint and token resolution: a fromSandbox fork carries its
+	// endpoint and (reissued) token on its first CHILD, never on the fork object.
+	endpoint := runtimeEndpoint(sb)
+	if endpoint == "" {
 		e := apierr.Get(apierr.CodeNotFound).
 			WithCause(fmt.Sprintf("sandbox %q has no runtime endpoint yet; it is not Ready", id))
 		return saas.RuntimeTarget{}, &e
 	}
-	token, err := k.readToken(ctx, sb.Namespace, sb.Name)
+	token, err := k.readSandboxToken(ctx, sb)
 	if err != nil {
 		e := apierr.Get(apierr.CodeInternal).
 			WithCause("the per-sandbox access token secret could not be read")
 		return saas.RuntimeTarget{}, &e
 	}
-	return saas.RuntimeTarget{Endpoint: sb.Status.Endpoint, Token: token, SandboxID: sb.Name}, nil
+	return saas.RuntimeTarget{Endpoint: endpoint, Token: token, SandboxID: runtimeSandboxID(sb)}, nil
 }

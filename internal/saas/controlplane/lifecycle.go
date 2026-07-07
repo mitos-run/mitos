@@ -46,12 +46,20 @@ func (k *K8sControlPlane) lifecycle(ctx context.Context, req saas.ForwardRequest
 	if !ok {
 		return notFound(body.Sandbox), nil
 	}
-	if sb.Status.Endpoint == "" {
+	// A multi-child fork fan-out cannot be addressed by one id: refuse it typed
+	// rather than silently routing everything to child 0.
+	if aerr := multiChildRuntimeError(sb); aerr != nil {
+		return errResp(*aerr), nil
+	}
+	// Fork-aware endpoint and token resolution: a fromSandbox fork carries its
+	// endpoint and (reissued) token on its first CHILD, never on the fork object.
+	endpoint := runtimeEndpoint(sb)
+	if endpoint == "" {
 		return errResp(apierr.Get(apierr.CodeNotFound).
 			WithCause(fmt.Sprintf("sandbox %q has no runtime endpoint yet; it is not Ready", body.Sandbox))), nil
 	}
 
-	token, err := k.readToken(ctx, sb.Namespace, sb.Name)
+	token, err := k.readSandboxToken(ctx, sb)
 	if err != nil {
 		return errResp(apierr.Get(apierr.CodeInternal).
 			WithCause("the per-sandbox access token secret could not be read")), nil
@@ -59,12 +67,12 @@ func (k *K8sControlPlane) lifecycle(ctx context.Context, req saas.ForwardRequest
 
 	// The upstream body carries the control-plane-resolved sandbox name, never a
 	// client-supplied value the resolution did not verify.
-	payload, err := json.Marshal(map[string]string{"sandbox": sb.Name})
+	payload, err := json.Marshal(map[string]string{"sandbox": runtimeSandboxID(sb)})
 	if err != nil {
 		return errResp(apierr.Get(apierr.CodeInternal).
 			WithCause("could not encode the lifecycle request")), nil
 	}
-	outReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+sb.Status.Endpoint+route, bytes.NewReader(payload))
+	outReq, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+endpoint+route, bytes.NewReader(payload))
 	if err != nil {
 		return errResp(apierr.Get(apierr.CodeInternal).
 			WithCause("could not build the lifecycle proxy request")), nil

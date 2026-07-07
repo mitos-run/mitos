@@ -25,7 +25,7 @@ func startFakeForkd(t *testing.T, templates ...string) (string, *fork.MockEngine
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
 	for _, tmpl := range templates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -50,7 +50,7 @@ func startForkRequestRecordingForkd(t *testing.T, templates ...string) (string, 
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
 	for _, tmpl := range templates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -314,7 +314,7 @@ func TestPoolSnapshotAccounting(t *testing.T) {
 	templateVols := []v1.SandboxVolume{
 		{Name: "data", Size: "64Mi", MountPath: "/data", ForkPolicy: v1.ForkPolicyFresh},
 	}
-	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", initCommands, templateVols, nil, "", 5, nil, nil, nil)
+	created, err := r.createSnapshotsOnNodes(context.Background(), "py-tmpl", "python:3.12-slim", initCommands, templateVols, nil, "", 5, nil, nil, nil, false)
 	if err != nil {
 		t.Fatalf("createSnapshotsOnNodes: %v", err)
 	}

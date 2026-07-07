@@ -58,6 +58,7 @@ func main() {
 	var maxPendingDuration time.Duration
 	var enableHuskPods bool
 	var enableRawForkd bool
+	var multiVMFork bool
 	var huskStubImage string
 	var huskDNSUpstream string
 	var huskControlPort int
@@ -87,6 +88,7 @@ func main() {
 	flag.StringVar(&otlpEndpoint, "otlp-endpoint", "", "OTLP gRPC endpoint (host:port) for OpenTelemetry trace export. Empty disables tracing (zero cost). Spans carry ids, counts, and timings only; never secret values")
 	flag.BoolVar(&enableHuskPods, "enable-husk-pods", true, "Pod-native default (issue #18): each SandboxPool builds the template snapshot AND maintains a warm pool of pre-scheduled husk pods pinned to the snapshot-holding nodes; claims activate a dormant husk pod in place. This is the default; pass --enable-raw-forkd to fall back to the fork-per-claim path. Ignored when --enable-raw-forkd or --mock is set (both force raw-forkd).")
 	flag.BoolVar(&enableRawForkd, "enable-raw-forkd", false, "Fallback run path: build the snapshot and fork per claim on a holder node (no husk pods). Off by default (the husk pod-native path runs). --mock implies this. husk-pods needs real KVM nodes; raw-forkd is the path the mock/dev overlay uses.")
+	flag.BoolVar(&multiVMFork, "multi-vm-fork", false, "EXPERIMENTAL, DEFAULT OFF: route a hosted fork child into an ADDITIONAL VM spawned INSIDE the source husk pod (the spawn-vm control op) instead of a brand-new child pod, when the source pod is multi-VM capable (its stub runs --multi-vm). OFF is byte-for-byte the current new-pod-per-fork path, so nothing changes unless you opt in AND the source pod is multi-VM capable; a non-capable source silently falls back to a new pod. This wires the routing + status (child status.pod = source pod, status.vmId = the spawned VM); the per-pod and node memory accounting that pends or spills a fork when a pod is full is a follow-up, so co-location is capped conservatively and the remainder spills to new pods. Only used with --enable-husk-pods.")
 	flag.StringVar(&huskStubImage, "husk-stub-image", "mitos-husk-stub:latest", "Container image that runs the dormant-VMM stub in a husk pod. Only used with --enable-husk-pods.")
 	flag.StringVar(&huskDNSUpstream, "husk-dns-upstream", "", "Comma-separated DNS resolver list (host:port) the husk-stub per-pod DNS proxy forwards allowlisted name queries to, tried in failover order (recommended: 1.1.1.1:53,8.8.8.8:53). Empty leaves name-based egress off (IP:port allowlists still enforced). Use a public resolver, not cluster DNS, so untrusted sandboxes cannot resolve internal service names.")
 	flag.IntVar(&huskControlPort, "husk-control-port", controller.HuskControlPort, "TCP port the husk stub serves the mTLS network control on; the controller dials podIP:port to activate a dormant husk pod. Only used with --enable-husk-pods.")
@@ -220,6 +222,7 @@ func main() {
 		NodeRegistry:              nodeRegistry,
 		PeerToken:                 peerToken,
 		EnableHuskPods:            enableHuskPods,
+		MultiVM:                   multiVMFork,
 		HuskStubImage:             huskStubImage,
 		HuskDNSUpstream:           huskDNSUpstream,
 		KVMResourceName:           "mitos.run/kvm",
@@ -249,6 +252,7 @@ func main() {
 		NodeRegistry:       nodeRegistry,
 		MaxPendingDuration: maxPendingDuration,
 		EnableHuskPods:     enableHuskPods,
+		MultiVMFork:        multiVMFork,
 		HuskControlPort:    huskControlPort,
 		HuskStubImage:      huskStubImage,
 		HuskDNSUpstream:    huskDNSUpstream,
@@ -289,6 +293,14 @@ func main() {
 		logger.Info("workspace memory snapshots: ENABLED; checkpoint-on-terminate pairs a principal-bound VM memory image with the revision (resumable head). The bare-metal live-VM image is cluster-gated; without it the adapter fails loud")
 	} else {
 		logger.Info("workspace memory snapshots: disabled (default); a checkpoint-on-terminate fails loud. Pass --workspace-memory-snapshots to enable resumable heads")
+	}
+
+	if multiVMFork && !enableHuskPods {
+		logger.Info("WARNING: --multi-vm-fork is on but --enable-husk-pods is off; multi-vm fork routing only applies to husk pods, so the flag is a no-op on the raw-forkd path")
+	} else if multiVMFork {
+		logger.Info("multi-vm fork routing: ENABLED (experimental); a fork child co-locates as an additional VM inside a multi-VM-capable source pod (spawn-vm op) instead of a new pod, capped conservatively until per-pod memory accounting lands; a non-capable source falls back to a new pod")
+	} else {
+		logger.Info("multi-vm fork routing: disabled (default); every fork child gets its own pod. Pass --multi-vm-fork to co-locate fork children in a multi-VM-capable source pod")
 	}
 
 	if enableHuskPods {

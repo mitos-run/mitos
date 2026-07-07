@@ -70,18 +70,24 @@ func newScheme() *runtime.Scheme {
 }
 
 // newControlPlane builds the real control plane over an in-cluster
-// controller-runtime client. The client is returned alongside so main can wire
-// the SAME client into the quota enforcer's live sandbox counter.
-func newControlPlane(readyTimeout time.Duration, defaultPool, singleTenantNS string) (saas.ControlPlane, client.Client, error) {
+// controller-runtime client. The client is WATCH capable so the control plane
+// observes sandbox readiness event driven instead of on a poll-tick boundary;
+// the poll interval governs only the fail-open fallback loop. The client is
+// returned alongside so main can wire the SAME client into the quota
+// enforcer's live sandbox counter.
+func newControlPlane(readyTimeout, readyPollInterval time.Duration, defaultPool, singleTenantNS string) (saas.ControlPlane, client.Client, error) {
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("load kubeconfig for the control-plane client: %w", err)
 	}
-	c, err := client.New(cfg, client.Options{Scheme: newScheme()})
+	c, err := client.NewWithWatch(cfg, client.Options{Scheme: newScheme()})
 	if err != nil {
-		return nil, nil, fmt.Errorf("build controller-runtime client: %w", err)
+		return nil, nil, fmt.Errorf("build controller-runtime watch client: %w", err)
 	}
-	opts := []controlplane.Option{controlplane.WithReadyTimeout(readyTimeout)}
+	opts := []controlplane.Option{
+		controlplane.WithReadyTimeout(readyTimeout),
+		controlplane.WithPollInterval(readyPollInterval),
+	}
 	if defaultPool != "" {
 		opts = append(opts, controlplane.WithDefaultPool(defaultPool))
 	}
@@ -94,6 +100,7 @@ func main() {
 	metricsAddr := flag.String("metrics-addr", ":9100", "Prometheus metrics listen address (a SEPARATE cluster-internal listener; /metrics is never mounted on the public mux). Empty disables the metrics listener.")
 	allowStub := flag.Bool("allow-stub", false, "DEV ONLY: forward to an in-memory stub control plane that creates nothing; the default is the real control plane")
 	readyTimeout := flag.Duration("ready-timeout", 120*time.Second, "how long a create waits for the sandbox to become Ready before returning a timeout error")
+	readyPollInterval := flag.Duration("ready-poll-interval", 25*time.Millisecond, "status poll interval for the create readiness FALLBACK loop. Readiness is normally observed by a watch on the sandbox; this interval is used only when the watch cannot be established.")
 	defaultPool := flag.String("default-pool", "", "fallback pool name used when a create request names neither a pool nor an image")
 	singleTenantNS := flag.String("single-tenant-namespace", os.Getenv("MITOS_GATEWAY_SINGLE_TENANT_NAMESPACE"), "pin all sandbox operations to this fixed namespace instead of the per-org mitos-org-<id> namespace; use for QA deployments where per-org namespaces are not provisioned and a shared SandboxPool exists in this namespace; empty (the default) keeps per-org namespacing; org-label authz is preserved regardless")
 	databaseDSN := flag.String("database-dsn", "", "Postgres DSN for durable persistence (accounts, orgs, memberships, API keys). Falls back to the "+pgstore.EnvDSN+" env var. Empty means in-memory persistence (DEV ONLY). The value is a secret and is never logged.")
@@ -112,7 +119,17 @@ func main() {
 		log.Fatalf("persistence: %v", err)
 	}
 	defer closeStore()
-	keys := saas.NewKeyService(store)
+	// API key hash pepper (issue #733, item 3). Opt-in via MITOS_API_KEY_PEPPER;
+	// when set, the SAME value must be configured on the console (and CLI) or
+	// keys will not verify. The value is never logged; only its presence.
+	var keyOpts []saas.KeyServiceOption
+	if pepper, ok := saas.KeyPepperFromEnv(); ok {
+		keyOpts = append(keyOpts, saas.WithSalt(pepper))
+		logger.Info("api key pepper configured", "env", saas.EnvKeyPepper)
+	} else {
+		logger.Info("api key pepper not set; keys are hashed without a pepper", "env", saas.EnvKeyPepper)
+	}
+	keys := saas.NewKeyService(store, keyOpts...)
 
 	// liveUsage is the enforcer's live-usage input: the cluster-backed sandbox
 	// counter when the real control plane is in use (issue #615 seam 2), so the
@@ -125,7 +142,7 @@ func main() {
 		logger.Warn("gateway running with the DEV stub control plane; no sandboxes are created (--allow-stub)")
 		cp = stubControlPlane{}
 	} else {
-		real, k8sClient, err := newControlPlane(*readyTimeout, *defaultPool, *singleTenantNS)
+		real, k8sClient, err := newControlPlane(*readyTimeout, *readyPollInterval, *defaultPool, *singleTenantNS)
 		if err != nil {
 			log.Fatalf("build control plane: %v", err)
 		}

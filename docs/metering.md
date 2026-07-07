@@ -5,9 +5,14 @@ consumes, why that accounting is copy-on-write (CoW) aware, what is exact versus
 approximate, the operational endpoint and metrics that expose it, and how a
 hosted service would bill on top of it.
 
-The implementation is `internal/metering` (the aggregation rule) plus the engine
-`Metering()` method (`internal/fork`) that fills the samples and the forkd
-`GET /v1/metering` endpoint that serves the report.
+The implementation is `internal/metering` (the aggregation rule) plus the two
+sample fillers that serve `GET /v1/metering`:
+
+- the engine `Metering()` method (`internal/fork`) behind forkd's endpoint, for
+  engine-tracked sandboxes;
+- the husk stub `Metering()` method (`internal/husk`) behind each husk pod's
+  in-pod endpoint, for the hosted one-VM-per-pod topology (the pods forkd's
+  engine never tracks). See "The husk-pod report" below.
 
 ## Why CoW-aware
 
@@ -98,6 +103,31 @@ across forks.
   divergence; the apparent-size subtraction overstates the unique disk. Precise
   block-level accounting is open (see below).
 
+## The husk-pod report
+
+In the hosted topology every claimed sandbox VM runs inside its OWN husk pod,
+which forkd's engine never tracks, so each pod serves its own single-VM report
+on the in-pod `GET /v1/metering` (scraped by the usage collector's
+`HuskSource`). The husk stub fills the one sample from the same sources the
+engine uses:
+
+- **Memory**: the smaps_rollup split of the pod's own Firecracker process
+  (`metering.ReadProcessMemory`): `MemoryUnique` = `Private_Clean` +
+  `Private_Dirty`, `MemoryShared` = `Shared_Clean` + `Shared_Dirty`.
+- **Disk**: the rootfs template seed's apparent size as `DiskShared` (the
+  reflink source shared with the template's other husk pods on the node) plus
+  the per-activation clone's divergence, `max(0, clone - seed)` apparent bytes,
+  as `DiskUnique`: the engine's Snapshot-volume rule applied to the rootfs.
+- **Egress**: the cumulative per-tap nftables egress counter the in-pod filter
+  always installs; zero when networking is disabled (no tap).
+
+The sample's `Template` is empty: a husk pod holds exactly one VM, so within
+its report the shared set is trivially counted once. Amortizing one template's
+shared pages ACROSS husk pods (the cross-pod analog of the node report's
+shared-once rule) is an open item below; until then a hosted sandbox's billable
+memory level is its full resident footprint (unique + shared), which never
+undercounts and matches what a per-VM biller would charge.
+
 ## Endpoint and metrics
 
 ### `GET /v1/metering` (forkd operational API)
@@ -160,6 +190,10 @@ template region is billed once, not once per fork.
 - **KSM / same-page merging across distinct templates**: today sharing is only
   recognized within a template group; kernel same-page merging across templates
   is not accounted.
+- **Cross-pod shared-once amortization for husk pods**: each husk pod reports a
+  single-VM report, so a template's shared pages are counted once per POD, not
+  once per node. Amortizing them across the pods that map the same template
+  needs a cross-report grouping key in the collector.
 - **Per-tenant / per-workspace rollups**: aggregate the node report by tenant,
   tied to Workspace.
 - **Billing export / OpenCost integration** and **historical time series**:

@@ -39,6 +39,17 @@ type SandboxPoolReconciler struct {
 	// the snapshot is built and each claim forks on a holder, no husk pods. In
 	// cmd/controller this is true by default and turned off by --enable-raw-forkd.
 	EnableHuskPods bool
+	// MultiVM starts this pool's warm husk pods with --multi-vm and the
+	// mitos.run/multi-vm label, so a warm-claimed source pod can host additional
+	// fork-child VMs in place (the MultiVMFork co-location routing). Set from the
+	// same --multi-vm-fork operator flag that enables the routing on the Sandbox
+	// reconciler; default off. A normal claim is unaffected.
+	MultiVM bool
+	// MultiVMForkVMs is how many co-located fork VMs a multi-VM warm pod reserves
+	// node memory for up front (beyond the source VM), so the co-location routing
+	// has room before a fork spills to a new pod. Only consulted when MultiVM is set;
+	// zero selects defaultMultiVMForkVMsPerPod.
+	MultiVMForkVMs int
 	// HuskStubImage is the container image that runs cmd/husk-stub in a husk
 	// pod. Only used when EnableHuskPods is true.
 	HuskStubImage string
@@ -592,7 +603,7 @@ func (r *SandboxPoolReconciler) ensureTemplateBuilt(ctx context.Context, pool *v
 	// #220) into the in-VM init commands, falling back to the legacy Init list when
 	// no BuildSteps are set, so a template authored either way builds identically.
 	if deficit := desired - readySnapshots; deficit > 0 {
-		if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Image, v1.InitCommands(template.BuildSteps, template.Init), template.Volumes, wrappedDEK, kekID, deficit, nodeFilter, forkdWorkload(template.Workload), forkdResources(template.Resources)); err != nil {
+		if _, err := r.createSnapshotsOnNodes(ctx, templateID, template.Image, v1.InitCommands(template.BuildSteps, template.Init), template.Volumes, wrappedDEK, kekID, deficit, nodeFilter, forkdWorkload(template.Workload), forkdResources(template.Resources), template.WarmKernel); err != nil {
 			return fmt.Errorf("build template snapshot %s: %w", templateID, err)
 		}
 	}
@@ -650,7 +661,7 @@ func (r *SandboxPoolReconciler) rebuildStaleSnapshots(ctx context.Context, templ
 		if !node.isHealthy() {
 			continue
 		}
-		if err := r.buildTemplateOnNode(ctx, node.Name, templateID, template.Image, v1.InitCommands(template.BuildSteps, template.Init), template.Volumes, wrappedDEK, kekID, forkdWorkload(template.Workload), forkdResources(template.Resources), force); err != nil {
+		if err := r.buildTemplateOnNode(ctx, node.Name, templateID, template.Image, v1.InitCommands(template.BuildSteps, template.Init), template.Volumes, wrappedDEK, kekID, forkdWorkload(template.Workload), forkdResources(template.Resources), force, template.WarmKernel); err != nil {
 			errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
 			continue
 		}
@@ -734,7 +745,7 @@ func forkdWorkload(w *v1.WorkloadSpec) *forkdpb.WorkloadSpec {
 	return out
 }
 
-func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1.SandboxVolume, wrappedDEK []byte, kekID string, deficit int32, nodeFilter map[string]bool, workload *forkdpb.WorkloadSpec, resources *forkdpb.ResourceSpec) (int32, error) {
+func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, templateID, image string, initCommands []string, templateVolumes []v1.SandboxVolume, wrappedDEK []byte, kekID string, deficit int32, nodeFilter map[string]bool, workload *forkdpb.WorkloadSpec, resources *forkdpb.ResourceSpec, warmKernel bool) (int32, error) {
 	var added int32
 	var errs []error
 
@@ -780,7 +791,7 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 		// Build path on a node that does not yet hold the template. Never forced:
 		// this is the deficit fill, building fresh on a node that has no snapshot
 		// yet, not replacing a known-bad one (#584).
-		if err := r.buildTemplateOnNode(ctx, node.Name, templateID, image, initCommands, templateVolumes, wrappedDEK, kekID, workload, resources, false); err != nil {
+		if err := r.buildTemplateOnNode(ctx, node.Name, templateID, image, initCommands, templateVolumes, wrappedDEK, kekID, workload, resources, false, warmKernel); err != nil {
 			errs = append(errs, fmt.Errorf("node %s: %w", node.Name, err))
 			continue
 		}
@@ -802,7 +813,7 @@ func (r *SandboxPoolReconciler) createSnapshotsOnNodes(ctx context.Context, temp
 // its reuse-or-rebuild gate (bf9590df) and rebuild even if the on-disk snapshot
 // looks reusable, because the caller already knows that snapshot is stale or
 // restore-broken. The returned error is un-prefixed; callers add the node name.
-func (r *SandboxPoolReconciler) buildTemplateOnNode(ctx context.Context, nodeName, templateID, image string, initCommands []string, templateVolumes []v1.SandboxVolume, wrappedDEK []byte, kekID string, workload *forkdpb.WorkloadSpec, resources *forkdpb.ResourceSpec, force bool) error {
+func (r *SandboxPoolReconciler) buildTemplateOnNode(ctx context.Context, nodeName, templateID, image string, initCommands []string, templateVolumes []v1.SandboxVolume, wrappedDEK []byte, kekID string, workload *forkdpb.WorkloadSpec, resources *forkdpb.ResourceSpec, force bool, warmKernel bool) error {
 	// Fail closed: an encrypted template's WRAPPED DEK travels in CreateTemplate, so
 	// the node connection must be mTLS. Refuse to send the wrapped DEK over an
 	// insecure channel (node.TLS nil and registry.TLS nil, i.e. PKI bootstrap
@@ -837,6 +848,9 @@ func (r *SandboxPoolReconciler) buildTemplateOnNode(ctx context.Context, nodeNam
 		EncryptionKey: wrappedDEK,
 		KekId:         kekID,
 		ForceRebuild:  force,
+		// WarmKernel runs the pre-snapshot run_code warmup on the node so every
+		// fork wakes with a live code-interpreter kernel (pool template opt-in).
+		WarmKernel: warmKernel,
 	})
 	if err != nil {
 		return err

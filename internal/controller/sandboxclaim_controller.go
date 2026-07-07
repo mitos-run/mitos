@@ -21,6 +21,7 @@ import (
 	"mitos.run/mitos/internal/husk"
 	"mitos.run/mitos/internal/kms"
 	"mitos.run/mitos/internal/observability"
+	"mitos.run/mitos/internal/tenant"
 	"mitos.run/mitos/internal/usage"
 	"mitos.run/mitos/internal/vsock"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -116,6 +117,28 @@ type SandboxReconciler struct {
 	// Tests inject fakes.
 	forkSnapshot       huskForkSnapshotter
 	removeForkSnapshot huskForkSnapshotRemover
+
+	// MultiVMFork routes a husk fork child into an ADDITIONAL VM spawned INSIDE the
+	// SOURCE pod (SpawnVMOnHusk) instead of a brand-new child pod, when the source
+	// pod is multi-VM capable. EXPERIMENTAL, DEFAULT OFF: off is byte-for-byte the
+	// buildForkChildPod new-pod path, so nothing changes unless an operator opts in
+	// AND the source pod runs a --multi-vm husk stub (huskPodMultiVMCapable).
+	// Co-location is gated by the per-pod MEMORY ACCOUNTING (L1.7b, guarantee A,
+	// coLocatedForkVMBudget): a child co-locates only while the source pod's memory
+	// budget (floor(memory.max / per-VM guest RAM) minus the source VM's own slot)
+	// has room at the CoW worst case, and every child past the budget spills to a
+	// new pod so a fork never overcommits the pod. Only used when EnableHuskPods is
+	// true.
+	MultiVMFork bool
+
+	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
+	// Nil defaults to SpawnVMOnHusk; tests inject a fake.
+	spawnVM huskVMSpawner
+
+	// multiVMForkGate, when non-nil, overrides MultiVMFork so a test can toggle the
+	// routing race-safely on the shared reconciler (the field itself is never
+	// mutated after setup). Nil (the production default) reads MultiVMFork. Tests only.
+	multiVMForkGate func() bool
 
 	// KMS is the envelope-encryption Wrapper used to wrap a template's at-rest DEK
 	// on the fork path (an idempotent read of the controller-owned Secret created
@@ -546,7 +569,7 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 	volumes := volumeMounts(template.Volumes, claim.Spec.VolumeOverrides)
 
 	// Resolve secrets
-	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Spec.Env, claim.Spec.Secrets)
+	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Labels[tenant.OrgLabelKey], claim.Spec.Env, claim.Spec.Secrets)
 	if err != nil {
 		logger.Error(err, "secret resolution failed")
 		recordClaimError(claim.Spec.Source.PoolRef.Name, "secret")
@@ -758,7 +781,7 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 
 	// Resolve env + secrets (same path as the forkd fork). Secret VALUES live
 	// only in memory here and ride the mTLS control channel; never logged.
-	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Spec.Env, claim.Spec.Secrets)
+	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Labels[tenant.OrgLabelKey], claim.Spec.Env, claim.Spec.Secrets)
 	if err != nil {
 		logger.Error(err, "secret resolution failed")
 		recordClaimError(claim.Spec.Source.PoolRef.Name, "secret")
@@ -918,6 +941,14 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 	claim.Status.Phase = v1.SandboxReady
 	claim.Status.Endpoint = endpoint
 	claim.Status.Node = pod.Spec.NodeName
+	// Surface the shared-host mapping on the CRD (fork-primitive-multinode plan,
+	// "the k8s interface and observability"): Pod is the husk HOST pod backing
+	// this sandbox and VMID is the intra-pod VM identity. On today's single-VM
+	// path VMID is the default primary identity, so the (Pod, VMID) pair is
+	// populated and correct for the 1:1 case; multi-VM co-location (fork routing)
+	// lands in a later increment. This is a purely additive status write.
+	claim.Status.Pod = pod.Name
+	claim.Status.VMID = v1.DefaultVMID
 	claim.Status.SandboxID = pod.Name
 	claim.Status.StartedAt = &now
 	setCondition(&claim.Status.Conditions, metav1.Condition{
@@ -1505,7 +1536,15 @@ func (r *SandboxReconciler) selectNode(ctx context.Context, pool *v1.SandboxPool
 	return node, templateName, nil
 }
 
-func (r *SandboxReconciler) resolveSecrets(ctx context.Context, namespace string, env []corev1.EnvVar, secrets []v1.SecretMount) (envOut, secretsOut map[string]string, err error) {
+// resolveSecrets materializes a claim's env and secretRef mounts. wantOrg is the
+// claim's org id (empty for non-SaaS/self-hosted claims that carry no org
+// label). When wantOrg is set, a referenced Secret that carries a DIFFERENT
+// org label is refused: this is the controller-side defense in depth for
+// GHSA-pgv2-9w24-j7wh, so that even a Sandbox created off the gateway path
+// cannot mount another org's Secret in a shared namespace. A Secret with no org
+// label is allowed (per-org namespaces keep the boundary; the shared-namespace
+// platform-secret path is blocked at the gateway).
+func (r *SandboxReconciler) resolveSecrets(ctx context.Context, namespace, wantOrg string, env []corev1.EnvVar, secrets []v1.SecretMount) (envOut, secretsOut map[string]string, err error) {
 	envOut = make(map[string]string)
 	secretsOut = make(map[string]string)
 
@@ -1521,6 +1560,11 @@ func (r *SandboxReconciler) resolveSecrets(ctx context.Context, namespace string
 			Name:      s.SecretRef.Name,
 		}, &secret); err != nil {
 			return nil, nil, fmt.Errorf("secret %s: %w", s.SecretRef.Name, err)
+		}
+		if gotOrg := secret.Labels[tenant.OrgLabelKey]; wantOrg != "" && gotOrg != "" && gotOrg != wantOrg {
+			// Cross-org reference: refuse without echoing the secret name owner or
+			// any value (secret hygiene).
+			return nil, nil, fmt.Errorf("secret %s: cross-org reference refused", s.SecretRef.Name)
 		}
 		value, ok := secret.Data[s.SecretRef.Key]
 		if !ok {

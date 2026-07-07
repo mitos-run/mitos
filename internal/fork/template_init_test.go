@@ -47,13 +47,13 @@ func TestCreateTemplate_InitFailureAbortsBuild(t *testing.T) {
 	e := newTestEngine(t)
 
 	var gotInit []string
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec, _ bool) error {
 		gotInit = initCommands
 		// Mirror the real abort: an init command exited nonzero.
 		return runInitCommandsForTest(initCommands)
 	}
 
-	err := e.CreateTemplate("py", "/exists/rootfs.ext4", []string{"echo ok", "pip install nope"}, nil, nil, nil, false)
+	err := e.CreateTemplate("py", "/exists/rootfs.ext4", []string{"echo ok", "pip install nope"}, nil, nil, nil, false, false)
 	if err == nil {
 		t.Fatal("expected CreateTemplate to fail when an init command fails")
 	}
@@ -102,7 +102,7 @@ func TestCreateTemplate_FilePathSkipsImageBuild(t *testing.T) {
 	}
 
 	var gotCfg firecracker.VMConfig
-	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec) error {
+	e.runTemplateBuild = func(id string, cfg firecracker.VMConfig, initCommands []string, _ *firecracker.WorkloadSpec, _ bool) error {
 		gotCfg = cfg
 		return nil
 	}
@@ -110,7 +110,7 @@ func TestCreateTemplate_FilePathSkipsImageBuild(t *testing.T) {
 	// recordTemplateDigest will fail (no real snapshot on disk), but the build
 	// seam must have been reached with the file path as the rootfs and the
 	// image build seam must NOT have run (it t.Fatals if it does).
-	_ = e.CreateTemplate("py", rootfs, nil, nil, nil, nil, false)
+	_ = e.CreateTemplate("py", rootfs, nil, nil, nil, nil, false, false)
 	if gotCfg.RootfsPath != rootfs {
 		t.Errorf("file-path rootfs not passed through: got %q want %q", gotCfg.RootfsPath, rootfs)
 	}

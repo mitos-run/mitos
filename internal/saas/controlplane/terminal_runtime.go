@@ -50,6 +50,30 @@ func terminalRuntimeError(sb *v1.Sandbox) *apierr.Error {
 			WithRemediation("The sandbox failed terminally and will never serve runtime calls; inspect the failure cause, then create a new sandbox and retry.")
 		return &e
 	}
+	// A fromSandbox fork's running VM is its CHILD, and the lifetime reaper
+	// flips the CHILD phase while the fork object stays Ready, so the parent
+	// phase alone would pass a reaped fork straight to a dead child endpoint
+	// and a generic 502 (the #688 dead-end class). Consult the child the
+	// runtime surface targets. Only a SINGLE-child fork is interpreted here:
+	// a multi-child fan-out is refused by multiChildRuntimeError, which every
+	// runtime call site runs FIRST, and answering with child 0's terminal
+	// state would wrongly speak for the other children.
+	if sb.Spec.Source.FromSandbox != nil && len(sb.Status.Children) == 1 {
+		child := sb.Status.Children[0]
+		switch child.Phase {
+		case v1.SandboxTerminated:
+			e := apierr.Get(apierr.CodeIdleTimeout).
+				WithCause(fmt.Sprintf("fork child %q of sandbox %q reached the terminal Terminated phase; its VM is stopped and the fork object remains readable until deleted", child.Name, sb.Name)).
+				WithRemediation("The fork child was reaped (idle timeout or lifetime expiry); fork a Ready sandbox again and retry. Set a longer lifetime at fork time if the work needs more wall-clock time.")
+			return &e
+		case v1.SandboxFailed:
+			e := apierr.Get(apierr.CodeNotFound).
+				WithMessage("the sandbox failed and is not running").
+				WithCause(fmt.Sprintf("fork child %q of sandbox %q reached the terminal Failed phase", child.Name, sb.Name)).
+				WithRemediation("The fork child failed terminally and will never serve runtime calls; fork a Ready sandbox again and retry.")
+			return &e
+		}
+	}
 	return nil
 }
 
