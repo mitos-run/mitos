@@ -160,6 +160,33 @@ plumbing are unit-tested off KVM (`internal/fork` `TestLiveCowParentEnv`,
 `internal/firecracker` `TestLaunchEnv`, `internal/controller`
 `TestBuildHuskPodThreadsLiveCowFork`).
 
+Repeated forks of ONE source: per-fork frozen state. The armed WP handler
+(`SetLiveCowParent`) is REUSED for every `ForkSnapshot` of the same parent VM,
+because the userfaultfd is created once by Firecracker over the parent's live mapping
+and delivered once at `Receive`; a fork does NOT get a fresh handler. Each `Freeze`
+(each fork) therefore allocates its OWN frozen epoch: a fresh FROZEN memfd + fresh
+1-bit-per-page selector (`newEpoch`, `internal/fork/wpfork_linux.go`). A co-located
+child of that fork imports THAT epoch's memfds, so fork B can never hand its child a
+page frozen for fork A, and fork A's still-live children keep reading fork A's
+point-in-time pages after fork B happens. The single `Serve` loop fans each
+write-protect fault into EVERY live epoch that has not yet captured the page (bit
+clear), copying the page's pre-write bytes: because all epochs share one mapping and
+one protection state, that pre-write value is the fork-time value for exactly those
+epochs whose freeze preceded the write and that have not yet seen a write to the page.
+An epoch that already froze the page is skipped, so a source write that lands AFTER a
+later fork never overwrites an earlier fork's frozen bytes. Epochs are retained until
+the handler `Close` (an earlier fork's child may still reference its memfds through
+`/proc`), and the memfds are sparse, so the cost is bounded by the pages actually
+rewritten, not by guest RAM per fork. Without this (a single frozen image reused
+across forks) a second fork would inherit the pages the first fork froze and hand its
+child stale bytes for any page rewritten between the two forks. Verified on real KVM
+by `internal/fork` `TestLiveCowRepeatedForkPerForkFrozenState` (the `firecracker-test`
+job): it forks one source twice with a source write of the SAME page P between and
+after the forks (P: `M1` at fork A, `M2` at fork B, `M3` after fork B) and asserts fork
+A's child reads `M1`, fork B's child reads `M2`, and `M3` leaks into neither; it FAILS
+on the shared-state code (fork B's fresh-epoch page-0-clear check trips, and the child
+reads fork A's stale value) and PASSES with per-fork epochs.
+
 ### Live copy-on-write fork: child-side memfd import (milestone m5)
 
 The child side of the same path boots the co-located child's guest RAM from the
@@ -234,6 +261,62 @@ memory-attach mechanism itself is KVM-proven through the Go code path above, so 
 Firecracker patch is a faithful port, not a new design. The parent-arm production
 wiring (starting the WP handler bound to the running source VM and passing it via
 `SetLiveCowParent`) is the other half of the same follow-up.
+
+### Live copy-on-write fork: source vmstate-only capture (issue #832)
+
+The SOURCE side of the same path stops writing the guest RAM to disk at all. A Full
+fork snapshot pauses the source and copies the ENTIRE guest RAM into a `mem` file
+(the ~364ms `create_snapshot` stage measured on prod, issue #832) plus the small
+device/CPU `vmstate`. On the live-cow path that `mem` file is redundant: the child
+boots its guest RAM from the parent's shared memfd (the m5 section above), so the
+source only needs to (1) FREEZE its guest at the fork point and (2) capture the
+small `vmstate`.
+
+`forkSnapshotInstance` (`internal/husk/multivm.go`) therefore branches on the armed
+parent handle (`Stub.liveCowSnapshotFreezer`, gated on `--live-cow-fork` AND a
+parent that satisfies the `Freeze()` seam): inside the paused window it calls the
+handle's `Freeze()` (the m2 `UFFDIO_WRITEPROTECT`-all, microseconds) and then
+`vmm.CreateSnapshotVMStateOnly` (`internal/firecracker` PUT `/snapshot/create` with
+the Mitos `MitosVmstateOnly` type and NO `mem_file_path`), so NO `mem` file is
+written. The point-in-time-T guarantee is unchanged: the freeze is the SAME
+write-protect the m4b/m5 sections prove correct, so a resumed source cannot leak a
+post-fork write into the child, and the source rootfs is still frozen inside the
+same paused window as its point-in-time pair. The fork-correctness re-seed
+(RNG/clock/secret/network) is untouched; this is a source-capture optimization, not
+a new fork policy.
+
+FAIL CLOSED and never-breaks-a-fork: when the flag is off, no parent is armed, or
+the pod is not live-cow (the default everywhere today), `forkSnapshotInstance` runs
+the Full `CreateSnapshot(mem, vmstate)` byte-for-byte as before, and any freeze or
+capture error resumes the source (bounded retry, never left frozen) before failing
+closed. `CreateSnapshotVMStateOnly` REQUIRES the Mitos-patched Firecracker
+vmstate-only snapshot mode (stock Firecracker rejects a `/snapshot/create` with no
+`mem_file_path`); the gate guarantees it is only ever reached on the armed live-cow
+path.
+
+Verified on real KVM by `internal/fork` `TestLiveCowForkVmstateOnlyNoMemFile` (the
+`firecracker-test` job, `go test ./internal/fork/...`): the source FREEZEs and
+writes ONLY a `vmstate` file (asserting NO `mem` file is written and a non-empty
+`vmstate` is), a resumed source overwrites a page, and the child boots from the
+shared memfd through the production `ComposeChildFromImport` and still reads the
+fork-time bytes (NO LEAK) plus an untouched page (INHERITANCE), with the whole
+paused-window capture measured far below the ~364ms Full mem write. Off KVM it
+self-skips with the m2 precondition reason. The husk branch selection and the
+fail-closed resume are unit-tested off KVM (`internal/husk`
+`TestForkSnapshotLiveCowCapturesVMStateOnly`/`TestForkSnapshotFallsBackToFullWhenNoArmedParent`/`TestForkSnapshotLiveCowResumesSourceOnFreezeError`),
+and the vmstate-only Firecracker request is unit-tested in `internal/firecracker`
+`TestCreateSnapshotVMStateOnlyOmitsMemFile`.
+
+Pending (documented, not a gap in what ships): the vmstate-only capture needs the
+Mitos-patched Firecracker `MitosVmstateOnly` snapshot mode (write `snapshot_path`,
+skip `mem_file_path`), built via the fork's `build-patched-fc` workflow and pinned
+by a new sha256 in `hack/install-firecracker-patched.sh`; the currently pinned
+`mitos/uffd-wp-v1.15.0` patches only the m1 export + m2 WP offer, so until the
+snapshot-mode patch lands the flag stays off and every fork takes the Full-snapshot
+fallback. This shares the same parent-arm production wiring follow-up as m5
+(starting the WP handler bound to the running source and passing it via
+`SetLiveCowParent`), so the source mem-write elimination goes live together with the
+child memfd import.
 
 ### Workspace resume from a memory snapshot
 

@@ -604,6 +604,21 @@ Trust and residual, stated honestly:
   restore path that READS this env is the remaining smallest Firecracker patch (the
   shipped fork patches only the parent side); until it lands the env is set and the
   child restores from disk.
+- Source vmstate-only capture (issue #832): on the armed live-cow path the source
+  fork snapshot (`forkSnapshotInstance`, `internal/husk/multivm.go`) FREEZEs the
+  guest and captures ONLY the small device/CPU `vmstate`, writing NO `mem` file (the
+  ~364ms guest-RAM copy is skipped: the child boots that RAM from the shared memfd).
+  This adds NO new tenant-facing input and NO new host-path write beyond the small
+  `vmstate` the fork already writes; the freeze is the SAME parent-owned uffd
+  write-protect already reviewed above, so the point-in-time-T no-leak invariant is
+  unchanged. `CreateSnapshotVMStateOnly` (`internal/firecracker`) issues a
+  `MitosVmstateOnly` snapshot with no `mem_file_path`; it REQUIRES the Mitos-patched
+  Firecracker vmstate-only mode and is only reachable behind the armed live-cow gate,
+  and any freeze or capture error resumes the source (never left frozen) before
+  failing closed. FALLBACK: with the flag off or no armed parent (the default
+  everywhere today) the source writes the Full `mem`+`vmstate` snapshot byte-for-byte
+  as before, so a fork never breaks. KVM-tested no-mem-file + inheritance + no-leak in
+  `TestLiveCowForkVmstateOnlyNoMemFile`.
 - Residual: a compromised controller can drive a live-cow-enabled spawn against a
   reachable warm husk pod, the SAME residual already stated for activate,
   fork-snapshot, and spawn-vm; and the path inherits the shared-pod-netns residual of

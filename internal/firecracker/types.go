@@ -193,7 +193,14 @@ type VMState struct {
 type SnapshotCreate struct {
 	SnapshotType string `json:"snapshot_type"`
 	SnapshotPath string `json:"snapshot_path"`
-	MemFilePath  string `json:"mem_file_path"`
+	// MemFilePath is the guest-memory file a Full snapshot writes. The Mitos
+	// vmstate-only capture (SnapshotType "MitosVmstateOnly", the live-cow fork
+	// path) omits it: the guest RAM is already resident in the exported MAP_SHARED
+	// memfd a co-located child imports, so no mem file is written. omitempty so the
+	// vmstate-only request carries NO mem_file_path (which stock Firecracker would
+	// reject alongside a memory-less snapshot); a Full snapshot always sets it, so
+	// its serialization is unchanged.
+	MemFilePath string `json:"mem_file_path,omitempty"`
 }
 
 type SnapshotLoad struct {
