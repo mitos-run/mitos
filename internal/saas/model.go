@@ -150,9 +150,13 @@ type Membership struct {
 // safe-to-display leading segment (for example mitos_live_ab12), kept for
 // listing and audit without ever revealing the secret.
 //
-// Scopes gate what the key may do; an empty scope set means no permissions.
-// ExpiresAt of the zero time means the key never expires. RevokedAt of the zero
-// time means the key is live; a non-zero RevokedAt permanently disables it.
+// Scopes gate what the key may do. An EMPTY scope set means FULL access (every
+// scope): this is the backward-compatibility rule for keys minted before scopes
+// existed, or persisted without an explicit scope set, so an existing caller is
+// never locked out by the scope model (issue #784). A newly minted key defaults
+// to the full scope set unless scopes are named at mint. ExpiresAt of the zero
+// time means the key never expires. RevokedAt of the zero time means the key is
+// live; a non-zero RevokedAt permanently disables it.
 type ApiKey struct {
 	ID        string
 	OrgID     string
@@ -178,30 +182,96 @@ func (k ApiKey) IsRevoked() bool {
 	return !k.RevokedAt.IsZero()
 }
 
-// HasScope reports whether the key carries the named scope. The full
-// lifecycle scope implies read-only access: a key that may create and
-// terminate sandboxes may also list them; without the implication the default
-// onboarding key (sandboxes only) is locked out of the gateway's read-only
-// ops (#599). The reverse does not hold: a read-only key never satisfies a
-// mutating requirement.
-func (k ApiKey) HasScope(scope string) bool {
-	for _, s := range k.Scopes {
-		if s == scope {
-			return true
-		}
-		if scope == ScopeReadOnly && s == ScopeSandboxes {
+// HasScope reports whether the key satisfies the named required scope, applying
+// the scope-implication graph (scopeSatisfies). A key with NO scopes recorded is
+// a legacy full-access key and satisfies EVERY scope (the #784 backward-compat
+// rule): this preserves the pre-scopes behavior for records minted before scopes
+// existed. Otherwise the key satisfies the requirement if any scope it holds
+// satisfies it. The reverse of the implication never holds: a read-only key
+// never satisfies a mutating requirement.
+func (k ApiKey) HasScope(required string) bool {
+	if len(k.Scopes) == 0 {
+		return true
+	}
+	for _, held := range k.Scopes {
+		if scopeSatisfies(held, required) {
 			return true
 		}
 	}
 	return false
 }
 
-// Known scope constants. Scopes are coarse for this slice: one for the sandbox
-// lifecycle surface and one for read-only access. Finer scopes are a follow-up.
+// Known scope constants (issue #784). A key is minted with one or more of these
+// to shrink its blast radius below the whole org. ScopeSandboxes is the legacy
+// full-lifecycle scope retained for backward compatibility with keys minted
+// before the finer split.
 const (
-	// ScopeSandboxes permits the sandbox lifecycle surface (create, exec, fork,
-	// terminate) through the gateway.
-	ScopeSandboxes = "sandboxes"
-	// ScopeReadOnly permits read-only surfaces (list, status) only.
+	// ScopeReadOnly permits read-only surfaces: list, get, status.
 	ScopeReadOnly = "read"
+	// ScopeExecute permits acting INSIDE an existing sandbox: exec, files,
+	// run_code (the runtime proxy). It does not permit creating or destroying
+	// sandboxes.
+	ScopeExecute = "execute"
+	// ScopeLifecycle permits creating, forking, and terminating sandboxes (and
+	// the pause/resume state verbs). It does not by itself permit in-sandbox
+	// execution.
+	ScopeLifecycle = "lifecycle"
+	// ScopeAdmin permits organization management surfaces (API keys, billing).
+	// It is orthogonal to the resource scopes: an admin key does not itself gain
+	// sandbox read, execute, or lifecycle access. There is no API-key-reachable
+	// admin operation on the public gateway yet (key and billing management run
+	// through the session-authenticated console), so this scope is minted,
+	// persisted, and displayed today and gates the gateway admin surface when it
+	// lands.
+	ScopeAdmin = "admin"
+	// ScopeSandboxes is the LEGACY full-lifecycle scope (the pre-#784 onboarding
+	// default). It is retained so every existing key keeps working: it satisfies
+	// read, execute, and lifecycle (but not admin).
+	ScopeSandboxes = "sandboxes"
 )
+
+// scopeImplied lists, for a held scope, the required scopes it additionally
+// satisfies beyond an exact match. read is the floor every resource scope grants
+// so a key that can act on a sandbox can always list and status it (no dead
+// end). execute and lifecycle are orthogonal to each other. admin implies
+// nothing and is implied by nothing. The legacy sandboxes scope satisfies the
+// whole resource surface.
+var scopeImplied = map[string][]string{
+	ScopeSandboxes: {ScopeReadOnly, ScopeExecute, ScopeLifecycle},
+	ScopeLifecycle: {ScopeReadOnly},
+	ScopeExecute:   {ScopeReadOnly},
+}
+
+// scopeSatisfies reports whether holding held satisfies a requirement for
+// required, by exact match or through the scopeImplied graph.
+func scopeSatisfies(held, required string) bool {
+	if held == required {
+		return true
+	}
+	for _, imp := range scopeImplied[held] {
+		if imp == required {
+			return true
+		}
+	}
+	return false
+}
+
+// knownScopes is the closed vocabulary CreateKey validates a mint request
+// against, so a typo'd scope is rejected rather than silently minting a key that
+// grants nothing. The legacy ScopeSandboxes is accepted (existing tooling still
+// mints it).
+var knownScopes = map[string]bool{
+	ScopeReadOnly:  true,
+	ScopeExecute:   true,
+	ScopeLifecycle: true,
+	ScopeAdmin:     true,
+	ScopeSandboxes: true,
+}
+
+// FullScopes returns the full scope set a key defaults to when none is named at
+// mint. It is the explicit union of the resource scopes plus admin, so a default
+// key is full-access and its listing shows the concrete scopes. The legacy
+// ScopeSandboxes is deliberately omitted: new keys carry the finer scopes.
+func FullScopes() []string {
+	return []string{ScopeReadOnly, ScopeExecute, ScopeLifecycle, ScopeAdmin}
+}

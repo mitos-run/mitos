@@ -75,6 +75,10 @@ organization B's resources. This is enforced at three layers, each unit-tested:
   and a key without the required scope (`TestVerifyRejectsWrongScope`).
 - A key for org A resolves to org A and only org A
   (`TestOrgAKeyCannotResolveOrgB`).
+- Scopes are enforced with an implication graph and are backward compatible: a
+  read-only key is refused every mutation, an execute key is refused create, a
+  lifecycle key is refused in-sandbox exec, and a legacy scopeless key keeps full
+  access (`internal/saas/scopes_test.go`, `internal/saas/gateway_scopes_test.go`).
 - The pepper participates in the hash, so a store dump from one deployment cannot
   be replayed against another (`TestSaltChangesHash`).
 
@@ -82,6 +86,70 @@ The comparison is constant-time (`crypto/subtle.ConstantTimeCompare`) so a
 timing side channel cannot probe the stored hash. Key and secret VALUES are never
 logged or placed in an error; the gateway logs the key id, masked prefix, org id,
 and op only.
+
+## API key scopes (issue #784)
+
+An API key is minted with one or more SCOPES that shrink its blast radius below
+the whole org, so a team can embed a browser-safe or CI-safe key that can do
+strictly less than "everything the org can do". Scopes are enforced in the
+gateway authz path (`requiredScopeFor` in `internal/saas/gateway.go`), and the
+key model applies a small implication graph (`ApiKey.HasScope`,
+`scopeSatisfies` in `internal/saas/model.go`).
+
+The scope vocabulary:
+
+- `read`: read-only surfaces (list, get, status, template list).
+- `execute`: acting inside an existing sandbox (exec, files, run_code, the
+  runtime proxy). It does NOT permit creating or destroying sandboxes.
+- `lifecycle`: creating, forking, and terminating sandboxes, plus the
+  pause/resume state verbs.
+- `admin`: organization management (API keys, billing). It is orthogonal to the
+  resource scopes (an admin key gains no sandbox read/execute/lifecycle reach on
+  its own). There is no API-key-reachable admin operation on the public gateway
+  yet: key and billing management run through the session-authenticated console,
+  so this scope is minted, persisted, and shown today and gates the gateway
+  admin surface when it lands.
+
+Implication rules (never the reverse):
+
+- `read` is the floor every resource scope grants, so a key that can act on a
+  sandbox can always list and status it (no dead end).
+- `execute` and `lifecycle` are orthogonal to each other; a key can carry one
+  without the other.
+- `admin` implies nothing and is implied by nothing.
+- The LEGACY `sandboxes` scope (the pre-#784 onboarding default) satisfies
+  `read`, `execute`, and `lifecycle` (but not `admin`), so every existing key
+  keeps working unchanged.
+
+Operation to required-scope map enforced at the gateway:
+
+| Operation | Required scope |
+|---|---|
+| `sandbox.list`, `sandbox.status`, `template.list` | `read` |
+| exec, files, run_code (runtime proxy) | `execute` |
+| `sandbox.create`, `sandbox.fork`, `sandbox.terminate`, `sandbox.pause`, `sandbox.resume`, `template.ensure` | `lifecycle` |
+| any unmapped op | `lifecycle` (fail closed) |
+
+Backward compatibility (mandatory):
+
+- A key stored with NO scopes recorded is a legacy full-access key and satisfies
+  EVERY scope, so an existing caller is never locked out
+  (`TestLegacyScopelessKeyHasFullAccess`, `TestGatewayLegacyScopelessKeyRetainsFullAccess`).
+- A newly minted key defaults to the full scope set when none is named at mint
+  (`CreateKey` calls `FullScopes()`; `TestCreateKeyDefaultsToFullScopes`), so
+  existing tooling that mints without scopes still gets a full key.
+- A scope outside the known vocabulary is refused at mint (`ErrUnknownScope`,
+  `TestCreateKeyRejectsUnknownScope`) rather than silently minting a key that
+  grants nothing.
+
+A scope denial is a `forbidden` (403) whose remediation names the exact scope
+the operation needs and whose context reports `op` and `required_scope`, so an
+agent can self-correct without probing (the #28 LLM-legible error rule). The
+scope name is not a secret.
+
+The optional PER-RESOURCE qualifier (a scope narrowed to a named sandbox or
+pool) is a documented FOLLOW-UP, not part of this slice: it is the next step
+toward the capability-budget model in `docs/api/v2-spec.md`.
 
 ## Public error envelope
 

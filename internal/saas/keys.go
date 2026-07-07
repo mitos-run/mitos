@@ -42,6 +42,9 @@ var (
 	// ErrKeyWrongOrg: the key resolved but is bound to a different org than the
 	// one the request targets. This is the cross-org isolation backstop.
 	ErrKeyWrongOrg = errors.New("saas: api key is not valid for this organization")
+	// ErrUnknownScope: a mint request named a scope outside the known vocabulary.
+	// CreateKey rejects it rather than mint a key that grants nothing.
+	ErrUnknownScope = errors.New("saas: unknown api key scope")
 )
 
 // hashSalt is a process-wide pepper mixed into every key hash so a stolen store
@@ -157,6 +160,21 @@ func (s *KeyService) CreateKey(ctx context.Context, req CreateKeyRequest) (Creat
 		return CreatedKey{}, fmt.Errorf("create key: resolve org: %w", err)
 	}
 
+	// Resolve the scope set: an empty request defaults to FULL scopes (a new key
+	// is full-access unless scopes are named, matching the backward-compatible
+	// posture); a named set is validated against the known vocabulary so a typo
+	// cannot silently mint a key that grants nothing.
+	scopes := req.Scopes
+	if len(scopes) == 0 {
+		scopes = FullScopes()
+	} else {
+		for _, sc := range scopes {
+			if !knownScopes[sc] {
+				return CreatedKey{}, fmt.Errorf("create key: scope %q is not a known scope (valid: read, execute, lifecycle, admin): %w", sc, ErrUnknownScope)
+			}
+		}
+	}
+
 	secret, err := randomSecret()
 	if err != nil {
 		return CreatedKey{}, fmt.Errorf("create key: generate secret: %w", err)
@@ -171,7 +189,7 @@ func (s *KeyService) CreateKey(ctx context.Context, req CreateKeyRequest) (Creat
 		Name:      req.Name,
 		Prefix:    masked,
 		Hash:      s.hash(raw),
-		Scopes:    append([]string(nil), req.Scopes...),
+		Scopes:    append([]string(nil), scopes...),
 		CreatedAt: now,
 	}
 	if req.TTL > 0 {
