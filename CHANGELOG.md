@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.28.0](https://github.com/mitos-run/mitos/compare/v1.27.0...v1.28.0) (2026-07-07)
+
+
+### Features
+
+* **husk:** install the patched Firecracker binary (runtime-gated live-fork, stock-identical when off) ([#817](https://github.com/mitos-run/mitos/issues/817)) ([c97c577](https://github.com/mitos-run/mitos/commit/c97c5776cb3d37be1130d389c0f180b5f56b632b))
+
 ## [1.27.0](https://github.com/mitos-run/mitos/compare/v1.26.3...v1.27.0) (2026-07-07)
 
 
