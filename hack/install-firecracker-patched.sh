@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Swap in the Mitos-patched Firecracker VMM (live-fork: m1 memfd/MAP_SHARED guest
-# memory + m2 UFFD write-protect) over the STOCK firecracker that
-# hack/install-firecracker.sh installed, while leaving the stock jailer untouched.
+# memory + m2 UFFD write-protect + m6a vmstate-only snapshot) over the STOCK
+# firecracker that hack/install-firecracker.sh installed, while leaving the stock
+# jailer untouched.
 #
 # Why this is a safe, always-on swap (NOT the live-fork wiring, that is m4b):
 #   - The patched binary is behaviour-identical to stock Firecracker v1.15.0
 #     UNLESS FIRECRACKER_MITOS_SHARED_MEM or FIRECRACKER_MITOS_WP_UDS are set at
-#     runtime. This PR sets neither anywhere, so the image behaves byte-for-byte
-#     like stock until m4b flips those env vars on. Installing it everywhere is
-#     therefore safe.
+#     runtime, OR a PUT /snapshot/create sends snapshot_type "MitosVmstateOnly".
+#     Full and Diff snapshots are byte-for-byte unchanged, so the image behaves
+#     like stock until those gates are used. Installing it everywhere is safe.
 #   - Provenance: built reproducibly in mitos-run/firecracker on branch
-#     ci/build-patched-fc via .github/workflows/build-patched-fc.yml
-#     (built commit 531a487cf69898a05091d4c7e5f48bec3132309b, green run
-#     https://github.com/mitos-run/firecracker/actions/runs/28848683507) and
+#     mitos/vmstate-only-snapshot-v1.15.0 via .github/workflows/build-patched-fc.yml
+#     (built commit 229987c33e, green run
+#     https://github.com/mitos-run/firecracker/actions/runs/28886363577) and
 #     published as a GitHub release asset, pinned by sha256 below. A compromised
 #     CDN or a network substitution cannot install a different binary.
 #   - Revert = drop the COPY + RUN that invokes this script from Dockerfile.forkd
@@ -26,8 +27,8 @@ set -euo pipefail
 
 # --- single pinned provenance constants (audit + bump only here) -------------
 PATCHED_FC_VERSION="v1.15.0"
-PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-uffd-wp-v1.15.0/firecracker-v1.15.0-x86_64-mitos-uffd-wp"
-PATCHED_FC_SHA256="0209700d794acb7b77a919c0aa50506b2186642d80e5c0d13220ee51003b823b"
+PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-vmstate-only-v1.15.0/firecracker-v1.15.0-x86_64-mitos-vmstate-only"
+PATCHED_FC_SHA256="66b4309f4902543823c6fa9677a16008644b4279d9b6367b7321044dcf30221b"
 # -----------------------------------------------------------------------------
 
 arch="$(uname -m)"
@@ -70,4 +71,4 @@ if [ "$fc_ver" != "$jl_ver" ]; then
 fi
 # Belt and braces: confirm the on-disk binary is exactly the pinned artifact.
 echo "${PATCHED_FC_SHA256}  /usr/local/bin/firecracker" | sha256sum -c -
-echo "install-firecracker-patched: installed Mitos-patched firecracker ${fc_ver} (x86_64); jailer left stock. Behaviour-identical to stock until FIRECRACKER_MITOS_* env is set (m4b)."
+echo "install-firecracker-patched: installed Mitos-patched firecracker ${fc_ver} (x86_64); jailer left stock. Behaviour-identical to stock until FIRECRACKER_MITOS_* env is set (m4b) or a MitosVmstateOnly snapshot is requested (m6a)."
