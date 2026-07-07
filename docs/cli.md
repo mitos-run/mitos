@@ -19,10 +19,12 @@ mitos run <command> [--pool P] [--timeout N]   create a sandbox, run the
                                                   command, terminate, exit with
                                                   the command's exit code
 mitos sandbox create [--pool P]                create a sandbox, print its id
-mitos sandbox ls [-n namespace] [-A]           list sandboxes
+  [--wait|--no-wait] [--timeout N]
+mitos sandbox ls [-n namespace] [-A] [-o json] list sandboxes (table or JSON)
 mitos sandbox exec <id> <command...>           run a command in a sandbox
-mitos sandbox fork <id> [--replicas N]         fork a sandbox, print new ids
-mitos sandbox terminate <id>                   destroy a sandbox
+mitos sandbox fork <id> [--count N]            fork a sandbox, print new ids
+  [--wait|--no-wait] [--timeout N]
+mitos sandbox terminate <id> [--timeout N]     destroy a sandbox
 mitos ws create <name>                         create an empty workspace
 mitos ws ls [-n namespace]                     list workspaces
 mitos ws log <workspace>                       list revisions, newest first
@@ -37,6 +39,103 @@ mitos dev down                                 delete the local kind dev cluster
 mitos doctor [-n namespace]                    run the node + install preflight
                                                   and print remediation
 ```
+
+## Agent automation contract
+
+`mitos` is built to be driven by an agent or a shell pipeline, not only a human
+at a prompt. Three surfaces make it scriptable: a documented exit-code contract,
+machine-readable `-o json` output on the read verbs, and uniform
+`--wait`/`--timeout` control on the lifecycle verbs.
+
+### Exit codes
+
+Every invocation returns one of a small, stable set of exit codes. An automated
+caller can branch on the code without parsing stderr; the human-facing
+diagnostic on stderr carries the cause and remediation.
+
+| Code | Name | Meaning |
+|---|---|---|
+| `0` | success | The command succeeded. For `run` this is the executed command's own exit code (0 on success). |
+| `1` | error | A general, remediable runtime error (backend unreachable, a failed operation). The stderr diagnostic names the cause. |
+| `2` | usage | A usage error: an unknown subcommand, a missing argument, a bad flag, or an unknown `-o` output format. |
+| `3` | not found | The targeted sandbox or workspace does not exist. |
+| `124` | timeout | A `--wait`/`--timeout` deadline elapsed before the operation completed. The value matches the coreutils `timeout` tool so it is familiar in pipelines. |
+
+`run` is the one verb that passes through: its exit code is the executed
+command's exit code, so `mitos run false` exits non-zero exactly as `false`
+would. The other verbs use the table above.
+
+### Structured output: `-o json`
+
+The read and inspect verbs accept `-o json` (equivalently `--output json` or the
+`--json` shorthand) and emit a stable JSON envelope on stdout. The default
+remains the human-aligned table. An unrecognized format is a usage error (exit
+`2`), never a silent fall-back to the human render, so an agent that asked for
+JSON always gets JSON or a clear failure.
+
+`mitos sandbox ls -o json`:
+
+```json
+{
+  "sandboxes": [
+    {
+      "name": "sbx-abc123",
+      "pool": "python",
+      "phase": "Ready",
+      "node": "node-a",
+      "endpoint": "10.0.0.1:9091",
+      "ageSeconds": 90
+    }
+  ]
+}
+```
+
+`mitos ws ls -o json`:
+
+```json
+{
+  "workspaces": [
+    { "name": "w1", "head": "rev-2", "revisions": 2, "resumable": true }
+  ]
+}
+```
+
+`mitos ws log <workspace> -o json`:
+
+```json
+{
+  "revisions": [
+    { "name": "rev-2", "phase": "Committed", "resumable": true, "lineage": "root" }
+  ]
+}
+```
+
+An empty listing renders an empty array (`{"sandboxes": []}`), never `null`, so a
+consumer can iterate unconditionally. `ageSeconds` is a whole-second integer so a
+caller never has to parse the human `90s`/`2m`/`3h` rendering.
+
+### Waiting and timeouts: `--wait` / `--timeout`
+
+The lifecycle verbs that start an asynchronous operation accept a uniform
+`--wait`/`--no-wait` and `--timeout` pair:
+
+- `mitos sandbox create` and `mitos sandbox fork` (and the `mitos fork` alias)
+  wait for the new sandboxes to become `Ready` by default. Pass `--no-wait` (or
+  `--wait=false`) to return as soon as the object is created without polling for
+  readiness. On the cluster backend the created sandbox name is assigned
+  client-side, so `--no-wait` on `create` returns the id immediately; the hosted
+  gateway returns as soon as the sandbox is provisioned, so `--no-wait` is a
+  no-op there.
+- `--timeout N` bounds the wait to `N` seconds. When the deadline elapses the
+  command exits `124` (timeout) rather than blocking indefinitely. `--timeout 0`
+  (the default) uses the backend's own bound.
+- `mitos sandbox terminate` accepts `--timeout N` to bound the delete call.
+  Terminate is asynchronous (the controller reaps the object); waiting until the
+  sandbox is fully reaped is a named follow-up, so `--wait` is not offered on
+  terminate yet.
+
+`mitos run`'s existing `--timeout` is the in-sandbox exec deadline (the executed
+command's timeout), distinct from the lifecycle wait above.
 
 ### First-run setup: `mitos init`
 
@@ -390,4 +489,8 @@ at the object level. `cp` and `port-forward` for operators are not yet available
 - a `curl | sh` installer and `get.mitos.run` distribution;
 - `mitos init` browser/device-flow login (no pasted key) and optional MCP
   server / editor configuration;
-- shell completions and a code-interpreter-compatible API shim.
+- shell completions and a code-interpreter-compatible API shim;
+- the agent-automation verbs deferred from the first `-o json` increment:
+  `mitos cp` (host <-> sandbox file copy), `mitos logs` (stream a sandbox or
+  claim console), a raw `mitos api` passthrough, and reading secrets from stdin
+  so a key never lands in shell history or `argv`.

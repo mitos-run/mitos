@@ -27,18 +27,18 @@ func cmdRun(ctx context.Context, args []string, backend Backend, out, errw io.Wr
 	timeout := fs.Int("timeout", 0, "exec timeout in seconds (0 = backend default)")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(errw, usage)
-		return 2
+		return ExitUsage
 	}
 	command := strings.Join(fs.Args(), " ")
 	if command == "" {
 		fmt.Fprintf(errw, "run: a command is required\n\n%s", usage)
-		return 2
+		return ExitUsage
 	}
 
 	id, err := backend.Create(ctx, *pool)
 	if err != nil {
 		fmt.Fprintf(errw, "create sandbox: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
 
 	result, execErr := backend.Exec(ctx, id, command, *timeout)
@@ -52,7 +52,7 @@ func cmdRun(ctx context.Context, args []string, backend Backend, out, errw io.Wr
 
 	if execErr != nil {
 		fmt.Fprintf(errw, "exec: %v\n", execErr)
-		return 1
+		return exitCodeFor(execErr)
 	}
 	if result.Stdout != "" {
 		fmt.Fprint(out, result.Stdout)
@@ -67,7 +67,7 @@ func cmdRun(ctx context.Context, args []string, backend Backend, out, errw io.Wr
 func cmdSandbox(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintf(errw, "sandbox: a subcommand is required\n\n%s", usage)
-		return 2
+		return ExitUsage
 	}
 	switch args[0] {
 	case "create":
@@ -82,33 +82,43 @@ func cmdSandbox(ctx context.Context, args []string, backend Backend, out, errw i
 		return cmdSandboxTerminate(ctx, args[1:], backend, out, errw)
 	default:
 		fmt.Fprintf(errw, "unknown sandbox subcommand %q\n\n%s", args[0], usage)
-		return 2
+		return ExitUsage
 	}
 }
 
 func cmdSandboxCreate(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
 	fs := newFlagSet("sandbox create", errw)
 	pool := fs.String("pool", "", "pool to create the sandbox from")
+	wait := fs.Bool("wait", true, "wait for the sandbox to become Ready before returning")
+	noWait := fs.Bool("no-wait", false, "return as soon as the sandbox is created; do not wait for Ready")
+	timeout := fs.Int("timeout", 0, "max seconds to wait for Ready (0 = backend default)")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(errw, usage)
-		return 2
+		return ExitUsage
 	}
-	id, err := backend.Create(ctx, *pool)
+	octx, cancel := lifecycleContext(ctx, *wait, *noWait, *timeout)
+	defer cancel()
+	id, err := backend.Create(octx, *pool)
 	if err != nil {
 		fmt.Fprintf(errw, "create sandbox: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
 	fmt.Fprintln(out, id)
-	return 0
+	return ExitOK
 }
 
 func cmdSandboxLs(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
+	jsonOut, rest, ferr := extractOutputFlag(args)
+	if ferr != nil {
+		fmt.Fprintf(errw, "sandbox ls: %v\n", ferr)
+		return ExitUsage
+	}
 	fs := newFlagSet("sandbox ls", errw)
 	namespace := fs.String("n", "", "namespace")
 	allNamespaces := fs.Bool("A", false, "all namespaces")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		fmt.Fprint(errw, usage)
-		return 2
+		return ExitUsage
 	}
 	ns := *namespace
 	if *allNamespaces {
@@ -117,23 +127,32 @@ func cmdSandboxLs(ctx context.Context, args []string, backend Backend, out, errw
 	infos, err := backend.List(ctx, ns)
 	if err != nil {
 		fmt.Fprintf(errw, "list sandboxes: %v\n", err)
-		return 1
+		return exitCodeFor(err)
+	}
+	if jsonOut {
+		s, err := jsonSandboxInfos(infos)
+		if err != nil {
+			fmt.Fprintf(errw, "sandbox ls: %v\n", err)
+			return ExitError
+		}
+		fmt.Fprint(out, s)
+		return ExitOK
 	}
 	fmt.Fprint(out, formatSandboxInfos(infos))
-	return 0
+	return ExitOK
 }
 
 func cmdSandboxExec(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintf(errw, "sandbox exec: <id> and a command are required\n\n%s", usage)
-		return 2
+		return ExitUsage
 	}
 	id := args[0]
 	command := strings.Join(args[1:], " ")
 	result, err := backend.Exec(ctx, id, command, 0)
 	if err != nil {
 		fmt.Fprintf(errw, "exec: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
 	if result.Stdout != "" {
 		fmt.Fprint(out, result.Stdout)
@@ -154,44 +173,63 @@ func cmdSandboxFork(ctx context.Context, args []string, backend Backend, out, er
 	// alias. --count wins when set (default 0 means "not set, use --replicas").
 	count := fs.Int("count", 0, "number of forks (alias of --replicas)")
 	replicas := fs.Int("replicas", 1, "number of forks")
+	wait := fs.Bool("wait", true, "wait for the forks to become Ready before returning")
+	noWait := fs.Bool("no-wait", false, "return as soon as the forks are created; do not wait for Ready")
+	timeout := fs.Int("timeout", 0, "max seconds to wait for Ready (0 = backend default)")
 	if err := fs.Parse(rest); err != nil {
 		fmt.Fprint(errw, usage)
-		return 2
+		return ExitUsage
 	}
 	if id == "" && fs.NArg() > 0 {
 		id = fs.Arg(0)
 	}
 	if id == "" {
 		fmt.Fprintf(errw, "sandbox fork: a sandbox id is required\n\n%s", usage)
-		return 2
+		return ExitUsage
 	}
 	n := *replicas
 	if *count > 0 {
 		n = *count
 	}
-	ids, err := backend.Fork(ctx, id, n)
+	octx, cancel := lifecycleContext(ctx, *wait, *noWait, *timeout)
+	defer cancel()
+	ids, err := backend.Fork(octx, id, n)
 	if err != nil {
 		fmt.Fprintf(errw, "fork: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
 	for _, fid := range ids {
 		fmt.Fprintln(out, fid)
 	}
-	return 0
+	return ExitOK
 }
 
 func cmdSandboxTerminate(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
-	if len(args) < 1 {
-		fmt.Fprintf(errw, "sandbox terminate: a sandbox id is required\n\n%s", usage)
-		return 2
+	id, rest := splitFirstPositional(args)
+	fs := newFlagSet("sandbox terminate", errw)
+	// terminate is asynchronous: the object is deleted and the controller reaps
+	// it. --timeout bounds the delete call itself; waiting until the sandbox is
+	// fully reaped is a named follow-up, so --wait is not offered here yet.
+	timeout := fs.Int("timeout", 0, "max seconds to bound the delete call (0 = no bound)")
+	if err := fs.Parse(rest); err != nil {
+		fmt.Fprint(errw, usage)
+		return ExitUsage
 	}
-	id := args[0]
-	if err := backend.Terminate(ctx, id); err != nil {
+	if id == "" && fs.NArg() > 0 {
+		id = fs.Arg(0)
+	}
+	if id == "" {
+		fmt.Fprintf(errw, "sandbox terminate: a sandbox id is required\n\n%s", usage)
+		return ExitUsage
+	}
+	octx, cancel := lifecycleContext(ctx, true, false, *timeout)
+	defer cancel()
+	if err := backend.Terminate(octx, id); err != nil {
 		fmt.Fprintf(errw, "terminate: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
 	fmt.Fprintf(out, "terminated %s\n", id)
-	return 0
+	return ExitOK
 }
 
 // cmdDev validates the `dev up|down` arguments. The dev orchestration shells out
@@ -202,15 +240,15 @@ func cmdSandboxTerminate(ctx context.Context, args []string, backend Backend, ou
 func cmdDev(_ context.Context, args []string, _, errw io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintf(errw, "dev: 'up' or 'down' is required\n\n%s", usage)
-		return 2
+		return ExitUsage
 	}
 	switch args[0] {
 	case "up", "down":
 		fmt.Fprintf(errw, "dev %s: run via the mitos binary, which wires the kind/kubectl runner\n", args[0])
-		return 1
+		return ExitError
 	default:
 		fmt.Fprintf(errw, "unknown dev subcommand %q\n\n%s", args[0], usage)
-		return 2
+		return ExitUsage
 	}
 }
 

@@ -107,6 +107,12 @@ func (b *ClusterBackend) Create(ctx context.Context, pool string) (string, error
 	if b.readyHook != nil {
 		b.readyHook(ctx, name)
 	}
+	// --no-wait returns the created sandbox name immediately without polling for
+	// Ready. The name is assigned client-side so it is known even before the
+	// controller reconciles the object.
+	if noWaitRequested(ctx) {
+		return name, nil
+	}
 	if err := b.waitSandboxReady(ctx, name); err != nil {
 		return "", err
 	}
@@ -148,6 +154,9 @@ func (b *ClusterBackend) waitSandboxReady(ctx context.Context, name string) erro
 func (b *ClusterBackend) sandboxHTTP(ctx context.Context, name string) (*mcp.HTTPBackend, error) {
 	var sandbox v1.Sandbox
 	if err := b.client.Get(ctx, client.ObjectKey{Namespace: b.namespace, Name: name}, &sandbox); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("sandbox %s not found: %w", name, ErrNotFound)
+		}
 		return nil, fmt.Errorf("get sandbox %s: %w", name, err)
 	}
 	endpoint := sandbox.Status.Endpoint
@@ -262,6 +271,9 @@ func (b *ClusterBackend) Terminate(ctx context.Context, sandboxID string) error 
 		ObjectMeta: metav1.ObjectMeta{Name: sandboxID, Namespace: b.namespace},
 	}
 	if err := b.client.Delete(ctx, sandbox); err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("sandbox %s not found: %w", sandboxID, ErrNotFound)
+		}
 		return fmt.Errorf("delete sandbox %s: %w", sandboxID, err)
 	}
 	return nil
