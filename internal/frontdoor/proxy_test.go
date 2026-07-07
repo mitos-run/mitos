@@ -56,6 +56,32 @@ func newProxy(t *testing.T, mkt, con *httptest.Server) *frontdoor.Proxy {
 	return p
 }
 
+// TestProxy_ConsoleWithHostPrefixedSession asserts the frontdoor resolves the
+// hardened __Host-mitos_session cookie (issue #733, item 1) so a secure console
+// deployment, which sets only that cookie, is not treated as unauthenticated.
+func TestProxy_ConsoleWithHostPrefixedSession(t *testing.T) {
+	mkt := mktServer(t)
+	defer mkt.Close()
+	con := consoleServer(t)
+	defer con.Close()
+
+	p := newProxy(t, mkt, con)
+
+	req := httptest.NewRequest(http.MethodGet, "/console/keys", nil)
+	req.AddCookie(&http.Cookie{Name: "__Host-mitos_session", Value: "good"})
+
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	parts := strings.SplitN(rr.Body.String(), "|", 2)
+	if len(parts) != 2 || parts[0] != "acct-1" || parts[1] != "org-1" {
+		t.Errorf("identity not injected from __Host- cookie: body = %q", rr.Body.String())
+	}
+}
+
 func TestProxy_Marketing(t *testing.T) {
 	mkt := mktServer(t)
 	defer mkt.Close()

@@ -44,22 +44,56 @@ type Sessions interface {
 // session token directly. The in-memory implementation is the tested default.
 type SessionStore struct {
 	mu       sync.RWMutex
-	byHash   map[string]string  // session-token hash -> account id
-	records  map[string]Session // session id -> Session record
-	hashByID map[string]string  // session id -> token hash
-	nextID   uint64             // counter for deterministic, test-safe session ids
+	byHash   map[string]string    // session-token hash -> account id
+	records  map[string]Session   // session id -> Session record
+	hashByID map[string]string    // session id -> token hash
+	createdH map[string]time.Time // session-token hash -> issue time (for max-age)
+	nextID   uint64               // counter for deterministic, test-safe session ids
+	maxAge   time.Duration        // absolute session lifetime; 0 disables expiry
+	now      func() time.Time     // clock seam; defaults to time.Now
+}
+
+// DefaultSessionMaxAge is the absolute lifetime a session token is valid for
+// unless overridden with WithSessionMaxAge. After this age a token no longer
+// resolves, so a leaked token cannot stay valid indefinitely (issue #733).
+const DefaultSessionMaxAge = 30 * 24 * time.Hour
+
+// SessionStoreOption configures a SessionStore at construction.
+type SessionStoreOption func(*SessionStore)
+
+// WithSessionMaxAge sets the absolute session lifetime. A non-positive value
+// disables expiry (a session then resolves until explicitly revoked).
+func WithSessionMaxAge(d time.Duration) SessionStoreOption {
+	return func(s *SessionStore) { s.maxAge = d }
+}
+
+// withSessionClock overrides the clock; used by tests to drive expiry
+// deterministically.
+func withSessionClock(fn func() time.Time) SessionStoreOption {
+	return func(s *SessionStore) { s.now = fn }
 }
 
 // compile-time assertion that SessionStore satisfies Sessions.
 var _ Sessions = (*SessionStore)(nil)
 
-// NewSessionStore returns an empty in-memory session store.
-func NewSessionStore() *SessionStore {
-	return &SessionStore{
+// NewSessionStore returns an empty in-memory session store. By default it
+// enforces DefaultSessionMaxAge; pass WithSessionMaxAge to change or disable it.
+func NewSessionStore(opts ...SessionStoreOption) *SessionStore {
+	s := &SessionStore{
 		byHash:   map[string]string{},
 		records:  map[string]Session{},
 		hashByID: map[string]string{},
+		createdH: map[string]time.Time{},
+		maxAge:   DefaultSessionMaxAge,
+		now:      time.Now,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	return s
 }
 
 // IssueSession records that token authenticates accountID and attaches a
@@ -71,14 +105,16 @@ func (s *SessionStore) IssueSession(accountID, token, label string) string {
 	s.nextID++
 	id := fmt.Sprintf("sess-%d", s.nextID)
 	h := hashSession(token)
+	created := s.now()
 	s.byHash[h] = accountID
 	s.records[id] = Session{
 		ID:        id,
 		AccountID: accountID,
-		CreatedAt: time.Now(),
+		CreatedAt: created,
 		Label:     label,
 	}
 	s.hashByID[id] = h
+	s.createdH[h] = created
 	return id
 }
 
@@ -95,8 +131,9 @@ func (s *SessionStore) Issue(accountID, token string) {
 func (s *SessionStore) Resolve(token string) (string, error) {
 	h := hashSession(token)
 	s.mu.RLock()
-	defer s.mu.RUnlock()
 	id, ok := s.byHash[h]
+	created, hasCreated := s.createdH[h]
+	s.mu.RUnlock()
 	if !ok {
 		return "", ErrSessionInvalid
 	}
@@ -105,7 +142,29 @@ func (s *SessionStore) Resolve(token string) (string, error) {
 	if subtle.ConstantTimeCompare([]byte(h), []byte(hashSession(token))) != 1 {
 		return "", ErrSessionInvalid
 	}
+	// Absolute max-age: a session older than maxAge no longer resolves and is
+	// lazily reaped so a leaked token cannot live forever (issue #733, item 2).
+	if s.maxAge > 0 && hasCreated && s.now().Sub(created) > s.maxAge {
+		s.expireByHash(h)
+		return "", ErrSessionInvalid
+	}
 	return id, nil
+}
+
+// expireByHash deletes the session identified by its token hash. It is used to
+// lazily reap a session that has passed its absolute max-age on Resolve.
+func (s *SessionStore) expireByHash(h string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.byHash, h)
+	delete(s.createdH, h)
+	for id, hh := range s.hashByID {
+		if hh == h {
+			delete(s.hashByID, id)
+			delete(s.records, id)
+			break
+		}
+	}
 }
 
 // ListByAccount returns all sessions for accountID, most-recent-first. It
@@ -138,6 +197,7 @@ func (s *SessionStore) Revoke(accountID, sessionID string) error {
 	}
 	h := s.hashByID[sessionID]
 	delete(s.byHash, h)
+	delete(s.createdH, h)
 	delete(s.hashByID, sessionID)
 	delete(s.records, sessionID)
 	return nil
@@ -154,6 +214,7 @@ func (s *SessionStore) RevokeAll(accountID string) {
 		}
 		h := s.hashByID[id]
 		delete(s.byHash, h)
+		delete(s.createdH, h)
 		delete(s.hashByID, id)
 		delete(s.records, id)
 	}

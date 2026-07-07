@@ -88,7 +88,18 @@ func main() {
 	// org SignUp mints from here on is stamped with the deployment's
 	// placement default at creation time.
 	caps := capabilitiesFromEnv()
-	keys := saas.NewKeyService(store)
+	// API key hash pepper (issue #733, item 3). Opt-in via MITOS_API_KEY_PEPPER;
+	// when set, the SAME value must be configured on the gateway (and CLI) or the
+	// keys the console mints will not verify at the gateway. Never logged.
+	var keyOpts []saas.KeyServiceOption
+	if pepper, ok := saas.KeyPepperFromEnv(); ok {
+		keyOpts = append(keyOpts, saas.WithSalt(pepper))
+		logger.Info("api key pepper configured", "env", saas.EnvKeyPepper)
+		logger.Warn("api key pepper changes the key hash input; enabling it on a deployment that already minted keys invalidates every pre-pepper key. Re-issue keys after turning it on, and configure the SAME value on the gateway and CLI.", "env", saas.EnvKeyPepper)
+	} else {
+		logger.Info("api key pepper not set; keys are hashed without a pepper", "env", saas.EnvKeyPepper)
+	}
+	keys := saas.NewKeyService(store, keyOpts...)
 	accounts := saas.NewAccountService(store, keys, saas.WithHomeRegion(caps.Placement.DefaultName()))
 	// invitations shares the SAME durable store as accounts/orgs/memberships,
 	// so an accepted invite's membership and the invitation row itself are
@@ -166,9 +177,12 @@ func main() {
 	// Deps.Sessions in the production branch. When pool is non-nil (durable
 	// Postgres configured) the durable PgSessionStore is used; otherwise the
 	// in-memory SessionStore is the dev fallback.
+	// Both stores enforce an absolute session max-age so a leaked session token
+	// cannot stay valid forever (issue #733, item 2). The in-memory store
+	// defaults to it; the durable store takes it explicitly.
 	var sessionStore saas.Sessions
 	if pool != nil {
-		sessionStore = pgstore.NewPgSessionStore(pool)
+		sessionStore = pgstore.NewPgSessionStore(pool, pgstore.WithPgSessionMaxAge(saas.DefaultSessionMaxAge))
 	} else {
 		sessionStore = saas.NewSessionStore()
 	}
@@ -553,7 +567,7 @@ func mountAuth(mux *http.ServeMux, logger *slog.Logger, accounts *saas.AccountSe
 	ah := oidcauth.NewHandlers(oidcauth.Config{
 		Exchanger:          exch,
 		Login:              lm,
-		CookieName:         console.SessionCookieName,
+		CookieName:         console.SessionCookieNameFor(true), // hardened __Host- name; the console OIDC path is always behind TLS
 		RedirectAfterLogin: "/",
 		Secure:             true,
 	})

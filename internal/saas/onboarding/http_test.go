@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"mitos.run/mitos/internal/saas"
+	"mitos.run/mitos/internal/saas/console"
 )
 
 // stubCaptcha is a test-only CaptchaVerifier that returns a configurable error
@@ -226,6 +227,50 @@ func TestVerifySetsCookieOnFreshVerify(t *testing.T) {
 	// Confirm the token was registered in the session store and resolves.
 	if accountID, err := sessions.Resolve(found.Value); err != nil || accountID == "" {
 		t.Errorf("session token in cookie does not resolve to an account: %v", err)
+	}
+}
+
+// TestVerifySetsHostPrefixedCookieWhenSecure asserts that a secure deployment
+// sets the hardened __Host-mitos_session cookie (Secure, Path=/, no Domain), so
+// a sibling subdomain cannot toss a session cookie into the parent scope
+// (issue #733, item 1).
+func TestVerifySetsHostPrefixedCookieWhenSecure(t *testing.T) {
+	sessions := saas.NewSessionStore()
+	tok := 0
+	newTok := func() string {
+		tok++
+		return fmt.Sprintf("sess-%d", tok)
+	}
+
+	hr := newHarness(t, ModeOpen)
+	h := NewHandler(hr.svc, nil, WithHandlerSessions(sessions, newTok, true)) // secure=true
+
+	postJSON(t, h, "/onboarding/signup", `{"email":"secure@example.com"}`)
+	verifyTok := hr.email.LastToken("secure@example.com")
+
+	rr := postJSON(t, h, "/onboarding/verify", `{"token":"`+verifyTok+`"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200; body %s", rr.Code, rr.Body.String())
+	}
+
+	var found *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == console.HostPrefixedSessionCookieName {
+			found = c
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("secure fresh verify did not set the __Host-mitos_session cookie")
+	}
+	if !found.Secure {
+		t.Error("__Host- cookie must have Secure set")
+	}
+	if found.Path != "/" {
+		t.Errorf("__Host- cookie Path=%q, want /", found.Path)
+	}
+	if found.Domain != "" {
+		t.Errorf("__Host- cookie must not set Domain, got %q", found.Domain)
 	}
 }
 

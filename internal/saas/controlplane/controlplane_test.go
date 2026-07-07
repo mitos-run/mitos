@@ -807,12 +807,14 @@ func TestEnsureTemplateRejectsEmptyID(t *testing.T) {
 // existing SandboxPools to template descriptors. A pool with ReadySnapshots > 0
 // returns ready: true; one with none returns ready: false.
 func TestListTemplatesReturnsPoolDescriptors(t *testing.T) {
+	// template.list is scoped to the caller's own namespace (issue #733, item 5),
+	// so the pools live in orgA's namespace, the same one a create resolves in.
 	readyPool := &v1.SandboxPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "python", Namespace: "mitos-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: "python", Namespace: tenant.NamespaceForOrg(orgA)},
 		Status:     v1.SandboxPoolStatus{ReadySnapshots: 3},
 	}
 	emptyPool := &v1.SandboxPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: "mitos-system"},
+		ObjectMeta: metav1.ObjectMeta{Name: "node", Namespace: tenant.NamespaceForOrg(orgA)},
 		Status:     v1.SandboxPoolStatus{ReadySnapshots: 0},
 	}
 	c := newFakeClient(t, readyPool, emptyPool)
