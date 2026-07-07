@@ -125,12 +125,13 @@ func ParseChildMemfdImport(s string) (ChildMemfdImport, error) {
 		v[i] = u
 	}
 	// The pid/fd fields land in int; bound-check on a local scalar before the
-	// narrowing conversion so a value above the platform int range cannot wrap to a
-	// negative pid/fd (a real pid or fd is far below this, so a larger value is
-	// malformed input, rejected). Operating on the passed value (not an array index)
-	// keeps the guard and the conversion on the same variable.
+	// narrowing conversion so a value above the int range cannot wrap to a negative
+	// pid/fd. Bounding to MaxInt32 keeps the conversion safe on every platform
+	// (int is at least 32 bits) and a real pid or fd is far below it, so a larger
+	// value is malformed input, rejected. Operating on the passed value (not an
+	// array index) keeps the guard and the conversion on the same variable.
 	pidFD := func(u uint64) (int, error) {
-		if u > uint64(math.MaxInt) {
+		if u > math.MaxInt32 {
 			return 0, fmt.Errorf("parse child memfd import %q: field value %d exceeds int range", s, u)
 		}
 		return int(u), nil
