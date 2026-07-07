@@ -124,36 +124,38 @@ func ParseChildMemfdImport(s string) (ChildMemfdImport, error) {
 		}
 		v[i] = u
 	}
-	// The pid/fd fields land in int; bound-check before the narrowing conversion so a
-	// value above the platform int range cannot wrap to a negative pid/fd (a real pid
-	// or fd is far below this, so a larger value is malformed input, rejected).
-	pidFD := func(idx int) (int, error) {
-		if v[idx] > uint64(math.MaxInt) {
-			return 0, fmt.Errorf("parse child memfd import %q: field %d (%d) exceeds int range", s, idx, v[idx])
+	// The pid/fd fields land in int; bound-check on a local scalar before the
+	// narrowing conversion so a value above the platform int range cannot wrap to a
+	// negative pid/fd (a real pid or fd is far below this, so a larger value is
+	// malformed input, rejected). Operating on the passed value (not an array index)
+	// keeps the guard and the conversion on the same variable.
+	pidFD := func(u uint64) (int, error) {
+		if u > uint64(math.MaxInt) {
+			return 0, fmt.Errorf("parse child memfd import %q: field value %d exceeds int range", s, u)
 		}
-		return int(v[idx]), nil
+		return int(u), nil
 	}
-	parentPID, err := pidFD(0)
+	parentPID, err := pidFD(v[0])
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
-	parentFD, err := pidFD(1)
+	parentFD, err := pidFD(v[1])
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
-	frozenPID, err := pidFD(5)
+	frozenPID, err := pidFD(v[5])
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
-	frozenFD, err := pidFD(6)
+	frozenFD, err := pidFD(v[6])
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
-	bitmapPID, err := pidFD(9)
+	bitmapPID, err := pidFD(v[9])
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
-	bitmapFD, err := pidFD(10)
+	bitmapFD, err := pidFD(v[10])
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
