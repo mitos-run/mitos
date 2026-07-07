@@ -41,26 +41,21 @@ import (
 // deterministic across runs.
 func checkTemplateArtifactInvariants(dataDir, id string) error {
 	wantUID := os.Geteuid()
-	files := templateSnapshotFiles(dataDir, id)
 
-	names := make([]string, 0, len(files))
-	for name := range files {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	for _, name := range names {
-		path := files[name]
+	// checkOwnership enforces the shared uid/gid contract on one entry. kind is
+	// "artifact" or "dir" for the message; wantMode is 0o640 for files and
+	// 0o750 for directories.
+	checkOwnership := func(kind, path string, wantMode os.FileMode) error {
 		info, err := os.Stat(path)
 		if err != nil {
-			return fmt.Errorf("stat template %s artifact %s: %w", id, path, err)
+			return fmt.Errorf("stat template %s %s %s: %w", id, kind, path, err)
 		}
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {
-			return fmt.Errorf("template %s artifact %s: cannot determine owner on this platform", id, path)
+			return fmt.Errorf("template %s %s %s: cannot determine owner on this platform", id, kind, path)
 		}
 		if gotUID := int(st.Uid); gotUID != wantUID {
-			return fmt.Errorf("template %s artifact %s is owned by uid %d, expected uid %d (this process's euid); the jailed build likely flipped ownership (issues #583, #597), so the template is unusable until rebuilt or its ownership is fixed", id, path, gotUID, wantUID)
+			return fmt.Errorf("template %s %s %s is owned by uid %d, expected uid %d (this process's euid); the jailed build likely flipped ownership (issues #583, #597), so the template is unusable until rebuilt or its ownership is fixed", id, kind, path, gotUID, wantUID)
 		}
 		// A root builder tags artifacts with the shared kvm gid so a separate
 		// husk uid reads them through the group class. A non-root builder
@@ -70,10 +65,35 @@ func checkTemplateArtifactInvariants(dataDir, id string) error {
 		// fallback, so a non-root deployment reuses its templates instead of
 		// rebuilding every one.
 		if gotGID := int(st.Gid); gotGID != firecracker.SharedKVMGID && gotGID != os.Getegid() {
-			return fmt.Errorf("template %s artifact %s is group-owned by gid %d, expected gid %d (the shared kvm group a husk reads the template through, issues #585, #597) or this process's gid %d; the template is unusable until rebuilt or its group is fixed", id, path, gotGID, firecracker.SharedKVMGID, os.Getegid())
+			return fmt.Errorf("template %s %s %s is group-owned by gid %d, expected gid %d (the shared kvm group a husk reads the template through, issues #585, #597) or this process's gid %d; the template is unusable until rebuilt or its group is fixed", id, kind, path, gotGID, firecracker.SharedKVMGID, os.Getegid())
 		}
-		if mode := info.Mode().Perm(); mode != 0o640 {
-			return fmt.Errorf("template %s artifact %s has mode %#o, expected mode 0o640 (group-readable, not world-writable); the template is unusable until rebuilt or its mode is fixed", id, path, mode)
+		if mode := info.Mode().Perm(); mode != wantMode {
+			return fmt.Errorf("template %s %s %s has mode %#o, expected mode %#o; the template is unusable until rebuilt or its mode is fixed", id, kind, path, mode, wantMode)
+		}
+		return nil
+	}
+
+	// Check the containing directories first: normalizeTemplateArtifacts sets
+	// them to 0o750, and a husk cannot traverse to the files (EACCES) if the
+	// template or snapshot dir has lost group execute, even when the files
+	// themselves are compliant.
+	dir := templateDir(dataDir, id)
+	for _, d := range []string{dir, filepath.Join(dir, "snapshot")} {
+		if err := checkOwnership("dir", d, 0o750); err != nil {
+			return err
+		}
+	}
+
+	files := templateSnapshotFiles(dataDir, id)
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		if err := checkOwnership("artifact", files[name], 0o640); err != nil {
+			return err
 		}
 	}
 	return nil

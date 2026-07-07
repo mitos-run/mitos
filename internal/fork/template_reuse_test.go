@@ -17,6 +17,18 @@ import (
 // chgrp to the shared kvm gid, so every caller must root-gate.
 func makeTemplateArtifactsCompliant(t *testing.T, dataDir, id string) {
 	t.Helper()
+	// The containing directories must be group-traversable (0o750, shared kvm
+	// gid) too, mirroring normalizeTemplateArtifacts, or the reuse invariant
+	// rejects on the dir before it ever reaches the files.
+	dir := filepath.Join(dataDir, "templates", id)
+	for _, d := range []string{dir, filepath.Join(dir, "snapshot")} {
+		if err := os.Chown(d, os.Geteuid(), firecracker.SharedKVMGID); err != nil {
+			t.Fatalf("chown %s: %v", d, err)
+		}
+		if err := os.Chmod(d, 0o750); err != nil {
+			t.Fatalf("chmod %s: %v", d, err)
+		}
+	}
 	for _, p := range templateSnapshotFiles(dataDir, id) {
 		if err := os.Chown(p, os.Geteuid(), firecracker.SharedKVMGID); err != nil {
 			t.Fatalf("chown %s: %v", p, err)
