@@ -230,20 +230,31 @@ push a pod (or node) past its memory budget PENDS or spills, never overcommits.
 Metering already reports CoW-aware MemoryUnique/MemoryShared, which feeds the
 sizing; the reservation must still be safe at worst case, not the CoW-typical case.
 
-Status (L1.7b, admit-and-spill): the per-pod dimension is implemented. The
-MultiVMFork co-location routing (internal/controller/sandboxfork_controller.go,
-coLocatedForkVMBudget) admits a co-located fork VM only while the source pod's
-memory budget has room at the CoW worst case: the pod holds floor(memory.max /
-per-VM guest RAM) VMs, one slot reserved for the source VM already resident, so at
-most floor(limit / request) - 1 children co-locate. This reserves each co-located
-VM its FULL guest memory, not the CoW-typical dirty set, so a sibling can never OOM
-a sibling. A child past the budget spills to a NEW pod via buildForkChildPod, which
-the node scheduler and the capacity-admission gate account honestly, so the node
-budget is kept by the existing per-pod admission on the spill path (a spill that
-does not fit the node PENDS exactly as an independent claim does). This replaces
-the earlier hardcoded co-location count. Deferred to a follow-up: a dedicated
-node-budget check for the co-located dimension and the grow-the-pod-with-in-place-
-resize option; the current increment lands admit-and-spill on the per-pod budget.
+Status (L1.7b, reserve-up-front then admit-and-spill): the per-pod dimension is
+implemented. A multi-VM warm pod is BUILT to host co-located fork VMs, so it
+RESERVES node memory up front for the source VM plus a bounded number of fork VMs
+(buildHuskPod sizes Requests[memory] = (1 + reserved) * per-VM guest RAM and records
+the per-VM guest RAM in the mitos.run/fork-vm-guest-memory annotation; the reserved
+count defaults to 4, the SandboxPoolReconciler.MultiVMForkVMs knob). The MultiVMFork
+co-location routing (internal/controller/sandboxfork_controller.go,
+coLocatedForkVMBudget) then admits a co-located fork VM while the reservation has
+room: the reserved request holds floor(request / per-VM) VMs, one slot reserved for
+the source VM already resident, so floor(request / per-VM) - 1 children co-locate.
+Reserving on the REQUEST is node-honest: the scheduler placed the pod where every
+reserved VM's guest RAM fits, so a co-located fork never overcommits the node. Each
+co-located VM is accounted its FULL guest memory, not the CoW-typical dirty set, so
+a sibling can never OOM a sibling. A child past the reservation spills to a NEW pod
+via buildForkChildPod, which the node scheduler and the capacity-admission gate
+account honestly (a spill that does not fit the node PENDS exactly as an independent
+claim does). This replaces the earlier hardcoded co-location count and fixes the
+regression where the pure memory budget floored every realistically sized multi-VM
+pod to 0 co-location (limit = request + modest headroom), so with the flag on every
+fork silently spilled to the new-pod path and a prod canary hit
+re-get-fork-child-pod-not-found. A legacy pod carrying no reservation stamp keeps the
+prior limit-based floor(limit / request) - 1 budget. Deferred to a follow-up: a
+dedicated node-budget check for the co-located dimension and the
+grow-the-pod-with-in-place-resize option (grow the reservation lazily as forks join,
+instead of reserving the bounded max up front).
 
 ### Guarantee B: a swarm always survives node loss by reconstructing from durable state
 

@@ -77,6 +77,15 @@ const (
 	// reaped, digest or no digest (issue #679).
 	huskBuildGenerationAnnotation = "mitos.run/template-build-generation"
 
+	// huskForkVMGuestMemoryAnnotation records ONE fork VM's honest guest-RAM
+	// footprint on a MULTI-VM husk pod. A multi-VM pod reserves node memory for the
+	// source VM plus a bounded number of co-located fork VMs, so its memory REQUEST
+	// is NOT one VM's RAM: this annotation is the per-VM unit coLocatedForkVMBudget
+	// divides the reserved request by to recover how many co-located fork VMs the
+	// pod reserved room for. A single-VM pod carries no annotation (its request IS
+	// one VM's RAM) and the legacy limit-based budget applies unchanged.
+	huskForkVMGuestMemoryAnnotation = "mitos.run/fork-vm-guest-memory"
+
 	// huskForkLabel marks a husk pod as a fork CHILD and carries the owning
 	// SandboxFork name, so a reconcile can list exactly this fork's children and
 	// they are never counted as warm-pool slots (the pool selector requires
@@ -175,6 +184,13 @@ type HuskPodOptions struct {
 	// change a normal claim: Stub.Activate routes a claim with no VMID to the pod's
 	// default VM, byte-for-byte as the single-VM path does.
 	MultiVM bool
+	// MultiVMForkVMs is the number of ADDITIONAL fork-child VMs a multi-VM pod
+	// reserves node memory for up front (beyond the source VM), so the co-location
+	// routing has room to co-locate that many children before a fork spills to a new
+	// pod. Only consulted when MultiVM is set; zero selects
+	// defaultMultiVMForkVMsPerPod. The reservation is on the pod's memory REQUEST so
+	// the scheduler keeps it node-honest (guarantee A).
+	MultiVMForkVMs int
 	// StubImage is the container image that runs cmd/husk-stub.
 	StubImage string
 	// DNSUpstream is the comma-separated host:port resolver list (failover order)
@@ -310,6 +326,17 @@ var defaultHuskMemoryHeadroom = resource.MustParse("256Mi")
 
 const defaultHuskMemoryHeadroomPercent = 25
 
+// defaultMultiVMForkVMsPerPod is the number of ADDITIONAL fork-child VMs a
+// multi-VM husk pod reserves node memory for up front (beyond the source VM), so
+// the MultiVMFork co-location routing has room to co-locate that many fork children
+// in place before a fork spills to a new pod. It is the reserved co-location count
+// a multi-VM pod is sized for; the reservation is on the pod's memory REQUEST, so
+// the scheduler places the pod only where every co-located VM's guest RAM
+// physically fits (guarantee A: a co-located fork never overcommits the node). It
+// restores the co-location capacity the earlier hardcoded per-pod count granted
+// before the memory-budget accounting sized every realistic pod down to zero.
+const defaultMultiVMForkVMsPerPod = 4
+
 // huskMemoryLimit returns the husk container's memory limit: the memory request
 // plus the headroom max(floor, percent% of the request). It never returns a
 // value less than or equal to the request, so a VM at its configured RAM is
@@ -332,6 +359,13 @@ func huskMemoryLimit(memReq, floor resource.Quantity, percent int) resource.Quan
 	limit := memReq.DeepCopy()
 	limit.Add(headroom)
 	return limit
+}
+
+// scaleQuantity returns q multiplied by n, preserving q's binary-SI format so a
+// scaled memory reservation still prints in Mi/Gi. Used to reserve a multi-VM husk
+// pod's memory for (1 + reserved fork VMs) guest-RAM footprints.
+func scaleQuantity(q resource.Quantity, n int64) resource.Quantity {
+	return *resource.NewQuantity(q.Value()*n, q.Format)
 }
 
 // buildHuskPod builds the warm-pool husk pod for a pool. The pod is
@@ -373,13 +407,34 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 	if cpuFloor.Cmp(cpuLimit) > 0 {
 		cpuFloor = cpuLimit
 	}
-	// Memory is left honest: Requests = configured, Limits = request + headroom.
-	// Memory is genuinely resident (Firecracker holds the guest RAM in the husk
-	// pod cgroup); overcommitting it would OOM-kill live sandboxes under node
-	// memory pressure. CPU is burstable and safe to overcommit; memory is not.
-	memReq := defaultHuskMemory
+	// perVMGuestMem is ONE VM's honest guest-RAM footprint (the tenant's configured
+	// sandbox memory, or the default). It is what a co-located fork VM costs at the
+	// CoW worst case and the per-VM unit coLocatedForkVMBudget divides a multi-VM
+	// pod's reserved memory by.
+	perVMGuestMem := defaultHuskMemory
 	if !template.Resources.Memory.IsZero() {
-		memReq = template.Resources.Memory
+		perVMGuestMem = template.Resources.Memory
+	}
+	// Memory REQUEST. A single-VM pod requests one VM's guest RAM (honest, no
+	// overcommit: Firecracker holds the guest RAM resident in the pod cgroup). A
+	// MULTI-VM pod exists to host ADDITIONAL fork-child VMs co-located in place (the
+	// MultiVMFork routing), so it RESERVES memory up front for the source VM plus a
+	// bounded number of co-located fork VMs (the plan's "reserve the pod at a bounded
+	// max VM count up front"). Reserving on the REQUEST keeps the reservation
+	// node-honest: the scheduler places the pod only where every co-located VM's
+	// guest RAM physically fits, so a co-located fork never overcommits the node
+	// (guarantee A). Without this reservation a multi-VM pod was sized for ONE VM,
+	// its co-location budget floored to 0, every fork spilled to a new pod, and the
+	// spill path is exactly where the production canary failed
+	// (re-get-fork-child-pod-not-found). Memory is non-compressible and CPU is not,
+	// so only memory is reserved this way; CPU stays burstable.
+	memReq := perVMGuestMem
+	if opts.MultiVM {
+		reservedForkVMs := opts.MultiVMForkVMs
+		if reservedForkVMs <= 0 {
+			reservedForkVMs = defaultMultiVMForkVMsPerPod
+		}
+		memReq = scaleQuantity(perVMGuestMem, int64(1+reservedForkVMs))
 	}
 	// Memory LIMIT = request + headroom (production-blocker #2, cap 1). The
 	// headroom (floor + proportional) is operator-tunable on the reconciler; the
@@ -788,6 +843,13 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 	}
 	if len(opts.SnapshotNodes) == 1 && opts.ExpectedDigest != "" {
 		annotations[huskSnapshotNodeAnnotation] = opts.SnapshotNodes[0]
+	}
+	// Record ONE fork VM's guest RAM on a multi-VM pod: its memory request reserves
+	// room for MANY VMs, so coLocatedForkVMBudget needs this per-VM unit to recover
+	// how many co-located fork VMs the pod reserved room for. A single-VM pod carries
+	// no stamp and keeps the legacy limit-based budget.
+	if opts.MultiVM {
+		annotations[huskForkVMGuestMemoryAnnotation] = perVMGuestMem.String()
 	}
 
 	pod := &corev1.Pod{
@@ -1285,6 +1347,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 		}
 		opts := HuskPodOptions{
 			MultiVM:         r.MultiVM,
+			MultiVMForkVMs:  r.MultiVMForkVMs,
 			StubImage:       r.HuskStubImage,
 			DNSUpstream:     r.HuskDNSUpstream,
 			KVMResourceName: r.KVMResourceName,

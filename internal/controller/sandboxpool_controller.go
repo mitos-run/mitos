@@ -45,6 +45,11 @@ type SandboxPoolReconciler struct {
 	// same --multi-vm-fork operator flag that enables the routing on the Sandbox
 	// reconciler; default off. A normal claim is unaffected.
 	MultiVM bool
+	// MultiVMForkVMs is how many co-located fork VMs a multi-VM warm pod reserves
+	// node memory for up front (beyond the source VM), so the co-location routing
+	// has room before a fork spills to a new pod. Only consulted when MultiVM is set;
+	// zero selects defaultMultiVMForkVMsPerPod.
+	MultiVMForkVMs int
 	// HuskStubImage is the container image that runs cmd/husk-stub in a husk
 	// pod. Only used when EnableHuskPods is true.
 	HuskStubImage string
