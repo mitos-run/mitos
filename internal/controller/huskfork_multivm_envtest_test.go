@@ -823,7 +823,9 @@ func TestMultiVMForkSpawnActivatesFromParentSnapshotNotTemplate(t *testing.T) {
 		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
 	})
 	t.Cleanup(func() { setForkSnapshotter(nil) })
+	var activateCalls int32
 	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		atomic.AddInt32(&activateCalls, 1)
 		return husk.ActivateResult{OK: false, Error: "activate must not be called on the co-location path"}, nil
 	})
 	t.Cleanup(func() { setForkActivator(nil) })
@@ -865,6 +867,9 @@ func TestMultiVMForkSpawnActivatesFromParentSnapshotNotTemplate(t *testing.T) {
 		return got.Status.ReadyReplicas == 1
 	})
 
+	if got := atomic.LoadInt32(&activateCalls); got != 0 {
+		t.Fatalf("single-VM activate must never be called on the co-location path, got %d calls (a spawn-vm + activate double path would corrupt the fork)", got)
+	}
 	if got := atomic.LoadInt32(&spawnCalls); got < 1 {
 		t.Fatalf("expected at least one spawn-vm call, got %d", got)
 	}
