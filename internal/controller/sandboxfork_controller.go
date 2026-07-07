@@ -44,22 +44,37 @@ type huskVMSpawner func(ctx context.Context, addr string, tlsConf *tls.Config, r
 // co-located VM shares the parent memory image copy-on-write, so its TYPICAL
 // resident cost is only its private-dirty set (a few MiB). But it MAY dirty up to
 // its whole guest RAM, and memory is non-compressible: if the co-located guests
-// together dirty more than the pod's cgroup memory limit, a sibling OOM-kills a
-// sibling (the user's own live work). So each VM (the source plus every co-located
-// child) is reserved its FULL guest-memory footprint, not the tiny shared-page
-// floor. The honest per-VM guest RAM is the pod's memory REQUEST (Requests[memory],
-// the same no-overcommit defaultHuskMemory-class figure a new husk pod requests);
-// the hard ceiling is the pod's memory LIMIT (Limits[memory], the memory.max the
-// kubelet enforces). The pod therefore holds at most floor(limit / perVM) VMs
-// before a sibling would OOM a sibling. One slot is reserved for the source VM, so
-// the co-location budget is floor(limit / perVM) - 1, floored at 0. A budget of 0
-// means every fork child spills to a new pod.
+// together dirty more than what the pod reserved, a sibling OOM-kills a sibling
+// (the user's own live work). So each VM (the source plus every co-located child)
+// is accounted its FULL guest-memory footprint, not the tiny shared-page floor.
 //
-// When the source pod does not declare BOTH a memory request and a memory limit on
-// its husk container (a malformed or resource-free pod), the budget is 0: with no
-// provable pod ceiling the fork co-locates nothing and every child spills to a new
-// pod, the conservative safe-at-worst-case default. Real husk pods always carry
-// both (buildHuskPod sets Requests[memory] and Limits[memory]).
+// Two source-pod shapes, one guarantee:
+//
+//   - A MULTI-VM husk pod is BUILT to host co-located fork VMs: it reserves node
+//     memory up front for the source VM plus a bounded number of fork VMs
+//     (buildHuskPod sizes Requests[memory] = (1 + reserved) * per-VM guest RAM) and
+//     records the per-VM guest RAM in the huskForkVMGuestMemoryAnnotation. The
+//     budget is floor(request / per-VM) - 1: the reserved request holds that many
+//     VMs and one slot is the source VM. Reserving on the REQUEST is node-honest,
+//     the scheduler placed the pod where every reserved VM's guest RAM fits, so a
+//     co-located fork never overcommits the node. This is what makes co-location
+//     actually engage for a realistically sized pool; without the reservation a
+//     multi-VM pod was sized for ONE VM and this budget was always 0, so every fork
+//     spilled to the new-pod path (where the production canary failed).
+//
+//   - A LEGACY / single-VM pod carries no reservation stamp, so its memory REQUEST
+//     is one VM's guest RAM and its memory LIMIT (memory.max the kubelet enforces)
+//     is the intra-pod ceiling. The budget is floor(limit / request) - 1: the pod
+//     holds that many VMs before a sibling would OOM a sibling, one slot reserved
+//     for the source VM. A pod sized for one VM (the honest single-VM default)
+//     co-locates nothing, so a fork of it spills to a new pod. spawnInSourcePod is
+//     false for a single-VM source anyway, so this branch only ever governs a pod
+//     stamped multi-VM-capable by other means (a test fixture).
+//
+// A budget of 0 means every fork child spills to a new pod. When the source pod
+// does not declare the memory accounting its shape needs (a malformed or
+// resource-free pod), the budget is 0: with nothing provable the fork co-locates
+// nothing, the conservative safe-at-worst-case default.
 //
 // This replaces the former hardcoded co-location count. It governs the per-pod
 // dimension of guarantee A. The node budget is already honored by the spill path:
@@ -86,23 +101,48 @@ func coLocatedForkVMBudget(pod *corev1.Pod) int {
 	if pod == nil {
 		return 0
 	}
-	var perVM, limit resource.Quantity
+	var req, limit resource.Quantity
 	found := false
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
 		if c.Name != huskContainerName {
 			continue
 		}
-		perVM = c.Resources.Requests[corev1.ResourceMemory]
+		req = c.Resources.Requests[corev1.ResourceMemory]
 		limit = c.Resources.Limits[corev1.ResourceMemory]
 		found = true
 		break
 	}
-	if !found || perVM.IsZero() || limit.IsZero() {
+	if !found {
 		return 0
 	}
-	total := limit.Value() / perVM.Value()
-	coLocated := total - 1
+	// A MULTI-VM pod records ONE fork VM's guest RAM in an annotation and RESERVES
+	// its memory request for the source VM plus a bounded number of co-located fork
+	// VMs (buildHuskPod). The reserved request holds floor(request / per-VM) VMs on
+	// the node, one slot reserved for the source VM already resident, so the pod
+	// grants floor(request / per-VM) - 1 co-located fork slots. Reserving on the
+	// REQUEST is node-honest: the scheduler placed the pod where all those VMs fit,
+	// so a co-located fork never overcommits the node (guarantee A).
+	if g, ok := pod.Annotations[huskForkVMGuestMemoryAnnotation]; ok {
+		perVM, err := resource.ParseQuantity(g)
+		if err == nil && !perVM.IsZero() && !req.IsZero() {
+			coLocated := req.Value()/perVM.Value() - 1
+			if coLocated < 0 {
+				return 0
+			}
+			return int(coLocated)
+		}
+	}
+	// Legacy / single-VM pod: no reservation stamp, so the memory REQUEST is one
+	// VM's guest RAM and the pod's memory LIMIT (memory.max) is the intra-pod
+	// ceiling. It holds floor(limit / request) VMs at the CoW worst case before a
+	// sibling would OOM a sibling, one slot reserved for the source VM, so at most
+	// floor(limit / request) - 1 children co-locate. A pod sized for one VM (the
+	// honest single-VM default) co-locates nothing.
+	if req.IsZero() || limit.IsZero() {
+		return 0
+	}
+	coLocated := limit.Value()/req.Value() - 1
 	if coLocated < 0 {
 		return 0
 	}

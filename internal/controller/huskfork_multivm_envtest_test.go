@@ -643,3 +643,152 @@ func TestMultiVMForkFlagFlipOffDoesNotOrphanCoLocatedChild(t *testing.T) {
 		t.Fatalf("after flip, the co-located child record must be unchanged (source pod + vmID), got %+v", afterFlip.Status.Children)
 	}
 }
+
+// withMultiVMWarmPodSizing copies the memory REQUEST, LIMIT, and per-VM guest-RAM
+// annotation that a REAL multi-VM warm husk pod carries (the production pod builder
+// buildHuskPod with MultiVM on, default template memory) onto the source husk pod,
+// so the co-location routing sees the exact resource shape a production all-multi-VM
+// warm pool produces. This is the canary shape: before the fix, buildHuskPod left a
+// multi-VM pod sized for ONE VM (limit = request + modest headroom), so
+// coLocatedForkVMBudget floored to 0 and every fork spilled to the new-pod path; the
+// fix reserves memory for co-located fork VMs up front so the budget is >= 1.
+func withMultiVMWarmPodSizing(t *testing.T) func(*corev1.Pod) {
+	t.Helper()
+	poolR := &controller.SandboxPoolReconciler{MultiVM: true}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "mvm-sizing-ref", Namespace: "default"}}
+	ref := poolR.BuildHuskPodForTest(pool, &v1.PoolTemplateSpec{}, controller.HuskPodOptions{MultiVM: true})
+	var refResources corev1.ResourceRequirements
+	for i := range ref.Spec.Containers {
+		if ref.Spec.Containers[i].Name == "husk-stub" {
+			refResources = *ref.Spec.Containers[i].Resources.DeepCopy()
+		}
+	}
+	return func(p *corev1.Pod) {
+		for i := range p.Spec.Containers {
+			if p.Spec.Containers[i].Name == "husk-stub" {
+				p.Spec.Containers[i].Resources = *refResources.DeepCopy()
+			}
+		}
+		if p.Annotations == nil {
+			p.Annotations = map[string]string{}
+		}
+		for k, v := range ref.Annotations {
+			p.Annotations[k] = v
+		}
+	}
+}
+
+// TestMultiVMWarmPodReservesCoLocationBudget is the fast reproduction of the canary
+// root cause: a multi-VM-capable warm husk pod, built by the SAME production pod
+// builder that a --multi-vm-fork warm pool uses, must grant a co-location budget of
+// at least one fork child. On origin/main the builder sizes a multi-VM pod for a
+// SINGLE VM (memory limit = request + headroom), so coLocatedForkVMBudget floors to
+// 0: NO child co-locates and every fork spills to the new-pod path (where the prod
+// canary hit "re-get fork child pod not found"). A single-VM warm pod is unchanged:
+// it still grants 0 (it never co-locates, spawnInSourcePod is false for it).
+func TestMultiVMWarmPodReservesCoLocationBudget(t *testing.T) {
+	poolR := &controller.SandboxPoolReconciler{MultiVM: true}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "mvm-budget", Namespace: "default"}}
+
+	multiVMPod := poolR.BuildHuskPodForTest(pool, &v1.PoolTemplateSpec{}, controller.HuskPodOptions{MultiVM: true})
+	if got := controller.CoLocatedForkVMBudgetForTest(multiVMPod); got < 1 {
+		t.Fatalf("a multi-VM warm pod must reserve room for at least one co-located fork VM, got budget %d", got)
+	}
+
+	// The single-VM (default) pod is unchanged: no co-location, budget 0.
+	singleVMPod := poolR.BuildHuskPodForTest(pool, &v1.PoolTemplateSpec{}, controller.HuskPodOptions{})
+	if got := controller.CoLocatedForkVMBudgetForTest(singleVMPod); got != 0 {
+		t.Fatalf("a single-VM warm pod must grant no co-location budget, got %d", got)
+	}
+}
+
+// TestMultiVMForkCoLocatesRealisticWarmPod is the integration reproduction the CI
+// missed: with --multi-vm-fork ON and a source husk pod carrying the EXACT resource
+// shape a production multi-VM warm pool produces (withMultiVMWarmPodSizing, from the
+// real pod builder), a fork child must co-locate INSIDE the source pod (spawn-vm, NO
+// new child pod) and the fork must reach ReadyReplicas.
+//
+// On origin/main this reproduces the canary: the realistic multi-VM pod grants a
+// co-location budget of 0, so the child spills to the new-pod path, the loud
+// activator below refuses it (a co-located child never activates), the child never
+// goes Ready, and the fork never reaches ReadyReplicas (plus a stray
+// sandbox-<id>-fork-0 pod appears). After the fix the child co-locates: status.Pod
+// is the source pod, status.VMID is set, and no child pod exists.
+func TestMultiVMForkCoLocatesRealisticWarmPod(t *testing.T) {
+	poolName := uniqueName("pool-mvm-real")
+	srcClaimName := uniqueName("src-mvm-real")
+	forkName := uniqueName("mvm-real")
+
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.20", multiVMSource, withMultiVMWarmPodSizing(t))
+	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
+
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+	// A loud activator: the new-pod fork path activates, the co-location path does
+	// NOT. If the realistic multi-VM source misroutes to a new pod, that child would
+	// go through activate; failing it loud means a misroute can never masquerade as a
+	// passing run.
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		return husk.ActivateResult{OK: false, Error: "activate must not be called on the co-location path (fork misrouted to a new pod)"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+
+	var spawnCalls int32
+	setForkVMSpawner(func(_ context.Context, _ string, _ *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error) {
+		atomic.AddInt32(&spawnCalls, 1)
+		return husk.SpawnVMResult{OK: true, VMID: req.VMID, VsockPath: "/run/husk/" + req.VMID + ".sock"}, nil
+	})
+	t.Cleanup(func() { setForkVMSpawner(nil) })
+
+	setForkMultiVM(true)
+	t.Cleanup(func() { setForkMultiVM(false) })
+
+	fork := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      forkName,
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcClaimName}}, Replicas: 1},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var got v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &got); err != nil {
+			return false
+		}
+		return got.Status.ReadyReplicas == 1
+	})
+
+	// The child co-located: no new sandbox-<id>-fork-0 pod exists.
+	var pods corev1.PodList
+	if err := k8sClient.List(ctx, &pods, listForkChildren(forkName)); err != nil {
+		t.Fatalf("list children: %v", err)
+	}
+	if len(pods.Items) != 0 {
+		t.Fatalf("a realistic multi-VM warm pod must co-locate the fork child, not spill to a new pod; got %d child pods", len(pods.Items))
+	}
+	if got := atomic.LoadInt32(&spawnCalls); got < 1 {
+		t.Fatalf("expected at least one spawn-vm call (the co-located child), got %d", got)
+	}
+
+	var got v1.Sandbox
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &got); err != nil {
+		t.Fatalf("get fork: %v", err)
+	}
+	if len(got.Status.Children) != 1 {
+		t.Fatalf("expected 1 recorded child, got %d", len(got.Status.Children))
+	}
+	if got.Status.Children[0].Pod != srcPod.Name {
+		t.Errorf("child status.Pod = %q, want the source pod %q (co-located)", got.Status.Children[0].Pod, srcPod.Name)
+	}
+	if got.Status.Children[0].VMID == "" {
+		t.Errorf("child status.VMID is empty, want the spawned vmID")
+	}
+}
