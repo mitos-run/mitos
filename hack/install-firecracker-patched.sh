@@ -11,11 +11,13 @@
 #     Full and Diff snapshots are byte-for-byte unchanged, so the image behaves
 #     like stock until those gates are used. Installing it everywhere is safe.
 #   - Provenance: built reproducibly in mitos-run/firecracker on branch
-#     mitos/vmstate-only-snapshot-v1.15.0 via .github/workflows/build-patched-fc.yml
-#     (built commit 229987c33e, green run
-#     https://github.com/mitos-run/firecracker/actions/runs/28886363577) and
-#     published as a GitHub release asset, pinned by sha256 below. A compromised
-#     CDN or a network substitution cannot install a different binary.
+#     mitos/wp-offer-on-restore-v1.15.0 via .github/workflows/build-patched-fc.yml
+#     (green run https://github.com/mitos-run/firecracker/actions/runs/28895721279)
+#     and published as a GitHub release asset, pinned by sha256 below. A compromised
+#     CDN or a network substitution cannot install a different binary. This binary
+#     adds the m4b restore-side fix (issue #832): a RESTORED source VM now backs its
+#     guest RAM with a shared memfd, exports it, and offers write-protect during
+#     restore, so the live-cow fork arms on a restored source, not only a booted one.
 #   - Revert = drop the COPY + RUN that invokes this script from Dockerfile.forkd
 #     and Dockerfile.husk-stub (and the smoke-test fixture); the stock firecracker
 #     from hack/install-firecracker.sh then remains in place.
@@ -27,8 +29,8 @@ set -euo pipefail
 
 # --- single pinned provenance constants (audit + bump only here) -------------
 PATCHED_FC_VERSION="v1.15.0"
-PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-vmstate-only-v1.15.0/firecracker-v1.15.0-x86_64-mitos-vmstate-only"
-PATCHED_FC_SHA256="66b4309f4902543823c6fa9677a16008644b4279d9b6367b7321044dcf30221b"
+PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-wp-on-restore-v1.15.0/firecracker-v1.15.0-x86_64-mitos-wp-on-restore"
+PATCHED_FC_SHA256="cfed95979ddb656d53881694965da0fb88fb0a92990e1a6ec7eb31edc9954e22"
 # -----------------------------------------------------------------------------
 
 arch="$(uname -m)"

@@ -455,7 +455,16 @@ func kvmConnectAgent(udsPath string) (*guestgrpc.Client, error) {
 // kvmExecOK runs a shell command in the guest via the gRPC Sandbox service and
 // returns stdout, failing if the transport errors or the command exits nonzero.
 func kvmExecOK(client *guestgrpc.Client, command string) (string, error) {
-	stream, err := client.Sandbox.ExecStream(context.Background(), &sandboxv1.ExecStreamRequest{
+	return kvmExecOKCtx(context.Background(), client, command)
+}
+
+// kvmExecOKCtx is kvmExecOK with a caller-supplied context, so a test can bound the
+// exec: a half-broken guest-agent vsock (e.g. a restored source whose connections
+// reset, issue #838) can leave the stream Recv blocked, which would otherwise hang the
+// test until the package-level timeout. Passing a context with a deadline makes such an
+// exec return promptly with a context error instead.
+func kvmExecOKCtx(ctx context.Context, client *guestgrpc.Client, command string) (string, error) {
+	stream, err := client.Sandbox.ExecStream(ctx, &sandboxv1.ExecStreamRequest{
 		Command:        command,
 		Cwd:            "/",
 		TimeoutSeconds: 60,
