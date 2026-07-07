@@ -38,10 +38,18 @@ RUN apt-get update -qq && \
 # pod spec point at. The script fails the build if either is missing (#425).
 ARG FC_VERSION=v1.15.0
 COPY hack/install-firecracker.sh /tmp/install-firecracker.sh
+# Swap the stock firecracker for the Mitos-patched VMM (live-fork: memfd/MAP_SHARED
+# + UFFD-WP), keeping the stock jailer. Pinned by sha256; behaviour-identical to
+# stock v1.15.0 until FIRECRACKER_MITOS_* env is set at runtime (m4b), so this swap
+# is a no-op for stock behaviour. Runs inside this RUN so it uses the same curl the
+# stock install needs, before curl is purged. Revert = drop this COPY + the patched
+# script call. See hack/install-firecracker-patched.sh for provenance.
+COPY hack/install-firecracker-patched.sh /tmp/install-firecracker-patched.sh
 RUN apt-get update -qq && apt-get install -y --no-install-recommends curl && \
-    chmod +x /tmp/install-firecracker.sh && \
+    chmod +x /tmp/install-firecracker.sh /tmp/install-firecracker-patched.sh && \
     FC_VERSION="${FC_VERSION}" /tmp/install-firecracker.sh && \
-    rm -f /tmp/install-firecracker.sh && \
+    /tmp/install-firecracker-patched.sh && \
+    rm -f /tmp/install-firecracker.sh /tmp/install-firecracker-patched.sh && \
     apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/husk-stub /usr/local/bin/husk-stub
