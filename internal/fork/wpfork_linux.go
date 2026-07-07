@@ -4,6 +4,7 @@ package fork
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -78,11 +79,12 @@ type wpForkHandler struct {
 	pageSize uint64
 	closed   bool
 
-	// stopR/stopW are a self-pipe that unblocks Serve's poll on Close. Closing the
-	// uffd alone does NOT interrupt a concurrent blocking read(2) on it, so Serve
-	// polls the uffd AND stopR together and Close writes stopW to wake it.
-	stopR int
-	stopW int
+	// uffdFile wraps the uffd so Serve's read is driven by the Go runtime poller:
+	// a blocking read(2) on the raw uffd is not interrupted when another goroutine
+	// closes it, but uffdFile.Close() unblocks a poller-driven Read cleanly. The
+	// raw h.uffd is retained for UFFDIO_* ioctls (which ignore O_NONBLOCK); the
+	// file OWNS the fd, so Close closes the file and never double-closes h.uffd.
+	uffdFile *os.File
 
 	// served counts write-protect faults the handler has copied-and-unprotected.
 	served int64
@@ -112,15 +114,7 @@ func newWPForkHandler(cfg WPForkConfig) (*wpForkHandler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wpfork: listen %s: %w", cfg.UDSPath, err)
 	}
-	// Self-pipe so Close can wake Serve's poll (a closed uffd does not interrupt a
-	// blocking read on it). CLOEXEC so the pipe never leaks into a child VM.
-	var sp [2]int
-	if err := unix.Pipe2(sp[:], unix.O_CLOEXEC); err != nil {
-		_ = ln.Close()
-		_ = os.Remove(cfg.UDSPath)
-		return nil, fmt.Errorf("wpfork: stop pipe: %w", err)
-	}
-	return &wpForkHandler{cfg: cfg, ln: ln, uffd: -1, frozenFd: -1, stopR: sp[0], stopW: sp[1]}, nil
+	return &wpForkHandler{cfg: cfg, ln: ln, uffd: -1, frozenFd: -1}, nil
 }
 
 // StartWPForkHandler binds the write-protect handshake socket for a live-cow fork
@@ -199,11 +193,16 @@ func (h *wpForkHandler) Receive() error {
 		return fmt.Errorf("wpfork: mmap frozen bitmap: %w", err)
 	}
 
-	// Serve with blocking reads; Close closes the uffd to unblock the loop.
-	_ = unix.SetNonblock(uffdFD, false)
+	// Wrap the uffd in an *os.File so Serve's read runs on the Go runtime poller:
+	// it delivers fault messages the same as a blocking read but, unlike a raw
+	// read(2), Close (uffdFile.Close) unblocks it cleanly. os.NewFile switches the
+	// fd to non-blocking and registers it with the poller; the raw h.uffd alias is
+	// used only for UFFDIO_* ioctls, which ignore O_NONBLOCK.
+	uffdFile := os.NewFile(uintptr(uffdFD), "wpfork-uffd")
 
 	h.mu.Lock()
 	h.uffd = uffdFD
+	h.uffdFile = uffdFile
 	h.regions = regions
 	h.live = live
 	h.liveSize = exp.bytes
@@ -329,46 +328,21 @@ func (h *wpForkHandler) writeprotect(addr, length uint64, protect bool) error {
 // uffd is closed (Close) or on a fatal read error.
 func (h *wpForkHandler) Serve() error {
 	h.mu.Lock()
-	uffd := h.uffd
-	stopR := h.stopR
+	uffdFile := h.uffdFile
 	h.mu.Unlock()
-	if uffd < 0 {
+	if uffdFile == nil {
 		return fmt.Errorf("wpfork: Serve before handshake")
 	}
 	var msg uffdMsg
 	msgBuf := (*[unsafe.Sizeof(msg)]byte)(unsafe.Pointer(&msg))[:]
 	for {
-		// Poll the uffd and the stop pipe together: closing the uffd does not
-		// interrupt a blocking read on it, so Close writes stopR's peer to wake us.
-		pfds := []unix.PollFd{
-			{Fd: int32(uffd), Events: unix.POLLIN},
-			{Fd: int32(stopR), Events: unix.POLLIN},
-		}
-		if _, err := unix.Poll(pfds, -1); err != nil {
-			if err == unix.EINTR {
-				continue
-			}
-			h.mu.Lock()
-			closed := h.closed
-			h.mu.Unlock()
-			if closed {
+		// Poller-driven read: blocks until a fault message is ready, and returns a
+		// clean ErrClosed when Close closes uffdFile (a raw read(2) would hang).
+		nread, err := uffdFile.Read(msgBuf)
+		if err != nil {
+			if errors.Is(err, os.ErrClosed) {
 				return nil
 			}
-			return fmt.Errorf("wpfork: poll uffd: %w", err)
-		}
-		if pfds[1].Revents != 0 {
-			// Close signaled the stop pipe: clean shutdown.
-			return nil
-		}
-		if pfds[0].Revents&unix.POLLIN == 0 {
-			continue
-		}
-		nread, err := unix.Read(uffd, msgBuf)
-		if err != nil {
-			if err == unix.EINTR || err == unix.EAGAIN {
-				continue
-			}
-			// A closed uffd (Close) returns EBADF/errno; treat as clean shutdown.
 			h.mu.Lock()
 			closed := h.closed
 			h.mu.Unlock()
@@ -454,21 +428,16 @@ func (h *wpForkHandler) Close() error {
 		return nil
 	}
 	h.closed = true
-	// Wake Serve's poll FIRST (a closed uffd does not interrupt a blocked poll/read
-	// on it), then close both pipe ends. The single byte is enough to signal POLLIN.
-	if h.stopW >= 0 {
-		_, _ = unix.Write(h.stopW, []byte{0})
-		_ = unix.Close(h.stopW)
-		h.stopW = -1
-	}
-	if h.stopR >= 0 {
-		_ = unix.Close(h.stopR)
-		h.stopR = -1
-	}
 	if h.ln != nil {
 		_ = h.ln.Close()
 	}
-	if h.uffd >= 0 {
+	// Closing the file unblocks Serve's poller-driven Read and closes the uffd fd
+	// it owns. Clear the raw alias without a second unix.Close (double close).
+	if h.uffdFile != nil {
+		_ = h.uffdFile.Close()
+		h.uffdFile = nil
+		h.uffd = -1
+	} else if h.uffd >= 0 {
 		_ = unix.Close(h.uffd)
 		h.uffd = -1
 	}
