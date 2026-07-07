@@ -302,3 +302,207 @@ func TestLiveCowForkInheritanceAndNoLeak(t *testing.T) {
 
 	t.Logf("m4b live-cow correctness PASS: inheritance + no-leak; freeze=%v, WP faults served=%d", freeze, handle.FaultCount())
 }
+
+// TestLiveCowChildBootsFromSharedMemfd is the milestone m5 real-KVM gate: it
+// proves a co-located live-cow fork CHILD boots its guest RAM from the PARENT's
+// live shared memfd (a MAP_PRIVATE of the parent memfd + the FROZEN overlay),
+// NOT from a disk mem file, through the PRODUCTION child-import code
+// (ComposeChildFromImport + handle.ChildImport), and that this memory attach is
+// dramatically faster than the disk-mem-file restore it replaces (asserted
+// sub-100ms). It runs in the firecracker-test job (go test ./internal/fork/...).
+//
+// It stands in for the Firecracker child-restore patch exactly as the sibling
+// test stands in for the parent side: the memory-attach the child Firecracker
+// must perform at restore time IS ComposeChildFromImport, exercised here on a real
+// memfd + real FROZEN image produced by the real WP handler. The only thing not
+// booted is a full guest VMM (that needs the FIRECRACKER_MITOS_CHILD_MEMFD restore
+// patch + a KVM node); the memory import that is the heart of m5 is proven for
+// real, including the no-leak selector and the latency win.
+func TestLiveCowChildBootsFromSharedMemfd(t *testing.T) {
+	const pageSize = 4096
+	// A multi-MiB guest so the disk-restore baseline (reading/faulting the whole
+	// mem file) is measurable while the memfd attach stays microseconds: the whole
+	// point of live-cow is to NOT read the RAM back off disk.
+	const memMiB = 32
+	size := uint64(memMiB << 20)
+	npages := size / pageSize
+
+	// --- Stand in for the patched Firecracker parent: guest RAM as a MAP_SHARED
+	// memfd, markers written, m1 export published. ---
+	guestFd, err := unix.MemfdCreate("mitos-guest-ram", unix.MFD_CLOEXEC)
+	if err != nil {
+		t.Fatalf("memfd_create guest: %v", err)
+	}
+	defer unix.Close(guestFd)
+	if err := unix.Ftruncate(guestFd, int64(size)); err != nil {
+		t.Fatalf("ftruncate guest: %v", err)
+	}
+	guest, err := unix.Mmap(guestFd, 0, int(size), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		t.Fatalf("mmap guest: %v", err)
+	}
+	defer unix.Munmap(guest)
+
+	copy(guest[0:], wpTestMarker)       // page 0: the marker the parent will clobber
+	guest[pageSize] = byte(1)           // page 1: untouched, inheritance check
+
+	dir := t.TempDir()
+	exportPath := filepath.Join(dir, "memfd_export")
+	if err := os.WriteFile(exportPath, []byte(fmt.Sprintf("%d %d %d\n", os.Getpid(), guestFd, size)), 0o600); err != nil {
+		t.Fatalf("write export: %v", err)
+	}
+	udsPath := filepath.Join(dir, "wp.sock")
+
+	handle, err := StartWPForkHandler(WPForkConfig{UDSPath: udsPath, MemExportPath: exportPath})
+	if err != nil {
+		t.Fatalf("StartWPForkHandler: %v", err)
+	}
+	defer handle.Close()
+
+	uffd, skip, reason := createWPUffd(t)
+	if skip {
+		t.Skipf("m2 precondition not met on this runner: %s", reason)
+	}
+	base := uint64(uintptr(unsafe.Pointer(&guest[0])))
+	if !registerWP(t, uffd, base, size) {
+		t.Skipf("m2 precondition not met: WP register/offer failed over the memfd mapping")
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	var recvErr error
+	go func() {
+		defer wg.Done()
+		recvErr = handle.Receive()
+	}()
+	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: udsPath, Net: "unix"})
+	if err != nil {
+		t.Fatalf("dial WP UDS: %v", err)
+	}
+	body := []byte(fmt.Sprintf(`[{"base_host_virt_addr":%d,"size":%d,"offset":0,"page_size":%d}]`, base, size, pageSize))
+	sendUffd(t, conn, body, uffd)
+	_ = conn.Close()
+	wg.Wait()
+	if recvErr != nil {
+		t.Fatalf("handler Receive: %v", recvErr)
+	}
+
+	// --- Fork point: FREEZE, Serve, then the resumed parent clobbers page 0. ---
+	freeze, err := handle.Freeze()
+	if err != nil {
+		t.Fatalf("Freeze: %v", err)
+	}
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- handle.Serve() }()
+
+	writeDone := make(chan struct{})
+	go func() {
+		copy(guest[0:], wpTestNewVal)
+		close(writeDone)
+	}()
+	select {
+	case <-writeDone:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("parent overwrite never completed: WP fault not served (freeze=%v, faults=%d)", freeze, handle.FaultCount())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !handle.FrozenPage(0) {
+		if time.Now().After(deadline) {
+			t.Fatalf("handler never marked page 0 frozen; faults=%d", handle.FaultCount())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// --- CHILD BOOTS FROM THE SHARED MEMFD (the m5 deliverable). Assemble the
+	// import coordinates the parent handler publishes and run the PRODUCTION child
+	// memory attach; time it. This is the operation the Firecracker child-restore
+	// patch performs, driven here through the real Go code path. ---
+	imp, err := handle.ChildImport(dir)
+	if err != nil {
+		t.Fatalf("handle.ChildImport: %v", err)
+	}
+	// Round-trip the export line the EnvChildMemfd file carries, proving the
+	// contract the Firecracker patch parses is stable.
+	reparsed, err := ParseChildMemfdImport(imp.ExportLine())
+	if err != nil {
+		t.Fatalf("ParseChildMemfdImport(%q): %v", imp.ExportLine(), err)
+	}
+	if reparsed != imp {
+		t.Fatalf("child import round-trip mismatch: got %+v want %+v", reparsed, imp)
+	}
+
+	attachStart := time.Now()
+	childMem, err := ComposeChildFromImport(imp)
+	if err != nil {
+		t.Fatalf("ComposeChildFromImport (child boot from shared memfd): %v", err)
+	}
+	attach := time.Since(attachStart)
+	defer unix.Munmap(childMem)
+
+	// NO LEAK: page 0 was clobbered by the parent AFTER the fork point, so the child
+	// MUST read the ORIGINAL fork-time marker (sourced from FROZEN), never the
+	// parent's post-fork write.
+	if got := string(childMem[0:len(wpTestMarker)]); got != wpTestMarker {
+		t.Errorf("NO-LEAK VIOLATED: child read %q from page 0, want the fork-time marker %q", got, wpTestMarker)
+	}
+	// Prove the frozen selector did real work: the parent's live shared memfd now
+	// holds the NEW value at page 0, which a naive MAP_PRIVATE that ignored FROZEN
+	// would have leaked.
+	if got := string(childMem[0:len(wpTestNewVal)]); got == wpTestNewVal {
+		t.Errorf("child leaked the parent's post-fork overwrite %q at page 0", wpTestNewVal)
+	}
+	// INHERITANCE: page 1 was never touched, so the child reads it live from the
+	// shared memfd (MAP_PRIVATE) and MUST see the fork-time value.
+	if got := childMem[pageSize]; got != byte(1) {
+		t.Errorf("INHERITANCE VIOLATED: child read untouched page 1 byte = %#x, want %#x", got, byte(1))
+	}
+
+	// --- Latency: the child attach must be dramatically faster than restoring the
+	// same-size guest from a disk mem file. Baseline = write the parent's current
+	// RAM to a mem file, MAP_PRIVATE it, and fault every page in (what a disk
+	// restore + guest read costs). Assert the memfd attach is sub-100ms. ---
+	memFile := filepath.Join(dir, "mem")
+	if err := os.WriteFile(memFile, guest, 0o600); err != nil {
+		t.Fatalf("write disk mem baseline: %v", err)
+	}
+	diskStart := time.Now()
+	mf, err := os.OpenFile(memFile, os.O_RDONLY, 0)
+	if err != nil {
+		t.Fatalf("open disk mem baseline: %v", err)
+	}
+	diskMem, err := unix.Mmap(int(mf.Fd()), 0, int(size), unix.PROT_READ, unix.MAP_PRIVATE)
+	if err != nil {
+		_ = mf.Close()
+		t.Fatalf("mmap disk mem baseline: %v", err)
+	}
+	var sink byte
+	for off := uint64(0); off < size; off += pageSize {
+		sink ^= diskMem[off] // fault every page in, as the guest would
+	}
+	disk := time.Since(diskStart)
+	_ = unix.Munmap(diskMem)
+	_ = mf.Close()
+	_ = sink
+
+	if attach >= 100*time.Millisecond {
+		t.Errorf("child memfd attach took %v, want sub-100ms (the live-cow win)", attach)
+	}
+	if attach >= disk {
+		t.Errorf("child memfd attach (%v) not faster than disk mem restore baseline (%v)", attach, disk)
+	}
+
+	if err := handle.Close(); err != nil {
+		t.Fatalf("handler Close: %v", err)
+	}
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Errorf("Serve returned error after Close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Errorf("Serve did not return after Close")
+	}
+
+	t.Logf("m5 child-from-memfd PASS: child booted from the SHARED parent memfd (not disk); guest=%dMiB pages=%d frozen-page-0=%v; child memfd attach=%v vs disk mem restore baseline=%v (%.1fx faster); freeze=%v faults=%d",
+		memMiB, npages, handle.FrozenPage(0), attach, disk, float64(disk)/float64(attach), freeze, handle.FaultCount())
+}

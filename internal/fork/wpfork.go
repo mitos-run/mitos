@@ -39,6 +39,18 @@ type WPForkHandle interface {
 	// child consults this per-page source selector: a frozen page is read from the
 	// FROZEN memfd (fork-time value), an unfrozen page from the live shared memfd.
 	FrozenPage(pageIndex uint64) bool
+	// FrozenBitmap returns a COPY of the 1-bit-per-page frozen bitmap at the instant
+	// of the call: bit p set means a co-located child must source page p from the
+	// FROZEN memfd. A copy so the caller reads a stable snapshot while Serve keeps
+	// marking pages. Nil before Receive.
+	FrozenBitmap() []byte
+	// ChildImport writes the current frozen bitmap into dir and returns the
+	// coordinates a co-located fork child needs to boot its guest RAM from the
+	// parent's live memory: the parent shared memfd (from the m1 export), this
+	// handler's FROZEN memfd, that bitmap file, and the page size. It is the
+	// ChildImportProvider the husk consults on a live-cow child spawn. Fails before
+	// Receive (no memfd/bitmap yet).
+	ChildImport(dir string) (ChildMemfdImport, error)
 	// FaultCount returns how many write-protect faults Serve has resolved.
 	FaultCount() int64
 	// FreezeDuration returns the recorded fork-point freeze duration.

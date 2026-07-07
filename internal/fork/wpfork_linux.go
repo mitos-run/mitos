@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -409,6 +410,64 @@ func (h *wpForkHandler) FrozenPage(pageIndex uint64) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return testFrozenBit(h.frozenBM, pageIndex)
+}
+
+// FrozenBitmap returns a copy of the frozen bitmap at the instant of the call, so
+// a co-located child reads a stable per-page source selector while Serve keeps
+// marking pages. Nil before Receive.
+func (h *wpForkHandler) FrozenBitmap() []byte {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.frozenBM == nil {
+		return nil
+	}
+	out := make([]byte, len(h.frozenBM))
+	copy(out, h.frozenBM)
+	return out
+}
+
+// ChildImport assembles the coordinates a co-located fork child needs to boot from
+// the parent's live memory (see ChildImportProvider). It reads the parent's m1
+// export to reach the parent shared memfd, snapshots the frozen bitmap into dir,
+// and points the child at this handler's FROZEN memfd (owned by THIS process).
+func (h *wpForkHandler) ChildImport(dir string) (ChildMemfdImport, error) {
+	h.mu.Lock()
+	frozenFd := h.frozenFd
+	liveSize := h.liveSize
+	pageSize := h.pageSize
+	var bm []byte
+	if h.frozenBM != nil {
+		bm = make([]byte, len(h.frozenBM))
+		copy(bm, h.frozenBM)
+	}
+	h.mu.Unlock()
+	if frozenFd < 0 || liveSize == 0 || pageSize == 0 {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport before handshake")
+	}
+	if dir == "" {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport empty dir")
+	}
+	exportRaw, err := os.ReadFile(h.cfg.MemExportPath)
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport read memfd export %s: %w", h.cfg.MemExportPath, err)
+	}
+	exp, err := parseMemfdExport(string(exportRaw))
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport %w", err)
+	}
+	bmPath := filepath.Join(dir, "mitos-frozen.bm")
+	if err := os.WriteFile(bmPath, bm, 0o600); err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport write frozen bitmap %s: %w", bmPath, err)
+	}
+	return ChildMemfdImport{
+		ParentPID:  exp.pid,
+		ParentFD:   exp.fd,
+		Bytes:      exp.bytes,
+		FrozenPID:  os.Getpid(),
+		FrozenFD:   frozenFd,
+		BitmapPath: bmPath,
+		PageSize:   pageSize,
+	}, nil
 }
 
 // FaultCount returns the number of write-protect faults Serve has resolved.
