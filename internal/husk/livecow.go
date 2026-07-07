@@ -60,7 +60,11 @@ const (
 // default) keeps every co-located child on the disk restore. The provider is the
 // fork.WPForkHandle the parent-arm wiring creates; passing it here is the seam the
 // parent-arm increment flips on.
-func (s *Stub) SetLiveCowParent(p fork.ChildImportProvider) { s.liveCowParent = p }
+func (s *Stub) SetLiveCowParent(p fork.ChildImportProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.liveCowParent = p
+}
 
 // liveCowChildImportEnv assembles the FIRECRACKER_MITOS_CHILD_MEMFD environment a
 // co-located fork child Firecracker must be launched with so its restore takes the
@@ -75,13 +79,20 @@ func (s *Stub) SetLiveCowParent(p fork.ChildImportProvider) { s.liveCowParent = 
 //   - (nil, err) on a real failure assembling the import: SpawnVM logs and falls
 //     back to the disk restore, so the flag never breaks a fork (fail-closed).
 func (s *Stub) liveCowChildImportEnv(req ActivateRequest) ([]string, error) {
-	if s.liveCowParent == nil {
+	// Read the armed parent under s.mu: SetLiveCowParent may arm it asynchronously
+	// while a sibling VM's SpawnVM runs, and an interface value is two words, so an
+	// unsynchronized read could tear. Take a stable local and release the lock
+	// before the ChildImport I/O (which never re-takes s.mu).
+	s.mu.Lock()
+	parent := s.liveCowParent
+	s.mu.Unlock()
+	if parent == nil {
 		return nil, nil
 	}
 	if req.SnapshotDir == "" {
 		return nil, fmt.Errorf("live-cow child import: empty snapshot dir")
 	}
-	imp, err := s.liveCowParent.ChildImport(req.SnapshotDir)
+	imp, err := parent.ChildImport(req.SnapshotDir)
 	if err != nil {
 		return nil, fmt.Errorf("live-cow child import: %w", err)
 	}
