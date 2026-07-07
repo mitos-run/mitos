@@ -103,6 +103,71 @@ source memory state than an earlier child and the N children would not share one
 fork point. Verified by `internal/controller`
 `TestHuskForkSnapshotTakenExactlyOnce`.
 
+### Live copy-on-write fork: memory-source correctness (milestone m4b)
+
+The live-cow fork path (`--live-cow-fork`, DEFAULT OFF, SEPARATE from
+`--multi-vm-fork`) changes only WHERE a co-located fork child's guest MEMORY comes
+from: instead of restoring the child from the disk fork snapshot `mem` file, the
+child shares the PARENT's live resident memory through the Mitos-patched
+Firecracker (a `MAP_SHARED` memfd the child `MAP_PRIVATE`s for kernel
+copy-on-write). It does NOT change any fork-correctness re-seed: a live-cow child
+still runs the full fail-closed RNG/clock/secret/network re-seed of the sections
+below (a fork of a running source is still `ForkRunning`), and it still pairs with
+the frozen source rootfs so the disk-half invariant of "Husk fork children" above
+holds unchanged. Live-cow is a memory-SOURCE optimization, not a new fork policy.
+
+The hazard this path introduces, and closes, is the RESUMED-PARENT LEAK. Sharing
+the parent's memfd with `MAP_PRIVATE` alone is NOT sufficient: if the parent
+RESUMES and writes a page a child has not yet copied, that post-fork write would
+leak forward into the child, so the child would no longer see a point-in-time-T
+image. The m2 mechanism closes it with userfaultfd write-protect
+(`internal/fork/wpfork*.go`, the parent-side WP handler):
+
+- At the fork point the handler FREEZES the guest: `UFFDIO_WRITEPROTECT` over the
+  whole guest region, so every page is write-protected in the parent's mapping.
+- The parent resumes. When it writes a still-protected page the writing vCPU thread
+  takes a write-protect fault and BLOCKS in the kernel; the new value has NOT
+  landed.
+- The handler reads the fault, copies the page's pre-write (fork-time) bytes into a
+  PRIVATE frozen memfd and marks the page frozen, and only THEN unprotects the page
+  and wakes the writer. The write then lands in the live image, but the fork-time
+  bytes are safe in the frozen image.
+- A co-located child source-selects per page (exactly as Firecracker's restore-side
+  UFFD handler does): a clobbered page is read from the frozen memfd (fork-time
+  bytes), an untouched page live from the shared memfd (still fork-time bytes, cheap
+  CoW). Either way the child sees a consistent point-in-time-T image.
+
+The ordering FREEZE -> COPY -> UNPROTECT is the whole correctness argument: because
+the copy completes before the unprotect, there is no window in which the parent's
+new value is visible while the fork-time value is lost (the torn-read hazard is
+closed). Precondition: the kernel must support write-protect over the memfd
+(`CONFIG_HAVE_ARCH_USERFAULTFD_WP`, `UFFD_FEATURE_PAGEFAULT_FLAG_WP`); the handler
+and the patched Firecracker both fail closed to the paused-parent (m1) contract,
+and the husk falls back to the disk snapshot restore, when it is absent or off
+Linux, so turning the flag on never breaks a fork.
+
+Verified on real KVM by `internal/fork` `TestLiveCowForkInheritanceAndNoLeak` (the
+`firecracker-test` job, `go test ./internal/fork/...`): it drives the WP handler
+end to end over a real userfaultfd write-protect and a real memfd, writes a
+fork-time marker, resumes a "parent" that overwrites the marker page, and asserts
+BOTH halves of the invariant, INHERITANCE (the child reads the parent's fork-time
+memory, both the marker page and an untouched page) and NO LEAK (the resumed
+parent's overwrite does NOT reach the child, which still reads the original
+fork-time bytes). On a runner whose kernel lacks write-protect it self-skips with
+the precise reason (the m2 precondition), never a false pass. The gate and env
+plumbing are unit-tested off KVM (`internal/fork` `TestLiveCowParentEnv`,
+`internal/husk` `TestLiveCowForkGateDefaultOff`/`TestLiveCowForkGateOn`,
+`internal/firecracker` `TestLaunchEnv`, `internal/controller`
+`TestBuildHuskPodThreadsLiveCowFork`).
+
+Pending (documented, not a gap in what ships): the CHILD-side memfd import (booting
+the co-located child's guest RAM from the parent's live memory instead of the disk
+snapshot mem file) needs a matching Firecracker patch on the child restore side (the
+shipped fork patches the PARENT side only) plus a KVM node to measure the end-to-end
+fork latency. Until then a live-cow-enabled pod still restores the co-located child
+from the disk fork snapshot; the parent-side WP engine and the flag are landed,
+KVM-tested for the inheritance/no-leak invariant, and gated off by default.
+
 ### Workspace resume from a memory snapshot
 
 A resumable workspace head (W4) restores a captured VM MEMORY image into a fresh

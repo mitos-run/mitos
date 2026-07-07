@@ -131,6 +131,16 @@ type SandboxReconciler struct {
 	// true.
 	MultiVMFork bool
 
+	// LiveCowFork starts warm husk pods with --live-cow-fork so a CO-LOCATED fork
+	// child shares the PARENT's resident guest memory (patched Firecracker memfd +
+	// userfaultfd write-protect) instead of restoring from the disk fork snapshot
+	// (milestone m4b). EXPERIMENTAL, DEFAULT OFF and SEPARATE from MultiVMFork so it
+	// can be deployed off and canaried independently: off is byte-for-byte the disk
+	// co-location. Only meaningful with EnableHuskPods (the flag rides the husk pod
+	// spec); the co-located child still falls back to the disk restore until the
+	// child-side memfd import lands, so turning it on never breaks a fork.
+	LiveCowFork bool
+
 	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
 	// Nil defaults to SpawnVMOnHusk; tests inject a fake.
 	spawnVM huskVMSpawner

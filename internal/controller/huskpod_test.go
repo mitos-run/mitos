@@ -224,6 +224,37 @@ func TestBuildHuskPodThreadsDNSUpstream(t *testing.T) {
 	}
 }
 
+// TestBuildHuskPodThreadsLiveCowFork proves the milestone m4b flag flows into the
+// warm husk pod spec: with HuskPodOptions.LiveCowFork the stub gets --live-cow-fork
+// so a co-located fork child can share the parent's resident guest memory, and
+// with it OFF (the default, every deployment today) the flag is absent so the pod
+// is byte-for-byte the current disk co-location.
+func TestBuildHuskPodThreadsLiveCowFork(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", LiveCowFork: true})
+	if !argsContain(on.Spec.Containers[0].Args, "--live-cow-fork") {
+		t.Errorf("husk args missing --live-cow-fork when enabled: %v", on.Spec.Containers[0].Args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img"})
+	if argsContain(off.Spec.Containers[0].Args, "--live-cow-fork") {
+		t.Errorf("husk args must omit --live-cow-fork by default: %v", off.Spec.Containers[0].Args)
+	}
+}
+
+// argsContain reports whether a standalone flag is present in args.
+func argsContain(args []string, flag string) bool {
+	for _, a := range args {
+		if a == flag {
+			return true
+		}
+	}
+	return false
+}
+
 // hasForwardInit reports whether a privileged init container enabling IPv4
 // forwarding is present.
 func hasForwardInit(inits []corev1.Container) bool {

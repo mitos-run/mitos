@@ -1,6 +1,9 @@
 {{- if and .Values.controller.multiVMFork (not .Values.controller.enableHuskPods) }}
 {{- fail "controller.multiVMFork requires controller.enableHuskPods: the multi-vm fork routing co-locates a fork child in a warm husk pod, which only exists on the husk-pods path. Set enableHuskPods: true or multiVMFork: false." }}
 {{- end }}
+{{- if and .Values.controller.liveCowFork (not .Values.controller.enableHuskPods) }}
+{{- fail "controller.liveCowFork requires controller.enableHuskPods: live-cow fork rides the warm husk pod spec, which only exists on the husk-pods path. Set enableHuskPods: true or liveCowFork: false." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -41,6 +44,9 @@ spec:
             {{- end }}
             {{- if .Values.controller.multiVMFork }}
             - --multi-vm-fork
+            {{- end }}
+            {{- if .Values.controller.liveCowFork }}
+            - --live-cow-fork
             {{- end }}
             - --husk-stub-image={{ include "mitos.image" (dict "root" . "image" .Values.huskStub.image) }}
             - --husk-data-dir={{ .Values.controller.huskDataDir }}
