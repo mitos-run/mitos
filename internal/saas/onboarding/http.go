@@ -24,10 +24,12 @@ type HandlerOption func(*Handler)
 
 // WithHandlerSessions enables browser session issuance on a successful fresh
 // verify. When set, a verify that provisions a new account (AlreadyDone false)
-// mints a session token via sessions.IssueSession and sets the mitos_session
-// cookie on the response so the new user is logged in without a second sign-in.
-// The cookie flags match what the OIDC callback sets: HttpOnly, SameSite=Lax,
-// and Secure driven by the same secure argument the OIDC handler receives.
+// mints a session token via sessions.IssueSession and sets the session cookie on
+// the response so the new user is logged in without a second sign-in. The cookie
+// name is the hardened __Host- prefixed one on a Secure connection and the legacy
+// unprefixed one otherwise (console.SessionCookieNameFor). The cookie flags match
+// what the OIDC callback sets: HttpOnly, SameSite=Lax, and Secure driven by the
+// same secure argument the OIDC handler receives.
 // If sessions or newToken are nil this option is a no-op; the JSON response is
 // still written normally. The raw session token is never logged.
 func WithHandlerSessions(sessions saas.Sessions, newToken func() string, secure bool) HandlerOption {
@@ -357,7 +359,7 @@ func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
 		sessToken := h.newToken()
 		h.sessions.IssueSession(res.Account.ID, sessToken, "browser")
 		http.SetCookie(w, &http.Cookie{
-			Name:     console.SessionCookieName,
+			Name:     console.SessionCookieNameFor(h.secure),
 			Value:    sessToken,
 			Path:     "/",
 			HttpOnly: true,

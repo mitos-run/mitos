@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"strings"
 
 	"golang.org/x/oauth2"
 
@@ -109,18 +110,34 @@ func (h *Handlers) Callback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, h.cfg.RedirectAfterLogin, http.StatusFound)
 }
 
-// Logout expires the session cookie.
+// Logout expires the session cookie. When the configured cookie name is the
+// hardened __Host- prefixed one, it ALSO expires the legacy unprefixed name so a
+// session cookie set before the __Host- rollout is not left behind (which would
+// keep the user signed in, because the reader falls back to the legacy name).
 func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     h.cfg.CookieName,
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   h.cfg.Secure,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   -1, // expire now; net/http renders this as Max-Age=0
-	})
+	for _, name := range logoutCookieNames(h.cfg.CookieName) {
+		http.SetCookie(w, &http.Cookie{
+			Name:     name,
+			Value:    "",
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   h.cfg.Secure,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   -1, // expire now; net/http renders this as Max-Age=0
+		})
+	}
 	http.Redirect(w, r, "/", http.StatusFound)
+}
+
+// logoutCookieNames returns the cookie names Logout must expire: the configured
+// name, plus its un-prefixed variant when it carries the __Host- prefix so a
+// pre-rollout legacy cookie is cleared too.
+func logoutCookieNames(configured string) []string {
+	names := []string{configured}
+	if legacy := strings.TrimPrefix(configured, "__Host-"); legacy != configured {
+		names = append(names, legacy)
+	}
+	return names
 }
 
 func randToken() string {

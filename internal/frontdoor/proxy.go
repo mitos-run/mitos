@@ -32,9 +32,28 @@ type SessionResolver interface {
 	Resolve(ctx context.Context, sessionToken string) (Identity, error)
 }
 
-// sessionCookieName is the browser session cookie name set by the Mitos
-// console after OIDC login. Matches console.SessionCookieName.
-const sessionCookieName = "mitos_session"
+// hostPrefixedSessionCookieName and legacySessionCookieName are the two browser
+// session cookie names the Mitos console may set after OIDC login. A secure
+// deployment sets the hardened __Host- prefixed name; a plain-http self-host/dev
+// deployment sets the legacy one. These mirror console.HostPrefixedSessionCookieName
+// and console.SessionCookieName; they are duplicated here to keep the frontdoor
+// free of a dependency on the console package.
+const (
+	hostPrefixedSessionCookieName = "__Host-mitos_session"
+	legacySessionCookieName       = "mitos_session"
+)
+
+// readSessionCookie returns the session token from r, preferring the hardened
+// __Host- cookie and falling back to the legacy name. Empty means neither is set.
+func readSessionCookie(r *http.Request) string {
+	if c, err := r.Cookie(hostPrefixedSessionCookieName); err == nil && c.Value != "" {
+		return c.Value
+	}
+	if c, err := r.Cookie(legacySessionCookieName); err == nil && c.Value != "" {
+		return c.Value
+	}
+	return ""
+}
 
 // ProxyConfig is the constructor input for NewProxy.
 type ProxyConfig struct {
@@ -249,16 +268,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// resolveSession reads the mitos_session cookie and resolves it. Returns
-// (identity, true) on success, (zero, false) on any failure. Never logs
-// the cookie value.
+// resolveSession reads the session cookie (the hardened __Host- name preferred,
+// legacy name as fallback) and resolves it. Returns (identity, true) on success,
+// (zero, false) on any failure. Never logs the cookie value.
 func (p *Proxy) resolveSession(r *http.Request) (Identity, bool) {
-	c, err := r.Cookie(sessionCookieName)
-	if err != nil {
+	token := readSessionCookie(r)
+	if token == "" {
 		// No cookie present.
 		return Identity{}, false
 	}
-	id, err := p.resolver.Resolve(r.Context(), c.Value)
+	id, err := p.resolver.Resolve(r.Context(), token)
 	if err != nil {
 		// Token invalid or expired; log only that resolution failed.
 		p.log.Info("session resolve failed", "status", "no-session")
