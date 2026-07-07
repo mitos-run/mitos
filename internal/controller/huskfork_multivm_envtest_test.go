@@ -792,3 +792,97 @@ func TestMultiVMForkCoLocatesRealisticWarmPod(t *testing.T) {
 		t.Errorf("child status.VMID is empty, want the spawned vmID")
 	}
 }
+
+// TestMultiVMForkSpawnActivatesFromParentSnapshotNotTemplate is the wiring guard for
+// the prod-canary co-located-fork correctness bug. A co-located child spawned via the
+// spawn-vm op MUST activate from the PARENT FORK SNAPSHOT (the dir the source stub
+// wrote mem + vmstate + the frozen source rootfs to), NOT from the pool template
+// mounted at HuskSnapshotDir. On origin/main the spawn-vm ActivateRequest carried
+// SnapshotDir = HuskSnapshotDir (the template) with no ForkSnapshot flag, so the
+// co-located child booted a fresh template VM that inherited neither the parent's
+// memory nor its disk. This test captures the exact dir the source wrote its fork
+// snapshot to (the ForkSnapshotter fake echoes req.SnapshotDir) and asserts the
+// spawn-vm activate targets that SAME dir with ForkSnapshot=true, so a regression that
+// reverts the wiring to the template is caught in go-test, not only on real KVM.
+func TestMultiVMForkSpawnActivatesFromParentSnapshotNotTemplate(t *testing.T) {
+	poolName := uniqueName("pool-mvm-snap")
+	srcClaimName := uniqueName("src-mvm-snap")
+	forkName := uniqueName("mvm-snap")
+
+	srcPod := makeDormantHuskPod(t, poolName, "10.0.8.30", multiVMSource, withCoLocationBudget("128Mi", "1280Mi"))
+	makeForkSourceClaim(t, srcClaimName, poolName, srcPod)
+
+	// Capture the dir the source stub was asked to WRITE the fork snapshot to. The
+	// co-located child must later ACTIVATE from exactly this dir.
+	var mu sync.Mutex
+	var writtenSnapDir string
+	setForkSnapshotter(func(_ context.Context, _ string, _ *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
+		mu.Lock()
+		writtenSnapDir = req.SnapshotDir
+		mu.Unlock()
+		return husk.ForkSnapshotResult{OK: true, SnapshotDir: req.SnapshotDir}, nil
+	})
+	t.Cleanup(func() { setForkSnapshotter(nil) })
+	var activateCalls int32
+	setForkActivator(func(_ context.Context, _ string, _ *tls.Config, _ husk.ActivateRequest) (husk.ActivateResult, error) {
+		atomic.AddInt32(&activateCalls, 1)
+		return husk.ActivateResult{OK: false, Error: "activate must not be called on the co-location path"}, nil
+	})
+	t.Cleanup(func() { setForkActivator(nil) })
+
+	var gotSnapDir string
+	var gotForkSnapshot bool
+	var spawnCalls int32
+	setForkVMSpawner(func(_ context.Context, _ string, _ *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error) {
+		atomic.AddInt32(&spawnCalls, 1)
+		mu.Lock()
+		gotSnapDir = req.Activate.SnapshotDir
+		gotForkSnapshot = req.Activate.ForkSnapshot
+		mu.Unlock()
+		return husk.SpawnVMResult{OK: true, VMID: req.VMID, VsockPath: "/run/husk/" + req.VMID + ".sock"}, nil
+	})
+	t.Cleanup(func() { setForkVMSpawner(nil) })
+
+	setForkMultiVM(true)
+	t.Cleanup(func() { setForkMultiVM(false) })
+
+	fork := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      forkName,
+			Namespace: "default",
+			Labels:    map[string]string{controller.HuskForkTestLabel: "true"},
+		},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{FromSandbox: &v1.FromSandboxSource{Name: srcClaimName}}, Replicas: 1},
+	}
+	if err := k8sClient.Create(ctx, fork); err != nil {
+		t.Fatalf("create fork: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, fork) })
+
+	waitUntilForkReady(t, 15*time.Second, func() bool {
+		var got v1.Sandbox
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: forkName, Namespace: "default"}, &got); err != nil {
+			return false
+		}
+		return got.Status.ReadyReplicas == 1
+	})
+
+	if got := atomic.LoadInt32(&activateCalls); got != 0 {
+		t.Fatalf("single-VM activate must never be called on the co-location path, got %d calls (a spawn-vm + activate double path would corrupt the fork)", got)
+	}
+	if got := atomic.LoadInt32(&spawnCalls); got < 1 {
+		t.Fatalf("expected at least one spawn-vm call, got %d", got)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !gotForkSnapshot {
+		t.Errorf("spawn-vm ActivateRequest.ForkSnapshot = false, want true (co-located child must restore the node-local fork snapshot, not the content-addressed template)")
+	}
+	if gotSnapDir == controller.HuskSnapshotDir {
+		t.Errorf("spawn-vm activated from HuskSnapshotDir %q (the pool TEMPLATE mount); the co-located child must activate from the PARENT fork snapshot dir instead (the prod-canary bug)", controller.HuskSnapshotDir)
+	}
+	if gotSnapDir == "" || gotSnapDir != writtenSnapDir {
+		t.Errorf("spawn-vm activated from %q, want the dir the source wrote the fork snapshot to %q (mem + vmstate + the frozen source rootfs live there)", gotSnapDir, writtenSnapDir)
+	}
+}

@@ -89,6 +89,23 @@ type ActivateRequest struct {
 	// pod's single implicit VM, so an existing activate stays byte-for-byte
 	// compatible. It is a node-local identifier, not a secret.
 	VMID string `json:"vm_id,omitempty"`
+	// ForkSnapshot marks this activate as restoring a CO-LOCATED fork CHILD from a
+	// node-local FORK snapshot (the spawn-vm path), NOT the pool template. When set,
+	// the multi-VM stub:
+	//   (a) clones the child's per-activation rootfs from the FROZEN source rootfs
+	//       the fork snapshot carries at SnapshotDir/rootfs.ext4 instead of the pool
+	//       template rootfs, so the child inherits the parent's DISK, and
+	//   (b) skips the content-addressed verify gate, because a fork snapshot is a
+	//       LIVE node-local artifact the source stub wrote in the SAME pod/node trust
+	//       boundary during a paused CreateSnapshot and is NOT content-addressed
+	//       (there is no digest to verify against). This is the exact posture the
+	//       new-pod fork child runs with (--allow-unverified-snapshots); the
+	//       fork-correctness RNG/clock reseed handshake still runs, fail-closed.
+	// Combined with SnapshotDir pointing at the fork snapshot dir, the co-located
+	// child restores the parent's MEMORY + FILESYSTEM instead of booting a fresh
+	// template VM. Default false keeps every template activate byte-for-byte
+	// unchanged. It is a node-local flag, not a secret.
+	ForkSnapshot bool `json:"fork_snapshot,omitempty"`
 }
 
 // ActivateResult is the control reply. OK is true only when the snapshot loaded
