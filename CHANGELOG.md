@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.31.0](https://github.com/mitos-run/mitos/compare/v1.30.0...v1.31.0) (2026-07-07)
+
+
+### Features
+
+* **fork:** per-stage timing for the co-location fork to find the latency bottleneck ([#830](https://github.com/mitos-run/mitos/issues/830)) ([cf3091a](https://github.com/mitos-run/mitos/commit/cf3091aea7ecdefcf58516b2e6f2444324f84d80))
+
 ## [1.30.0](https://github.com/mitos-run/mitos/compare/v1.29.0...v1.30.0) (2026-07-07)
 
 
