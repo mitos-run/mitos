@@ -184,6 +184,20 @@ func serveControlConn(ctx context.Context, conn net.Conn, stub *Stub, authorize 
 		if werr := WriteHydrateWorkspaceResult(conn, res); werr != nil {
 			fmt.Fprintf(os.Stderr, "husk control: write hydrate-workspace result: %v\n", werr)
 		}
+	case OpSpawnVM:
+		req, rerr := readSpawnVMRequest(br)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: read spawn-vm request: %v\n", rerr)
+			return
+		}
+		// SpawnVM fails closed on a non-multi-vm stub and validates req.VMID with
+		// checkVMID before deriving any path from it, so a single-VM pod never
+		// spawns a second VM and an unsafe vmID is refused. The request payload
+		// (env/secrets/token) is never logged.
+		res := stub.SpawnVM(ctx, req)
+		if werr := WriteSpawnVMResult(conn, res); werr != nil {
+			fmt.Fprintf(os.Stderr, "husk control: write spawn-vm result: %v\n", werr)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "husk control: unknown control op %q\n", op)
 	}

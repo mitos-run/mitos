@@ -160,6 +160,10 @@
           "description": "Render --enable-husk-pods so each SandboxPool maintains a warm pool of pre-scheduled husk pods.",
           "type": "boolean"
         },
+        "multiVMFork": {
+          "description": "EXPERIMENTAL, default off. Render --multi-vm-fork so a fork child co-locates as an additional VM inside a multi-VM-capable source husk pod instead of a new pod, and warm husk pods start with --multi-vm. Only meaningful with enableHuskPods.",
+          "type": "boolean"
+        },
         "huskDataDir": {
           "description": "Value for --husk-data-dir, the node template snapshot root the husk pods mount; must match forkd's --data-dir.",
           "type": "string"
@@ -271,6 +275,23 @@
             },
             "localhostProfile": {
               "description": "Path of the Localhost seccomp profile relative to the kubelet seccomp root.",
+              "type": "string"
+            }
+          }
+        },
+        "appArmorProfile": {
+          "description": "Optional forkd container AppArmor profile, rendered into securityContext.appArmorProfile.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "description": "AppArmor profile type.",
+              "type": "string",
+              "enum": ["RuntimeDefault", "Unconfined", "Localhost"]
+            },
+            "localhostProfile": {
+              "description": "Name of the pre-loaded Localhost AppArmor profile.",
               "type": "string"
             }
           }

@@ -232,6 +232,40 @@ func DeriveTapName(guestIP string) string {
 	return name
 }
 
+// inPodSecondaryBase is the network address (host byte order) of the /16 that
+// non-primary VMs sharing one husk pod netns are placed in: 100.64.0.0/16, a
+// slice of the RFC 6598 100.64.0.0/10 shared-address space reserved for
+// carrier-grade NAT. It is used ONLY for the point-to-point /30 links of
+// secondary in-pod VMs, so it does not overlap a cluster pod CIDR, the node
+// sandbox subnet the PRIMARY VM's /30 is carved from, or any public
+// destination. Every secondary /30 is local to the pod netns and masqueraded to
+// the pod address on egress, exactly like the primary link.
+const inPodSecondaryBase = 100<<24 | 64<<16 // 100.64.0.0
+
+// inPodSecondaryBlocks is the number of /30 point-to-point blocks a /16 holds
+// (65536 addresses / 4). A secondary VM's block index is a 14-bit hash of its
+// vmID, so two secondary VMs in one pod collide only on a 14-bit hash collision
+// of their ids; the caller (a husk pod) hosts a small handful of same-tenant
+// VMs, well within that space.
+const inPodSecondaryBlocks = 1 << 14
+
+// DeriveInPodSecondaryLink places a NON-primary VM that shares a husk pod's
+// network namespace on its OWN /30 point-to-point link, derived deterministically
+// from the vmID, so two secondary VMs in one pod never share a guest IP, a
+// gateway, or (since the tap name derives from the guest IP) a tap. The primary
+// VM keeps the node-assigned link it already has; only additional same-pod VMs
+// use this, and their /30s live in the dedicated 100.64.0.0/16 in-pod space
+// (inPodSecondaryBase), so a secondary link can never alias the primary's /30
+// (a different subnet) either. It returns the guest IP, the gateway (host) IP of
+// that /30, and a deterministic locally-administered MAC. All three are config,
+// not secrets, and safe to log.
+func DeriveInPodSecondaryLink(vmID string) (guestIP, gatewayIP net.IP, mac string) {
+	sum := sha256.Sum256([]byte(vmID))
+	block := (uint32(sum[0])<<8 | uint32(sum[1])) % inPodSecondaryBlocks
+	blockBase := uint32(inPodSecondaryBase) + 4*block
+	return uint32ToIP(blockBase + 2), uint32ToIP(blockBase + 1), deriveMAC(vmID)
+}
+
 // deriveMAC builds a locally-administered unicast MAC deterministically from
 // the sandboxID. The first octet has bit 0x02 set (locally administered) and
 // bit 0x01 cleared (unicast); the remaining five octets come from the hash.

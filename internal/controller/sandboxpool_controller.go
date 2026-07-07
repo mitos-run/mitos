@@ -39,6 +39,17 @@ type SandboxPoolReconciler struct {
 	// the snapshot is built and each claim forks on a holder, no husk pods. In
 	// cmd/controller this is true by default and turned off by --enable-raw-forkd.
 	EnableHuskPods bool
+	// MultiVM starts this pool's warm husk pods with --multi-vm and the
+	// mitos.run/multi-vm label, so a warm-claimed source pod can host additional
+	// fork-child VMs in place (the MultiVMFork co-location routing). Set from the
+	// same --multi-vm-fork operator flag that enables the routing on the Sandbox
+	// reconciler; default off. A normal claim is unaffected.
+	MultiVM bool
+	// MultiVMForkVMs is how many co-located fork VMs a multi-VM warm pod reserves
+	// node memory for up front (beyond the source VM), so the co-location routing
+	// has room before a fork spills to a new pod. Only consulted when MultiVM is set;
+	// zero selects defaultMultiVMForkVMsPerPod.
+	MultiVMForkVMs int
 	// HuskStubImage is the container image that runs cmd/husk-stub in a husk
 	// pod. Only used when EnableHuskPods is true.
 	HuskStubImage string

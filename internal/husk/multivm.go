@@ -4,13 +4,19 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
 
+	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/metering"
+	"mitos.run/mitos/internal/netconf"
+	"mitos.run/mitos/internal/vsock"
+	"mitos.run/mitos/internal/workspace"
 )
 
 // validVMID is the allowlist a vmID must satisfy before it is ever used to
@@ -41,15 +47,27 @@ func checkVMID(id vmID) error {
 // any production caller exercises today (no caller sets MultiVM; the controller
 // is not wired to it).
 //
-// Increment 2 scope (this file): the map-based state-machine multiplexing proven
-// with the mock VMM: two distinct vmIDs each Prepare -> Dormant -> Activate ->
-// Active independently, Close one without disturbing the other, Metering reports
-// every active VM. The per-VM egress tap / DNS proxy programming, the fork ops
-// (ForkSnapshot / workspace dehydrate-hydrate) keyed by vmID, and spawning a
-// second VM by CoW-restoring from a live parent are DEFERRED to a later increment
-// (they need the per-VM networking and real-Firecracker spawn wiring, provable
-// only on the KVM firecracker-test suite). This increment proves the state
-// machine and multiplexing, not the second real Firecracker process.
+// Increment 2 scope: the map-based state-machine multiplexing proven with the
+// mock VMM: two distinct vmIDs each Prepare -> Dormant -> Activate -> Active
+// independently, Close one without disturbing the other, Metering reports every
+// active VM. This increment proved the state machine, not a second real
+// Firecracker process.
+//
+// Increment L1.4 scope (this file): activateInstance now programs each vmID's
+// OWN in-pod egress filter on a DISTINCT tap + guest IP + gateway + MAC derived
+// deterministically from the vmID (deriveVMNetwork / netconf.DeriveInPodSecondaryLink),
+// mirroring the single-VM Activate's networking but keyed per instance, so two
+// real Firecracker VMs sharing one pod netns never collide on a tap or IP and
+// their egress cannot cross. Combined with deriveVMConfig's per-VM socket/workdir
+// this lets a REAL second Firecracker come up in the pod. The single-VM path in
+// stub.go is byte-for-byte unchanged, and no production caller sets MultiVM (the
+// controller is not wired), so nothing shipped changes.
+//
+// DEFERRED to L1.4b (kept out of this reviewable PR): the per-VM DNS-proxy
+// fan-out (several VMs cannot share one ResolverIP:53 listener, so multi-VM
+// egress here is IP-allowlist only and name-based egress is off), the fork ops
+// (ForkSnapshot / workspace dehydrate-hydrate) keyed by vmID, and a real
+// two-tap-in-one-netns nftables egress-isolation integration test on KVM.
 
 // instanceFor returns the per-VM instance for id. It holds s.mu ONLY for the map
 // lookup (and, when create is true, the first-use insert), then releases it, so
@@ -103,13 +121,54 @@ func (s *Stub) deriveVMConfig(id vmID) firecracker.VMConfig {
 	return cfg
 }
 
+// deriveVMNetwork returns the per-VM network identity activateInstance programs
+// for one vmID in a multi-VM pod. The default (primary) VM keeps the pod's base
+// guest IP, gateway, and MAC, so a multi-VM pod's primary VM programs the same
+// link the single-VM path would. Every OTHER vmID is placed on its OWN /30
+// point-to-point link within the pod netns, derived deterministically from the
+// vmID (netconf.DeriveInPodSecondaryLink), so two VMs in one pod never share a
+// guest IP, gateway, MAC, or (since the tap derives from the guest IP) tap, and
+// their egress cannot cross. A nil base (the caller programs no networking, e.g.
+// the unit path) is returned unchanged.
+//
+// The returned value is always a COPY; the caller's req.Network is never mutated.
+// ResolverIP is cleared for EVERY VM because the per-VM DNS-proxy fan-out is
+// deferred to L1.4b: several VMs cannot share one ResolverIP:53 listener, so
+// multi-VM egress is IP-allowlist only and no VM is pointed at a resolver that
+// has no proxy behind it (fail-closed for name-based egress).
+func deriveVMNetwork(id vmID, base *vsock.NotifyForkedNetwork) *vsock.NotifyForkedNetwork {
+	if base == nil {
+		return nil
+	}
+	n := *base
+	n.ResolverIP = ""
+	if id == defaultVMID {
+		return &n
+	}
+	guest, gateway, mac := netconf.DeriveInPodSecondaryLink(string(id))
+	n.GuestIP = guest.String()
+	n.GatewayIP = gateway.String()
+	n.GuestMAC = mac
+	// A secondary in-pod link is a /30 point-to-point block.
+	n.PrefixLen = 30
+	return &n
+}
+
 // prepareInstance brings up a DORMANT Firecracker VMM for one vmID and records it
 // on the per-VM instance, allocating the instance on first use. It mirrors the
 // single-VM Prepare (state gate, snapshot verify at prepare, per-activation rootfs
 // clone) but scoped to ONE entry in the instances map, so preparing a second VM
 // never touches the first. Fail closed: any error tears the dormant VMM down and
 // leaves the instance out of StateDormant.
-func (s *Stub) prepareInstance(ctx context.Context, id vmID) error {
+//
+// rootfsSrcOverride selects the file the per-activation rootfs CoW clone is made
+// FROM. Empty (every template activate) clones from the pool template rootfs
+// (s.rootfsTemplatePath), the prior behavior byte-for-byte. A CO-LOCATED fork child
+// passes the FROZEN source rootfs the fork snapshot carries (SnapshotDir/rootfs.ext4)
+// so the child inherits the parent's DISK instead of the pristine template, the
+// co-located analog of the new-pod fork child's --rootfs pointing at the frozen
+// source rootfs.
+func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride string) error {
 	if err := checkVMID(id); err != nil {
 		return err
 	}
@@ -175,20 +234,26 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID) error {
 
 	// Per-activation rootfs CoW clone, scoped to this VM's derived id so two VMs in
 	// the pod never share or overwrite a rootfs clone. Same primitive and dormant
-	// pre-paid timing as the single-VM Prepare.
-	if s.rootfsTemplatePath != "" && s.rootfsCoWDir != "" {
+	// pre-paid timing as the single-VM Prepare. The clone SOURCE is the pool template
+	// rootfs by default; a CO-LOCATED fork child overrides it with the frozen source
+	// rootfs the fork snapshot carries so the child inherits the parent's DISK.
+	rootfsSrc := s.rootfsTemplatePath
+	if rootfsSrcOverride != "" {
+		rootfsSrc = rootfsSrcOverride
+	}
+	if rootfsSrc != "" && s.rootfsCoWDir != "" {
 		clonePath := filepath.Join(s.rootfsCoWDir, cfg.ID, "rootfs.ext4")
 		if err := os.MkdirAll(filepath.Dir(clonePath), 0o755); err != nil {
 			_ = inst.vm.Close()
 			inst.vm = nil
 			return fmt.Errorf("husk: create per-activation rootfs dir for vm %q: %w", id, err)
 		}
-		if err := waitForFile(ctx, s.rootfsTemplatePath, rootfsTemplateWait); err != nil {
+		if err := waitForFile(ctx, rootfsSrc, rootfsTemplateWait); err != nil {
 			_ = inst.vm.Close()
 			inst.vm = nil
-			return fmt.Errorf("husk: per-activation rootfs template %s not ready for vm %q: %w", s.rootfsTemplatePath, id, err)
+			return fmt.Errorf("husk: per-activation rootfs source %s not ready for vm %q: %w", rootfsSrc, id, err)
 		}
-		if err := s.reflink(s.rootfsTemplatePath, clonePath); err != nil {
+		if err := s.reflink(rootfsSrc, clonePath); err != nil {
 			_ = inst.vm.Close()
 			inst.vm = nil
 			return fmt.Errorf("husk: clone per-activation rootfs for vm %q: %w", id, err)
@@ -208,10 +273,12 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID) error {
 // first VM's state. Fail closed: any step failing returns OK=false and leaves the
 // instance NOT active.
 //
-// The per-VM in-pod egress filter + DNS proxy (which the single-VM Activate
-// programs) are DEFERRED for multi-VM to a later increment: several VMs sharing
-// the pod netns need a per-VM tap fan-out that this state-machine increment does
-// not build. No production caller runs multi-VM yet, so nothing regresses.
+// The per-VM in-pod egress filter runs here (L1.4): each vmID's VM comes up on
+// its OWN tap + guest IP + gateway derived from the vmID (deriveVMNetwork), and
+// the snapshot's baked NIC is remapped to that per-VM tap, mirroring the
+// single-VM Activate but keyed per instance so two VMs in one pod netns never
+// collide. The per-VM DNS-proxy fan-out is DEFERRED to L1.4b: several VMs cannot
+// share one ResolverIP:53 listener, so multi-VM egress is IP-allowlist only.
 func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateRequest) (ActivateResult, error) {
 	if err := checkVMID(id); err != nil {
 		return ActivateResult{OK: false, Error: err.Error()}, err
@@ -256,17 +323,58 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 
 	// Verify-on-activate gate, with the same prepare-time fast path the single-VM
 	// Activate uses: skip the re-hash only when THIS instance verified this exact
-	// snapshot during its dormant period.
-	if !(inst.prepareVerified && req.SnapshotDir == s.prepareSnapshotDir && req.ExpectedDigest == s.prepareExpectedDigest) {
+	// snapshot during its dormant period. A CO-LOCATED fork child (req.ForkSnapshot)
+	// restores a node-local FORK snapshot the source stub produced in the SAME
+	// pod/node trust boundary; it is NOT content-addressed (there is no recorded
+	// digest to verify against), so the content-addressed verify is skipped exactly
+	// as the new-pod fork child does with --allow-unverified-snapshots. The
+	// fork-correctness RNG/clock reseed handshake below still runs, fail-closed.
+	switch {
+	case req.ForkSnapshot:
+		// node-local fork snapshot: skip the content-addressed verify (no digest).
+	case !(inst.prepareVerified && req.SnapshotDir == s.prepareSnapshotDir && req.ExpectedDigest == s.prepareExpectedDigest):
 		if err := s.verify(req); err != nil {
 			werr := fmt.Errorf("husk: snapshot verification failed for vm %q: %w", id, err)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
 		}
 	}
 
+	// Per-VM in-pod egress filter. Derive this vmID's OWN /30 (deriveVMNetwork:
+	// the primary VM keeps the base link, every secondary gets a distinct guest
+	// IP + gateway + MAC + tap), then create the tap and install its default-deny
+	// egress chain BEFORE the snapshot load, exactly as the single-VM Activate
+	// does: Firecracker requires the host tap to exist at restore time and the
+	// baked NIC is remapped to it. Binding the baked NIC to THIS VM's tap keeps
+	// the filter and the NIC remap in agreement without a shared allocator. FAIL
+	// CLOSED: a filter error means the VM would have unfiltered egress (or a NIC
+	// with no backing tap), so it is never loaded. The guest IP and tap carry no
+	// secrets. DNS-proxy fan-out is deferred (L1.4b), so no ResolverIP is bound.
+	perNet := deriveVMNetwork(id, req.Network)
+	overrides := req.NetworkOverrides
+	if s.netRunner != nil && perNet != nil {
+		tap := netconf.DeriveTapName(perNet.GuestIP)
+		// Multi-VM leaves ResolverIP unset (the per-VM DNS proxy fan-out is a later
+		// increment); the shared policy fields come from netfilterPolicyConfig.
+		cfg := netfilterPolicyConfig(req)
+		cfg.Tap = tap
+		cfg.GuestIP = net.ParseIP(perNet.GuestIP)
+		cfg.HostIP = net.ParseIP(perNet.GatewayIP)
+		if err := applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
+			werr := fmt.Errorf("husk: apply in-pod egress filter for vm %q: %w", id, err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+		// Pin the baked NIC to THIS VM's tap so the restored VM's NIC is backed by
+		// the tap the filter just created and governed by its egress chain.
+		overrides = []firecracker.NetworkOverride{{
+			IfaceID:     firecracker.NetIfaceID,
+			HostDevName: tap,
+		}}
+		inst.activeTap = tap
+	}
+
 	// Load PAUSED so the rootfs drive can be rebound before the guest runs, then
 	// resume explicitly, exactly as the single-VM path does.
-	if err := inst.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, req.NetworkOverrides); err != nil {
+	if err := inst.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
 		werr := fmt.Errorf("husk: load snapshot from %s for vm %q: %w", req.SnapshotDir, id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
@@ -296,7 +404,12 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
 	inst.generation++
-	if err := s.notify(vsockPath, inst.generation, entropy, req); err != nil {
+	// Deliver THIS VM's derived network (its own guest IP + gateway + MAC) to the
+	// guest so it re-addresses eth0 onto the /30 the host-side filter programs,
+	// keeping the guest address and the tap/masquerade in agreement per instance.
+	notifyReq := req
+	notifyReq.Network = perNet
+	if err := s.notify(vsockPath, inst.generation, entropy, notifyReq); err != nil {
 		werr := fmt.Errorf("husk: fork-correctness handshake failed for vm %q: %w", id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
@@ -315,6 +428,63 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		VsockPath: vsockPath,
 		LatencyMs: float64(latency.Microseconds()) / 1000.0,
 	}, nil
+}
+
+// SpawnVM brings up an ADDITIONAL same-tenant VM (a new vmID) in a running husk
+// pod: it prepares a dormant per-VM Firecracker for req.VMID then activates it
+// from req.Activate, returning the activated guest's vsock path. It is the server
+// side of the spawn-vm control op (netcontrol.go OpSpawnVM).
+//
+// It FAILS CLOSED on the flag: a stub NOT started with --multi-vm refuses to spawn
+// a VM. The single-VM path owns exactly ONE VM and must never be driven to host a
+// second, so a spawn-vm misdirected at a single-VM pod is rejected here rather
+// than silently starting a second Firecracker. The vmID is validated with
+// checkVMID before any path is derived from it (an unsafe or empty id is refused
+// up front, before prepareInstance touches the filesystem). Any prepare or
+// activate failure returns OK=false with actionable text and leaves no
+// half-spawned VM active; prepareInstance and activateInstance are each
+// fail-closed per instance and never disturb a sibling.
+//
+// req.Activate carries the same activation inputs a plain Activate takes,
+// including SECRETS (Secrets, Token); those ride the mTLS control channel and are
+// NEVER logged here.
+func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
+	if !s.multiVM {
+		return SpawnVMResult{
+			OK:    false,
+			VMID:  req.VMID,
+			Error: "husk: spawn-vm refused: this pod is not running in multi-VM mode",
+		}
+	}
+	id := vmID(req.VMID)
+	if err := checkVMID(id); err != nil {
+		return SpawnVMResult{OK: false, VMID: req.VMID, Error: err.Error()}
+	}
+	// A CO-LOCATED fork child clones its rootfs from the FROZEN source rootfs the
+	// fork snapshot carries at SnapshotDir/rootfs.ext4 (inherit the parent's DISK),
+	// NOT the pool template rootfs. Empty otherwise, so a non-fork spawn keeps the
+	// template clone. This mirrors the new-pod fork child, whose --rootfs points at
+	// the same frozen source rootfs (huskForkRootfsInPodPath).
+	rootfsSrcOverride := ""
+	if req.Activate.ForkSnapshot && req.Activate.SnapshotDir != "" {
+		rootfsSrcOverride = filepath.Join(req.Activate.SnapshotDir, "rootfs.ext4")
+	}
+	if err := s.prepareInstance(ctx, id, rootfsSrcOverride); err != nil {
+		return SpawnVMResult{
+			OK:    false,
+			VMID:  req.VMID,
+			Error: fmt.Errorf("husk: spawn-vm prepare vm %q: %w", req.VMID, err).Error(),
+		}
+	}
+	res, _ := s.activateInstance(ctx, id, req.Activate)
+	return SpawnVMResult{
+		OK:            res.OK,
+		VMID:          req.VMID,
+		VsockPath:     res.VsockPath,
+		LatencyMs:     res.LatencyMs,
+		Error:         res.Error,
+		AlreadyActive: res.AlreadyActive,
+	}
 }
 
 // closeInstance tears down ONE per-VM instance's VMM and per-activation artifacts
@@ -533,4 +703,287 @@ func (s *Stub) pingInstances() error {
 		}
 	}
 	return nil
+}
+
+// resumeInstanceAfterFork resumes ONE per-VM instance's source VM after a fork
+// snapshot with the SAME bounded retry the single-VM resumeSourceAfterFork uses,
+// but scoped to inst.vm: a TRANSIENT resume error must not leave a tenant's live
+// source frozen (the v1.24.1 stuck-paused incident). It retries resumeMaxAttempts
+// times, resumeRetryBackoff apart, returns nil as soon as one resume succeeds, and
+// on total failure emits a distinct error-level log and fires the onSourceLeftPaused
+// marker so a source left paused is observable. The caller holds inst.mu.
+func (s *Stub) resumeInstanceAfterFork(id vmID, inst *vmInstance) error {
+	var err error
+	for attempt := 0; attempt < resumeMaxAttempts; attempt++ {
+		if attempt > 0 {
+			s.backoffSleep(resumeRetryBackoff)
+		}
+		if err = inst.vm.Resume(); err == nil {
+			return nil
+		}
+	}
+	fmt.Fprintf(os.Stderr, "husk: source vm %q left paused after fork snapshot: resume failed after %d attempts: %v\n", id, resumeMaxAttempts, err)
+	if s.onSourceLeftPaused != nil {
+		s.onSourceLeftPaused()
+	}
+	return err
+}
+
+// forkSnapshotInstance snapshots ONE per-VM instance's running VM, scoped to one
+// entry in the instances map. It is the per-VM analog of the single-VM
+// ForkSnapshot and mirrors it exactly (pause -> create snapshot -> freeze rootfs
+// inside the paused window -> ALWAYS resume the source), but gates on inst.state
+// and drives inst.vm.
+//
+// This is the fix for the L1.8 prod canary: under --multi-vm the CLAIM path
+// advanced the DEFAULT instance's state to Active (activateInstance), NOT the
+// single-VM s.state, which stays StateNew. The single-VM ForkSnapshot's
+// `s.state != StateActive` gate therefore saw StateNew and refused EVERY fork of a
+// multi-vm source with "fork-snapshot in state new: must be active", timing out
+// the hosted fork loop. Routing through the default instance reads the state
+// Activate set, exactly as Metering/Close/pingVMM already multiplex.
+//
+// FAIL CLOSED: it requires inst StateActive; a pause, snapshot-create, rootfs-freeze,
+// or resume failure returns OK=false plus an error, and on a snapshot or freeze
+// failure it still attempts to resume the source so a transient error never leaves a
+// live sandbox frozen. The fork id and snapshot paths carry no secrets.
+func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapshotRequest) (ForkSnapshotResult, error) {
+	if err := checkVMID(id); err != nil {
+		return ForkSnapshotResult{OK: false, Error: err.Error()}, err
+	}
+	// Fork does NOT create an instance: a missing entry reads as StateNew and is
+	// refused, mirroring activateInstance.
+	inst := s.instanceFor(id, false)
+	if inst == nil {
+		werr := fmt.Errorf("husk: fork-snapshot vm %q in state %s: must be active", id, StateNew)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+
+	if inst.state != StateActive {
+		return ForkSnapshotResult{OK: false, Error: fmt.Sprintf("fork-snapshot vm %q in state %s: must be active", id, inst.state)},
+			fmt.Errorf("husk: fork-snapshot vm %q in state %s: must be active", id, inst.state)
+	}
+	if err := ctx.Err(); err != nil {
+		return ForkSnapshotResult{OK: false, Error: err.Error()}, err
+	}
+	if req.SnapshotDir == "" {
+		return ForkSnapshotResult{OK: false, Error: "fork-snapshot: empty snapshot dir"},
+			fmt.Errorf("husk: fork-snapshot vm %q: empty snapshot dir", id)
+	}
+	if err := s.confineToForksDir(req.SnapshotDir); err != nil {
+		return ForkSnapshotResult{OK: false, Error: err.Error()}, err
+	}
+
+	memFile := filepath.Join(req.SnapshotDir, "mem")
+	vmStateFile := filepath.Join(req.SnapshotDir, "vmstate")
+	if err := os.MkdirAll(req.SnapshotDir, 0o755); err != nil {
+		werr := fmt.Errorf("husk: create fork snapshot dir %s: %w", req.SnapshotDir, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	start := time.Now()
+
+	if err := inst.vm.Pause(); err != nil {
+		werr := fmt.Errorf("husk: pause source vm %q for fork snapshot: %w", id, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	if err := inst.vm.CreateSnapshot(memFile, vmStateFile); err != nil {
+		// Best effort: resume the source so a transient snapshot error does not leave
+		// a tenant's live sandbox frozen. The snapshot already failed, so the resume
+		// error is not surfaced, but the bounded retry + stuck-paused marker still
+		// apply here (a transient resume blip on this branch must not silently leave
+		// the source paused, the v1.24.1 incident class).
+		_ = s.resumeInstanceAfterFork(id, inst)
+		werr := fmt.Errorf("husk: create fork snapshot in %s for vm %q: %w", req.SnapshotDir, id, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	// Freeze THIS instance's source rootfs INSIDE the paused window, as a
+	// point-in-time pair with the mem+vmstate checkpoint, exactly as the single-VM
+	// ForkSnapshot does. Skipped when this instance has no per-activation clone (the
+	// mock/CI paths). On failure the source is resumed (never leave a tenant's live
+	// sandbox frozen) before failing closed. The path carries no secret.
+	if inst.rootfsClonePath != "" {
+		frozenRootfs := filepath.Join(req.SnapshotDir, "rootfs.ext4")
+		if err := s.reflink(inst.rootfsClonePath, frozenRootfs); err != nil {
+			_ = s.resumeInstanceAfterFork(id, inst)
+			werr := fmt.Errorf("husk: freeze source rootfs for fork snapshot vm %q: %w", id, err)
+			return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+		}
+	}
+
+	// ALWAYS resume the source after the checkpoint: the pause is only the brief
+	// quiescence CreateSnapshot requires, and the memory + frozen rootfs are a
+	// consistent point-in-time pair, so the source is safe to run again. Leaving it
+	// paused was the v1.24.1 production bug. The resume is retried a few times so a
+	// transient blip does not recreate that stuck-paused incident.
+	if err := s.resumeInstanceAfterFork(id, inst); err != nil {
+		werr := fmt.Errorf("husk: resume source vm %q after fork snapshot: %w", id, err)
+		return ForkSnapshotResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	latency := time.Since(start)
+	return ForkSnapshotResult{
+		OK:          true,
+		SnapshotDir: req.SnapshotDir,
+		LatencyMs:   float64(latency.Microseconds()) / 1000.0,
+	}, nil
+}
+
+// dialWorkspaceAgentVM resolves the guest-agent bulk-tar transport for a SPECIFIC
+// per-VM handle (an instance's inst.vm under --multi-vm) and returns it plus a
+// close hook. It is the per-VM analog of the single-VM dialWorkspaceAgent, which
+// reads s.vm; under --multi-vm s.vm is nil and the VM lives on the instance, so the
+// workspace ops resolve the transport from inst.vm here instead. The caller holds
+// the instance lock.
+func (s *Stub) dialWorkspaceAgentVM(vm vmm) (workspace.VsockTransport, func(), error) {
+	vsockPath := vm.VsockHostPath(s.vsockRelPath)
+	agent, err := s.wsTransport(vsockPath)
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("husk: connect guest agent for workspace transfer: %w", err)
+	}
+	closeHook := func() {}
+	if c, ok := agent.(io.Closer); ok {
+		closeHook = func() { _ = c.Close() }
+	}
+	return agent, closeHook, nil
+}
+
+// dehydrateWorkspaceInstance captures ONE per-VM instance's guest /workspace into
+// the node CAS, scoped to one entry in the instances map. It is the per-VM analog
+// of the single-VM DehydrateWorkspace and mirrors it exactly, but gates on
+// inst.state and dials inst.vm. Same L1.8 fix class as forkSnapshotInstance: the
+// single-VM DehydrateWorkspace gates on s.state (StateNew under --multi-vm) and
+// dials s.vm (nil), so on a multi-vm pod it refused with "dehydrate-workspace in
+// state new: must be active"; routing through the default instance uses the state
+// and VM Activate set.
+//
+// FAIL CLOSED: it requires inst StateActive and a configured node CAS. The manifest
+// digest is a content address, NOT a secret; workspace CONTENT bytes are never
+// logged. The instance stays StateActive throughout.
+func (s *Stub) dehydrateWorkspaceInstance(ctx context.Context, id vmID, req DehydrateWorkspaceRequest) (DehydrateWorkspaceResult, error) {
+	if err := checkVMID(id); err != nil {
+		return DehydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	inst := s.instanceFor(id, false)
+	if inst == nil {
+		werr := fmt.Errorf("husk: dehydrate-workspace vm %q in state %s: must be active", id, StateNew)
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+
+	if inst.state != StateActive {
+		werr := fmt.Errorf("husk: dehydrate-workspace vm %q in state %s: must be active", id, inst.state)
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	if err := ctx.Err(); err != nil {
+		return DehydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	if s.casStore == nil {
+		werr := fmt.Errorf("husk: dehydrate-workspace: no node CAS configured; set --cas-dir so the stub can persist a workspace revision")
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	agent, closeAgent, err := s.dialWorkspaceAgentVM(inst.vm)
+	if err != nil {
+		return DehydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	defer closeAgent()
+
+	start := time.Now()
+	digest, err := workspace.Dehydrate(ctx, agent, s.casStore, req.ExcludePaths, req.CapturePaths)
+	if err != nil {
+		werr := fmt.Errorf("husk: dehydrate workspace: %w", err)
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	if err := digest.Validate(); err != nil {
+		werr := fmt.Errorf("husk: dehydrate workspace produced an invalid content digest: %w", err)
+		return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	// Optional content-hash diff against the parent head, computed from the two
+	// manifests in the node CAS via the SAME stub-level helper the single-VM path
+	// uses; it never materializes chunk bytes. An error names manifests/digests
+	// (content addresses), never content.
+	var diff *workspace.Diff
+	if req.ParentManifestDigest != "" {
+		parent := cas.Digest(req.ParentManifestDigest)
+		if err := parent.Validate(); err != nil {
+			werr := fmt.Errorf("husk: dehydrate workspace: invalid parent manifest digest: %w", err)
+			return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+		}
+		d, derr := s.diffManifests(parent, digest)
+		if derr != nil {
+			werr := fmt.Errorf("husk: dehydrate workspace: compute diff against parent: %w", derr)
+			return DehydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+		}
+		diff = &d
+	}
+
+	latency := time.Since(start)
+	return DehydrateWorkspaceResult{
+		OK:             true,
+		ManifestDigest: string(digest),
+		Diff:           diff,
+		LatencyMs:      float64(latency.Microseconds()) / 1000.0,
+	}, nil
+}
+
+// hydrateWorkspaceInstance restores a node-CAS manifest into ONE per-VM instance's
+// guest /workspace, the inverse of dehydrateWorkspaceInstance and the per-VM analog
+// of the single-VM HydrateWorkspace. Same L1.8 fix class: it gates on inst.state
+// and dials inst.vm instead of s.state / s.vm.
+//
+// FAIL CLOSED: it requires inst StateActive, a configured node CAS, and a valid
+// content-address manifest digest. Workspace CONTENT bytes are never logged. The
+// instance stays StateActive throughout.
+func (s *Stub) hydrateWorkspaceInstance(ctx context.Context, id vmID, req HydrateWorkspaceRequest) (HydrateWorkspaceResult, error) {
+	if err := checkVMID(id); err != nil {
+		return HydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	inst := s.instanceFor(id, false)
+	if inst == nil {
+		werr := fmt.Errorf("husk: hydrate-workspace vm %q in state %s: must be active", id, StateNew)
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+
+	if inst.state != StateActive {
+		werr := fmt.Errorf("husk: hydrate-workspace vm %q in state %s: must be active", id, inst.state)
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	if err := ctx.Err(); err != nil {
+		return HydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	if s.casStore == nil {
+		werr := fmt.Errorf("husk: hydrate-workspace: no node CAS configured; set --cas-dir so the stub can restore a workspace revision")
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	digest := cas.Digest(req.ManifestDigest)
+	if err := digest.Validate(); err != nil {
+		werr := fmt.Errorf("husk: hydrate-workspace: %w", err)
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	agent, closeAgent, err := s.dialWorkspaceAgentVM(inst.vm)
+	if err != nil {
+		return HydrateWorkspaceResult{OK: false, Error: err.Error()}, err
+	}
+	defer closeAgent()
+
+	start := time.Now()
+	if err := workspace.Hydrate(ctx, agent, s.casStore, digest); err != nil {
+		werr := fmt.Errorf("husk: hydrate workspace: %w", err)
+		return HydrateWorkspaceResult{OK: false, Error: werr.Error()}, werr
+	}
+	latency := time.Since(start)
+	return HydrateWorkspaceResult{
+		OK:        true,
+		LatencyMs: float64(latency.Microseconds()) / 1000.0,
+	}, nil
 }

@@ -1,7 +1,9 @@
 package v1
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -31,13 +33,13 @@ func TestSandboxExposeDeepCopy(t *testing.T) {
 func TestSandboxExposeDeepCopySliceFields(t *testing.T) {
 	original := &Sandbox{}
 	original.Spec.Expose = &SandboxExpose{
-		Port:                 8080,
-		Label:                "openclaw",
-		Sharing:              "private",
-		Network:              []string{"10.0.0.0/8", "192.168.1.0/24"},
-		ForwardAuthURL:       "https://auth.example.com/verify",
-		AllowedPrincipals:    []string{"alice@example.com", "bob@example.com"},
-		AllowedEmailDomains:  []string{"example.com"},
+		Port:                8080,
+		Label:               "openclaw",
+		Sharing:             "private",
+		Network:             []string{"10.0.0.0/8", "192.168.1.0/24"},
+		ForwardAuthURL:      "https://auth.example.com/verify",
+		AllowedPrincipals:   []string{"alice@example.com", "bob@example.com"},
+		AllowedEmailDomains: []string{"example.com"},
 	}
 
 	copied := original.DeepCopy()
@@ -60,5 +62,43 @@ func TestSandboxExposeDeepCopySliceFields(t *testing.T) {
 	copied.Spec.Expose.AllowedEmailDomains[0] = "evil.com"
 	if original.Spec.Expose.AllowedEmailDomains[0] == "evil.com" {
 		t.Fatal("mutating copy AllowedEmailDomains changed original: not a deep copy")
+	}
+}
+
+// TestSandboxStatusVMIDSerializes verifies the new SandboxStatus.VMID field
+// round-trips through JSON under the "vmId" key alongside the host Pod, so the
+// shared-host mapping (Pod, VMID) is observable on the CRD.
+func TestSandboxStatusVMIDSerializes(t *testing.T) {
+	original := &Sandbox{}
+	original.Status.Pod = "heartbeat-7f3a-husk"
+	original.Status.VMID = DefaultVMID
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal Sandbox: %v", err)
+	}
+	if !strings.Contains(string(data), `"vmId":"default"`) {
+		t.Fatalf("marshalled status missing vmId key: %s", data)
+	}
+
+	var decoded Sandbox
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal Sandbox: %v", err)
+	}
+	if decoded.Status.VMID != DefaultVMID {
+		t.Fatalf("VMID round-trip = %q, want %q", decoded.Status.VMID, DefaultVMID)
+	}
+	if decoded.Status.Pod != "heartbeat-7f3a-husk" {
+		t.Fatalf("Pod round-trip = %q, want %q", decoded.Status.Pod, "heartbeat-7f3a-husk")
+	}
+
+	// An empty VMID must omit the key (omitempty), keeping the raw-forkd path
+	// status compact.
+	empty, err := json.Marshal(&Sandbox{})
+	if err != nil {
+		t.Fatalf("marshal empty Sandbox: %v", err)
+	}
+	if strings.Contains(string(empty), "vmId") {
+		t.Fatalf("empty VMID should be omitted, got: %s", empty)
 	}
 }

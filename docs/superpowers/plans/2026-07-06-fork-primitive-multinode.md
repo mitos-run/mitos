@@ -230,6 +230,45 @@ push a pod (or node) past its memory budget PENDS or spills, never overcommits.
 Metering already reports CoW-aware MemoryUnique/MemoryShared, which feeds the
 sizing; the reservation must still be safe at worst case, not the CoW-typical case.
 
+Status (L1.7b, reserve-up-front then admit-and-spill): the per-pod dimension is
+implemented. A multi-VM warm pod is BUILT to host co-located fork VMs, so it
+RESERVES node memory up front for the source VM plus a bounded number of fork VMs
+(buildHuskPod sizes Requests[memory] = (1 + reserved) * per-VM guest RAM and records
+the per-VM guest RAM in the mitos.run/fork-vm-guest-memory annotation; the reserved
+count defaults to 4, the SandboxPoolReconciler.MultiVMForkVMs knob). The MultiVMFork
+co-location routing (internal/controller/sandboxfork_controller.go,
+coLocatedForkVMBudget) then admits a co-located fork VM while the reservation has
+room: the reserved request holds floor(request / per-VM) VMs, one slot reserved for
+the source VM already resident, so floor(request / per-VM) - 1 children co-locate.
+Reserving on the REQUEST is node-honest: the scheduler placed the pod where every
+reserved VM's guest RAM fits, so a co-located fork never overcommits the node. Each
+co-located VM is accounted its FULL guest memory, not the CoW-typical dirty set, so
+a sibling can never OOM a sibling. A child past the reservation spills to a NEW pod
+via buildForkChildPod, which the node scheduler and the capacity-admission gate
+account honestly (a spill that does not fit the node PENDS exactly as an independent
+claim does). This replaces the earlier hardcoded co-location count and fixes the
+regression where the pure memory budget floored every realistically sized multi-VM
+pod to 0 co-location (limit = request + modest headroom), so with the flag on every
+fork silently spilled to the new-pod path and a prod canary hit
+re-get-fork-child-pod-not-found. A legacy pod carrying no reservation stamp keeps the
+prior limit-based floor(limit / request) - 1 budget.
+
+The per-pod budget is now enforced ACROSS CONCURRENT same-source forks, not only per
+fork. coLocatedForkVMBudget is the WHOLE-POD ceiling; the co-location admission
+(reconcileHuskFork) subtracts the co-located VMs OTHER SandboxForks already placed in
+the source pod (coLocatedVMsInPodByOtherForks, reading status.Children[].Pod +
+status.Children[].VMID, the co-location ledger) and admits this fork's children only
+against the REMAINING room, spilling the overflow to a new pod. This closes the former
+per-fork gap where N concurrent forks of one source each admitted up to the full
+ceiling and over-admitted VMs into the pod (an intra-pod OOM risk under memory.max).
+The occupancy read is uncached (APIReader) and the controller reconciles serially
+(default MaxConcurrentReconciles 1), so two same-source forks never evaluate against a
+stale view; the read rounds toward spilling (conservative on error, under-admit never
+over-admit). Deferred to a follow-up: a dedicated node-budget check for the co-located
+dimension, the grow-the-pod-with-in-place-resize option (grow the reservation lazily as
+forks join, instead of reserving the bounded max up front), and a fully race-free
+shared reservation should MaxConcurrentReconciles ever be raised above 1.
+
 ### Guarantee B: a swarm always survives node loss by reconstructing from durable state
 
 Today Mitos has real multi-node resilience for independent sandboxes: node registry

@@ -2,7 +2,9 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/husk"
@@ -28,6 +31,169 @@ type huskForkSnapshotter func(ctx context.Context, addr string, tlsConf *tls.Con
 // huskForkSnapshotRemover is the controller->husk remove-fork-snapshot seam. Nil
 // defaults to RemoveForkSnapshotOnHusk; tests inject a fake.
 type huskForkSnapshotRemover func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error)
+
+// huskVMSpawner is the controller->husk spawn-vm seam (the MultiVMFork routing).
+// Nil defaults to SpawnVMOnHusk; tests inject a fake.
+type huskVMSpawner func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error)
+
+// coLocatedForkVMBudget reports how many ADDITIONAL fork-child VMs the MultiVMFork
+// routing may safely co-locate INSIDE the source pod alongside the source VM
+// already resident there (L1.7b, guarantee A: a fork never overcommits a pod).
+//
+// The reservation is safe at the CoW WORST case, not the CoW-typical case. A
+// co-located VM shares the parent memory image copy-on-write, so its TYPICAL
+// resident cost is only its private-dirty set (a few MiB). But it MAY dirty up to
+// its whole guest RAM, and memory is non-compressible: if the co-located guests
+// together dirty more than what the pod reserved, a sibling OOM-kills a sibling
+// (the user's own live work). So each VM (the source plus every co-located child)
+// is accounted its FULL guest-memory footprint, not the tiny shared-page floor.
+//
+// Two source-pod shapes, one guarantee:
+//
+//   - A MULTI-VM husk pod is BUILT to host co-located fork VMs: it reserves node
+//     memory up front for the source VM plus a bounded number of fork VMs
+//     (buildHuskPod sizes Requests[memory] = (1 + reserved) * per-VM guest RAM) and
+//     records the per-VM guest RAM in the huskForkVMGuestMemoryAnnotation. The
+//     budget is floor(request / per-VM) - 1: the reserved request holds that many
+//     VMs and one slot is the source VM. Reserving on the REQUEST is node-honest,
+//     the scheduler placed the pod where every reserved VM's guest RAM fits, so a
+//     co-located fork never overcommits the node. This is what makes co-location
+//     actually engage for a realistically sized pool; without the reservation a
+//     multi-VM pod was sized for ONE VM and this budget was always 0, so every fork
+//     spilled to the new-pod path (where the production canary failed).
+//
+//   - A LEGACY / single-VM pod carries no reservation stamp, so its memory REQUEST
+//     is one VM's guest RAM and its memory LIMIT (memory.max the kubelet enforces)
+//     is the intra-pod ceiling. The budget is floor(limit / request) - 1: the pod
+//     holds that many VMs before a sibling would OOM a sibling, one slot reserved
+//     for the source VM. A pod sized for one VM (the honest single-VM default)
+//     co-locates nothing, so a fork of it spills to a new pod. spawnInSourcePod is
+//     false for a single-VM source anyway, so this branch only ever governs a pod
+//     stamped multi-VM-capable by other means (a test fixture).
+//
+// A budget of 0 means every fork child spills to a new pod. When the source pod
+// does not declare the memory accounting its shape needs (a malformed or
+// resource-free pod), the budget is 0: with nothing provable the fork co-locates
+// nothing, the conservative safe-at-worst-case default.
+//
+// This replaces the former hardcoded co-location count. It governs the per-pod
+// dimension of guarantee A. The node budget is already honored by the spill path:
+// a spilled child takes buildForkChildPod, which the node scheduler and the
+// capacity-admission gate account honestly, so a fork that cannot fit the node
+// pends there exactly as an independent claim does. The node-level spill-vs-pend
+// refinement for the co-located dimension is deferred to a follow-up increment.
+//
+// SCOPE: this budget is the PER-POD ceiling computed from the source pod's static
+// resources. It is the WHOLE-POD count, not a per-fork slice: the reconcile loop
+// subtracts the co-located VMs OTHER SandboxForks targeting the SAME source pod
+// have ALREADY placed there (coLocatedVMsInPodByOtherForks) before admitting this
+// fork's own children, so the effective budget for a fork is this ceiling minus the
+// live cross-fork occupancy. That closes the former per-fork gap where N concurrent
+// forks of one source each independently admitted up to this ceiling and
+// over-admitted VMs into the pod: the sum across all forks now stays within the
+// ceiling and an over-budget child SPILLS to a new pod (buildForkChildPod) instead
+// of risking an intra-pod OOM. The occupancy read is uncached (APIReader) and the
+// controller reconciles Sandbox objects serially (default MaxConcurrentReconciles
+// 1), so two same-source forks never evaluate occupancy against a stale view; the
+// read is also conservative on error (treat the pod as full and spill), and rounds
+// toward spilling so the guarantee is UNDER-admit, never over-admit. Even had the
+// NODE stayed safe without this (the pod cgroup memory LIMIT is a hard ceiling the
+// scheduler reserved, so an over-admission fails closed as an intra-pod OOM, not a
+// node overcommit), spilling the over-budget child is the correct outcome and is
+// now what happens.
+func coLocatedForkVMBudget(pod *corev1.Pod) int {
+	if pod == nil {
+		return 0
+	}
+	var req, limit resource.Quantity
+	found := false
+	for i := range pod.Spec.Containers {
+		c := &pod.Spec.Containers[i]
+		if c.Name != huskContainerName {
+			continue
+		}
+		req = c.Resources.Requests[corev1.ResourceMemory]
+		limit = c.Resources.Limits[corev1.ResourceMemory]
+		found = true
+		break
+	}
+	if !found {
+		return 0
+	}
+	// A MULTI-VM pod records ONE fork VM's guest RAM in an annotation and RESERVES
+	// its memory request for the source VM plus a bounded number of co-located fork
+	// VMs (buildHuskPod). The reserved request holds floor(request / per-VM) VMs on
+	// the node, one slot reserved for the source VM already resident, so the pod
+	// grants floor(request / per-VM) - 1 co-located fork slots. Reserving on the
+	// REQUEST is node-honest: the scheduler placed the pod where all those VMs fit,
+	// so a co-located fork never overcommits the node (guarantee A).
+	if g, ok := pod.Annotations[huskForkVMGuestMemoryAnnotation]; ok {
+		perVM, err := resource.ParseQuantity(g)
+		if err == nil && !perVM.IsZero() && !req.IsZero() {
+			coLocated := req.Value()/perVM.Value() - 1
+			if coLocated < 0 {
+				return 0
+			}
+			return int(coLocated)
+		}
+	}
+	// Legacy / single-VM pod: no reservation stamp, so the memory REQUEST is one
+	// VM's guest RAM and the pod's memory LIMIT (memory.max) is the intra-pod
+	// ceiling. It holds floor(limit / request) VMs at the CoW worst case before a
+	// sibling would OOM a sibling, one slot reserved for the source VM, so at most
+	// floor(limit / request) - 1 children co-locate. A pod sized for one VM (the
+	// honest single-VM default) co-locates nothing.
+	if req.IsZero() || limit.IsZero() {
+		return 0
+	}
+	coLocated := limit.Value()/req.Value() - 1
+	if coLocated < 0 {
+		return 0
+	}
+	return int(coLocated)
+}
+
+// huskMultiVMLabel marks a husk pod whose stub was started with --multi-vm, so the
+// controller may drive a spawn-vm op against it (bring up an ADDITIONAL same-tenant
+// VM in that pod). Only a pod carrying this label is a candidate for the MultiVMFork
+// routing; every other source pod falls back to the new-pod path. The label is the
+// controller-visible record that the pod is multi-VM capable, paired with the
+// --multi-vm stub arg (a single-VM stub fails a spawn-vm op closed regardless).
+const huskMultiVMLabel = "mitos.run/multi-vm"
+
+// huskPodMultiVMCapable reports whether a husk pod's stub runs with --multi-vm, so
+// a spawn-vm op against it can succeed. A nil pod or a pod without the label is not
+// capable, so the MultiVMFork routing falls back to a new child pod.
+func huskPodMultiVMCapable(pod *corev1.Pod) bool {
+	return pod != nil && pod.Labels[huskMultiVMLabel] == "true"
+}
+
+// forkChildVMID derives the node-local vmID for a fork child co-located in the
+// source pod from the child's stable slot name. The husk stub validates a spawned
+// vmID against checkVMID (^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$) and derives this VM's
+// per-VM socket, tap, and workdir from it, so the id must be a safe node-local
+// identifier and unique WITHIN the source pod. The child slot name
+// ("<fork>-fork-<i>") is already node-local-unique and uses only [a-z0-9-]; cap it
+// with a short content-hash suffix so a long source sandbox name still yields a
+// <=64-char id that never collides across forks sharing one source pod.
+func forkChildVMID(childName string) string {
+	const maxLen = 64
+	if len(childName) <= maxLen {
+		return childName
+	}
+	sum := sha256.Sum256([]byte(childName))
+	suffix := hex.EncodeToString(sum[:])[:8]
+	return childName[:maxLen-1-len(suffix)] + "-" + suffix
+}
+
+// multiVMForkEnabled reports whether the MultiVMFork routing is on, honoring the
+// test gate override so a test can toggle it race-safely on the shared reconciler.
+func (r *SandboxReconciler) multiVMForkEnabled() bool {
+	if r.multiVMForkGate != nil {
+		return r.multiVMForkGate()
+	}
+	return r.MultiVMFork
+}
 
 // huskForkFinalizer guards a husk fork so its node-local fork snapshot is
 // removed from the source pod before the Sandbox object is deleted.
@@ -451,6 +617,53 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	if activate == nil {
 		activate = ActivateHuskPod
 	}
+	spawnVM := r.spawnVM
+	if spawnVM == nil {
+		spawnVM = SpawnVMOnHusk
+	}
+
+	// MultiVMFork routing decision, computed ONCE for the whole fan-out. The
+	// spawn-in-source-pod path is taken only when the flag is on AND the source pod
+	// is multi-VM capable (its stub runs --multi-vm); otherwise every child takes
+	// the byte-for-byte-unchanged new-pod path below. A non-capable source is the
+	// silent, safe fallback the design requires.
+	spawnInSourcePod := r.multiVMForkEnabled() && huskPodMultiVMCapable(srcPod)
+
+	// Per-pod memory budget for co-located fork VMs (L1.7b, guarantee A), computed
+	// ONCE for the whole fan-out from the source pod's ACTUAL memory accounting: the
+	// pod holds only floor(memory.max / per-VM guest RAM) VMs safely at the CoW
+	// worst case, one slot reserved for the source VM already resident in the pod.
+	// This replaces the former hardcoded co-location count.
+	coLocationBudget := coLocatedForkVMBudget(srcPod)
+
+	// Cross-fork reservation (guarantee A across CONCURRENT same-source forks): the
+	// per-pod budget above is the WHOLE-POD ceiling, so a fork may only co-locate up
+	// to the ceiling MINUS the VMs OTHER SandboxForks already placed in this source
+	// pod. Without this subtraction N concurrent forks of one source each admit up to
+	// the full ceiling and over-admit VMs into the pod (an intra-pod OOM risk under
+	// memory.max). Reading the live occupancy here and admitting this fork's children
+	// only against the REMAINING room makes the sum across all forks stay within the
+	// ceiling; the overflow spills to a new pod exactly as an over-budget single fork
+	// already does. Computed ONCE for the fan-out. Only consulted when this fork is
+	// actually a co-location candidate (flag on, source capable, ceiling > 0); the
+	// flag-off / non-capable / zero-budget paths never list and stay byte-for-byte
+	// unchanged.
+	coLocationBudgetRemaining := coLocationBudget
+	if spawnInSourcePod && coLocationBudget > 0 {
+		otherOccupancy, occErr := r.coLocatedVMsInPodByOtherForks(ctx, fork, srcPod)
+		if occErr != nil {
+			// Conservative on error: treat the pod as full and co-locate nothing this
+			// pass (spill), never over-admit. The children take the honestly
+			// node-scheduled new-pod path and the reconcile requeues.
+			logger.Info("cross-fork co-location occupancy unavailable; co-locating nothing this pass (conservative spill)", "source", srcPod.Name, "detail", occErr.Error())
+			coLocationBudgetRemaining = 0
+		} else {
+			coLocationBudgetRemaining = coLocationBudget - otherOccupancy
+			if coLocationBudgetRemaining < 0 {
+				coLocationBudgetRemaining = 0
+			}
+		}
+	}
 
 	// One fork snapshot per SandboxFork, keyed by the fork name, taken EXACTLY
 	// ONCE and reused for every child across reconcile passes. Children take
@@ -583,18 +796,90 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	for i := int32(0); i < effectiveReplicas(fork); i++ {
 		childName := fmt.Sprintf("%s-fork-%d", fork.Name, i)
 
-		// Get-or-create the child pod for this slot (idempotent by the stable name).
-		child, err := r.ensureForkChildPod(ctx, fork, srcPod, childName, opts)
-		if err != nil {
-			logger.Error(err, "create fork child pod failed", "child", childName)
-			continue
-		}
-
-		// Already activated in a prior pass: carry the recorded info forward and
-		// skip re-activation (idempotent per slot).
+		// A slot activated in a prior pass is carried forward as-is BEFORE any
+		// routing decision, so its fate is decided once and independently of the
+		// current flag state. Without this hoist, a slot recorded via the
+		// spawn-in-source-pod path would fall to the new-pod branch after a
+		// --multi-vm-fork flip-to-off (controller restart) and ensureForkChildPod
+		// would create a brand-new pod for a childName that status never references
+		// (the carried-forward source-pod record wins), leaking a KVM slot until the
+		// fork is GC'd. Idempotent per slot; never re-activates a live child VM.
 		if info, ok := recorded[childName]; ok {
 			forks = append(forks, info)
 			ready++
+			continue
+		}
+
+		// MultiVMFork routing: for the first coLocationBudgetRemaining slots of a
+		// multi-VM-capable source, spawn the child as an ADDITIONAL VM INSIDE the
+		// source pod (spawn-vm op) instead of creating a brand-new child pod. The
+		// budget is the whole-pod ceiling MINUS the VMs other same-source forks
+		// already placed there (the cross-fork reservation), so concurrent forks of
+		// one source never over-admit past the pod's memory budget. Slots past the
+		// remaining budget fall through to the new-pod path below, which spills the
+		// child to a fresh, honestly node-scheduled pod so a fork never overcommits
+		// the source pod (L1.7b, guarantee A). When the flag is off or the source is
+		// not multi-VM capable (spawnInSourcePod is false), or the remaining budget is
+		// 0, this branch is never entered and the path below is byte-for-byte
+		// unchanged.
+		if spawnInSourcePod && int(i) < coLocationBudgetRemaining {
+			spawnedChild, ok := r.spawnForkChildInSourcePod(ctx, spawnForkChildArgs{
+				fork:        fork,
+				srcPod:      srcPod,
+				source:      source,
+				childName:   childName,
+				template:    template,
+				netCfg:      netCfg,
+				sandboxPort: sandboxPort,
+				controlPort: controlPort,
+				spawnVM:     spawnVM,
+			})
+			if ok {
+				forks = append(forks, spawnedChild)
+				ready++
+				// Persist the co-located child to status IMMEDIATELY, before spawning the
+				// next slot or returning. The cross-fork reservation
+				// (coLocatedVMsInPodByOtherForks) counts co-located VMs from RECORDED
+				// status, so a live VM that exists in srcPod but is not yet recorded would
+				// let a concurrent same-source fork read stale occupancy and over-admit.
+				// Writing after each spawn shrinks that window from the whole fan-out to a
+				// single spawn-then-write. The persisted set is the full child ledger, not
+				// the prefix processed so far: `forks` only holds slots 0..i, so any
+				// already-recorded HIGHER-index child (carried forward, appended later in
+				// this loop) must be merged in or an early exit would persist a TRUNCATED
+				// ledger and cross-fork occupancy would under-count.
+				persisted := append([]v1.SandboxChild(nil), forks...)
+				inForks := make(map[string]bool, len(forks))
+				for _, f := range forks {
+					inForks[f.Name] = true
+				}
+				for name, rec := range recorded {
+					if !inForks[name] {
+						persisted = append(persisted, rec)
+					}
+				}
+				fork.Status.Children = persisted
+				if err := r.Status().Update(ctx, fork); err != nil {
+					// A conflict means a concurrent writer advanced the fork; returning the
+					// error requeues so the next pass re-reads and recounts occupancy fresh,
+					// never over-admitting.
+					return ctrl.Result{}, err
+				}
+			}
+			// A failed spawn is NOT wedged: the slot is left not-ready with the cause
+			// logged (issue #28), and the reconcile requeues below because
+			// ReadyReplicas < Replicas. It never silently hangs and never weakens the
+			// new-pod fallback for the OFF path.
+			continue
+		}
+
+		// Get-or-create the child pod for this slot (idempotent by the stable name).
+		// The recorded-slot carry-forward is hoisted above the routing branches, so a
+		// slot already activated (in-source-pod or in its own pod) never reaches here
+		// and this only runs for a genuinely new slot on the new-pod path.
+		child, err := r.ensureForkChildPod(ctx, fork, srcPod, childName, opts)
+		if err != nil {
+			logger.Error(err, "create fork child pod failed", "child", childName)
 			continue
 		}
 
@@ -692,6 +977,51 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	return ctrl.Result{}, nil
 }
 
+// coLocatedVMsInPodByOtherForks counts the fork-child VMs already co-located
+// INSIDE srcPod by SandboxForks OTHER than self. It is the live cross-fork
+// occupancy the co-location admission subtracts from the per-pod budget so
+// concurrent same-source forks never over-admit past the pod's memory ceiling
+// (guarantee A across forks).
+//
+// A co-located child records status.Children[i].Pod == its host pod and a
+// non-empty status.Children[i].VMID (the new-pod spill path leaves both empty), so
+// those two fields ARE the cross-fork occupancy ledger; no extra bookkeeping is
+// needed. self is excluded because this fork's own co-located slots are governed by
+// the slot loop against the remaining budget (double-counting self would make a
+// fork spill its own already-placed children on a requeue).
+//
+// The list is UNCACHED (APIReader) when available, mirroring deletePendingForkChildPods:
+// a peer fork that co-located a VM one reconcile earlier has persisted its
+// status.Children, but the informer cache may not have observed it yet, and a stale
+// read is exactly the over-admission this guards against. With the controller's
+// serial reconcile (default MaxConcurrentReconciles 1) two same-source forks never
+// evaluate occupancy at the same instant, so the uncached read is an accurate
+// point-in-time count; a caller treats a list error as "full" and spills.
+func (r *SandboxReconciler) coLocatedVMsInPodByOtherForks(ctx context.Context, self *v1.Sandbox, srcPod *corev1.Pod) (int, error) {
+	lister := client.Reader(r.Client)
+	if r.APIReader != nil {
+		lister = r.APIReader
+	}
+	var sandboxes v1.SandboxList
+	if err := lister.List(ctx, &sandboxes, client.InNamespace(self.Namespace)); err != nil {
+		return 0, fmt.Errorf("list sandboxes for cross-fork co-location occupancy of %s/%s: %w", srcPod.Namespace, srcPod.Name, err)
+	}
+	count := 0
+	for i := range sandboxes.Items {
+		s := &sandboxes.Items[i]
+		if s.UID == self.UID {
+			continue
+		}
+		for j := range s.Status.Children {
+			c := &s.Status.Children[j]
+			if c.Pod == srcPod.Name && c.VMID != "" {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
 // findHuskPod returns the husk pod named name in ns (a husk claim's
 // Status.SandboxID is the pod name). It returns an error when not found so the
 // caller can requeue.
@@ -725,6 +1055,116 @@ func (r *SandboxReconciler) ensureForkChildPod(ctx context.Context, fork *v1.San
 		return nil, fmt.Errorf("re-get fork child pod %s: %w", name, err)
 	}
 	return &existing, nil
+}
+
+// spawnForkChildArgs bundles the inputs for spawnForkChildInSourcePod so the
+// slot-loop call site stays readable.
+type spawnForkChildArgs struct {
+	fork        *v1.Sandbox
+	srcPod      *corev1.Pod
+	source      *v1.Sandbox
+	childName   string
+	template    *v1.PoolTemplateSpec
+	netCfg      huskNetworkConfig
+	sandboxPort int
+	controlPort int
+	spawnVM     huskVMSpawner
+}
+
+// spawnForkChildInSourcePod brings up a fork child as an ADDITIONAL VM inside the
+// SOURCE husk pod (the spawn-vm control op) rather than creating a new child pod.
+// It is the MultiVMFork routing's per-slot worker and the co-located analog of the
+// new-pod ensureForkChildPod + activate pair: it mints and persists the child's
+// stable bearer token FIRST (issue #183: a lost spawn ack must re-drive with the
+// token the VM already holds, and AlreadyActive lets us adopt it), then asks the
+// source stub to spawn a new vmID activating from the SAME fork snapshot the source
+// already produced, threading the SAME network + egress posture the new-pod fork
+// child inherits (issue #760) so a co-located child is never less isolated. The
+// spawned VM runs the same fail-closed RNG/clock reseed handshake activate runs, so
+// the fork-correctness handshake is preserved.
+//
+// It returns (child, true) with status.Pod = the source pod, status.VMID = the
+// spawned vmID, and status.Node = the source node when the VM is up (OK or the
+// idempotent AlreadyActive), and (_, false) when the spawn did not complete this
+// pass. A false is a clean not-ready-yet signal the caller requeues on; it NEVER
+// wedges and NEVER weakens the new-pod fallback. The mTLS control channel and the
+// fork-snapshot flow are unchanged; SpawnVMOnHusk refuses a nil TLS config so the
+// secret-bearing Activate never rides an unauthenticated channel.
+func (r *SandboxReconciler) spawnForkChildInSourcePod(ctx context.Context, a spawnForkChildArgs) (v1.SandboxChild, bool) {
+	logger := log.FromContext(ctx)
+
+	vmID := forkChildVMID(a.childName)
+	endpoint := net.JoinHostPort(a.srcPod.Status.PodIP, strconv.Itoa(a.sandboxPort))
+
+	// Persist a STABLE token BEFORE spawning (issue #183): a spawn ack or the
+	// post-spawn bookkeeping can be lost, leaving the VM ACTIVE while the controller
+	// did not record it. Reusing the same token on a re-drive lets AlreadyActive
+	// adopt the running VM instead of looping.
+	apiToken, err := ensureForkChildToken(ctx, r.Client, a.fork, a.childName+tokenSecretSuffix, endpoint)
+	if err != nil {
+		logger.Error(err, "fork child token secret write failed", "child", a.childName)
+		return v1.SandboxChild{}, false
+	}
+
+	addr := net.JoinHostPort(a.srcPod.Status.PodIP, strconv.Itoa(a.controlPort))
+	tlsConf, err := r.huskDialTLS(ctx, a.fork.Namespace)
+	var spRes husk.SpawnVMResult
+	if err == nil {
+		spRes, err = a.spawnVM(ctx, addr, tlsConf, husk.SpawnVMRequest{
+			VMID: vmID,
+			Activate: husk.ActivateRequest{
+				// The spawned VM restores from the PARENT FORK SNAPSHOT the source stub
+				// wrote to its in-pod forks dir (huskForksInPodDir: mem + vmstate + the
+				// frozen source rootfs at <dir>/rootfs.ext4), NOT the pool template.
+				// HuskSnapshotDir in the SOURCE pod resolves to the pool TEMPLATE
+				// snapshot (the source is a warm pod), so activating from it booted a
+				// FRESH template VM that inherited NEITHER the parent's memory NOR its
+				// disk: the co-located fork was fast precisely because it skipped the
+				// restore a fork requires (the prod-canary correctness bug). Pointing at
+				// the fork snapshot dir restores the parent's memory + filesystem, exactly
+				// as the new-pod fork child does from <DataDir>/forks/<ForkSnapshotID>.
+				SnapshotDir: huskForksInPodDir(a.fork.Name),
+				// ForkSnapshot tells the source stub this is a CO-LOCATED fork child: clone
+				// the child's rootfs from the FROZEN source rootfs the fork snapshot carries
+				// (inherit the DISK) and skip the content-addressed verify a node-local fork
+				// snapshot has no digest for, mirroring the new-pod fork child's
+				// --allow-unverified-snapshots. Without it the child booted the template.
+				ForkSnapshot: true,
+				// Inherit the SAME network posture the new-pod fork child gets from the
+				// source pool template (issue #760), so a co-located child is never less
+				// isolated than a one-pod-per-child fork.
+				Network:      huskNotifyNetwork(a.template),
+				Egress:       a.netCfg.Egress,
+				Allow:        a.netCfg.Allow,
+				BlockNetwork: a.netCfg.BlockNetwork,
+				AllowCIDRs:   a.netCfg.AllowCIDRs,
+				Inbound:      a.netCfg.Inbound,
+				InboundCIDRs: a.netCfg.InboundCIDRs,
+				Token:        apiToken,
+			},
+		})
+	}
+	if err != nil {
+		logger.Info("fork child spawn-in-source-pod failed, will retry", "child", a.childName, "detail", err.Error())
+		return v1.SandboxChild{}, false
+	}
+	if !spRes.OK && !spRes.AlreadyActive {
+		// Surface WHY (issue #28 LLM-legible errors) rather than a bare retry.
+		logger.Info("fork child spawn-in-source-pod failed, will retry", "child", a.childName, "detail", spRes.Error)
+		return v1.SandboxChild{}, false
+	}
+	// OK, or AlreadyActive: a prior spawn brought this VM up but its ack or
+	// bookkeeping was lost. Either way the VM is active with the stable token
+	// persisted above, so ADOPT it as ready.
+	return v1.SandboxChild{
+		Name:      a.childName,
+		SandboxID: a.srcPod.Name,
+		Endpoint:  endpoint,
+		Node:      a.source.Status.Node,
+		Pod:       a.srcPod.Name,
+		VMID:      vmID,
+		Phase:     v1.SandboxReady,
+	}, true
 }
 
 // finalizeHuskFork removes the node-local fork snapshot from the source husk pod

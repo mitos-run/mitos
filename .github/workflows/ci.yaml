@@ -376,11 +376,17 @@ jobs:
       # runtime with `fork/exec /usr/local/bin/jailer: no such file or directory`
       # (#425). The shared install script self-asserts at build time; this step
       # re-checks the actual published images so the regression cannot return.
-      - name: Assert firecracker and jailer present and version-matched
+      # It ALSO asserts the shipped firecracker is exactly the Mitos-patched
+      # binary (live-fork: memfd/MAP_SHARED + UFFD-WP), not stock upstream, by
+      # matching the on-disk sha256 against the pinned digest read from
+      # hack/install-firecracker-patched.sh. The jailer stays stock.
+      - name: Assert patched firecracker and stock jailer present and version-matched
         run: |
           set -euo pipefail
+          patched_sha=$(grep -oE 'PATCHED_FC_SHA256="[0-9a-f]{64}"' hack/install-firecracker-patched.sh | grep -oE '[0-9a-f]{64}')
+          [ -n "$patched_sha" ] || { echo "could not read PATCHED_FC_SHA256 from hack/install-firecracker-patched.sh"; exit 1; }
           for img in mitos-forkd:ci mitos-husk-stub:ci; do
-            docker run --rm --entrypoint sh "$img" -c '
+            docker run --rm --entrypoint sh -e PATCHED_SHA="$patched_sha" "$img" -c '
               set -e
               test -x /usr/local/bin/firecracker
               test -x /usr/local/bin/jailer
@@ -388,6 +394,7 @@ jobs:
               jl=$(jailer --version | grep -oE "v[0-9]+\.[0-9]+\.[0-9]+" | head -1)
               echo "firecracker=$fc jailer=$jl"
               [ -n "$fc" ] && [ "$fc" = "$jl" ]
+              echo "${PATCHED_SHA}  /usr/local/bin/firecracker" | sha256sum -c -
             '
           done
       # Mirror the full publish.yaml image matrix here so a release-only image

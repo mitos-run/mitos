@@ -325,6 +325,13 @@ const (
 	ReasonSecretInheritanceDenied = "SecretInheritanceDenied"
 )
 
+// DefaultVMID is the intra-pod identity of the single primary VM a husk host
+// pod backs on the default single-VM path. The controller stamps it into
+// SandboxStatus.VMID for a normal 1:1 husk-backed sandbox so the (Pod, VMID)
+// host mapping is populated and correct before multi-VM co-location exists. It
+// MUST match the husk stub's primary vmID key (internal/husk defaultVMID).
+const DefaultVMID = "default"
+
 // SandboxStatus consolidates SandboxClaimStatus and SandboxForkStatus.
 type SandboxStatus struct {
 	// Phase is the sandbox lifecycle phase. The phase-name set is carried from
@@ -338,12 +345,29 @@ type SandboxStatus struct {
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
-	// Pod is the husk pod name backing the sandbox (for example
+	// Pod is the husk host pod name backing the sandbox (for example
 	// "heartbeat-7f3a-husk"), visible to kubectl, quotas, NetworkPolicy, and
 	// OpenCost. NEW explicit v2 field. On the husk path the node is derivable
 	// from the pod; on the raw-forkd path the node is carried in Node below.
+	// In multi-VM mode a single host pod can back several same-tenant Sandbox
+	// CRs at once: the pod is a shared runtime host BELOW the CRD, which stays
+	// 1:1 with a VM, and each co-located Sandbox is distinguished by VMID
+	// below. Pod stays the host-pod handle in both the single-VM and multi-VM
+	// cases; it is never renamed to a per-VM identity.
 	// +optional
 	Pod string `json:"pod,omitempty"`
+
+	// VMID is the per-VM identity WITHIN the host Pod above. It carries the
+	// default (primary) identity for a one-VM host pod and a distinct value per
+	// co-located VM when a host pod backs several same-tenant Sandboxes in
+	// multi-VM mode. Together (Pod, VMID) map a Sandbox CR to its exact host
+	// process, so "kubectl get sandbox X -o yaml" still traces a sandbox to
+	// where it runs even though "kubectl get pods" no longer maps one pod to
+	// one sandbox. The CRD stays 1:1 with a VM; VMID is the intra-pod
+	// discriminator, not a second sandbox handle. See DefaultVMID for the
+	// single-VM value. NEW v2 field.
+	// +optional
+	VMID string `json:"vmId,omitempty"`
 
 	// Node is the node the sandbox VM runs on. Unchanged from v1alpha1. It is the
 	// engine placement identity distinct from SandboxID: the GC orphan sweep,
@@ -435,6 +459,22 @@ type SandboxChild struct {
 	// StartupLatencyMs is the child's fork latency in milliseconds.
 	// +optional
 	StartupLatencyMs int64 `json:"startupLatencyMs,omitempty"`
+
+	// Pod is the husk host pod backing this child when it was spawned as an
+	// ADDITIONAL VM inside an existing (shared) source pod rather than getting its
+	// own pod (the multi-VM fork routing, controller flag default off). Empty on
+	// the default one-pod-per-child path, where SandboxID already names the child's
+	// own pod. Together with VMID it maps a co-located child to its exact host
+	// process, mirroring SandboxStatus.Pod / SandboxStatus.VMID. NEW v2 field.
+	// +optional
+	Pod string `json:"pod,omitempty"`
+
+	// VMID is the per-VM identity of this child WITHIN Pod above when it was
+	// spawned into a shared source pod (multi-VM fork routing). Empty on the
+	// default one-pod-per-child path (the child owns its whole pod, so the pod
+	// name is its handle). NEW v2 field.
+	// +optional
+	VMID string `json:"vmId,omitempty"`
 }
 
 // SandboxBudgetSpend reports the capability-budget accounting (issue #25).

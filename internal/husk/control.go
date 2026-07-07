@@ -89,6 +89,23 @@ type ActivateRequest struct {
 	// pod's single implicit VM, so an existing activate stays byte-for-byte
 	// compatible. It is a node-local identifier, not a secret.
 	VMID string `json:"vm_id,omitempty"`
+	// ForkSnapshot marks this activate as restoring a CO-LOCATED fork CHILD from a
+	// node-local FORK snapshot (the spawn-vm path), NOT the pool template. When set,
+	// the multi-VM stub:
+	//   (a) clones the child's per-activation rootfs from the FROZEN source rootfs
+	//       the fork snapshot carries at SnapshotDir/rootfs.ext4 instead of the pool
+	//       template rootfs, so the child inherits the parent's DISK, and
+	//   (b) skips the content-addressed verify gate, because a fork snapshot is a
+	//       LIVE node-local artifact the source stub wrote in the SAME pod/node trust
+	//       boundary during a paused CreateSnapshot and is NOT content-addressed
+	//       (there is no digest to verify against). This is the exact posture the
+	//       new-pod fork child runs with (--allow-unverified-snapshots); the
+	//       fork-correctness RNG/clock reseed handshake still runs, fail-closed.
+	// Combined with SnapshotDir pointing at the fork snapshot dir, the co-located
+	// child restores the parent's MEMORY + FILESYSTEM instead of booting a fresh
+	// template VM. Default false keeps every template activate byte-for-byte
+	// unchanged. It is a node-local flag, not a secret.
+	ForkSnapshot bool `json:"fork_snapshot,omitempty"`
 }
 
 // ActivateResult is the control reply. OK is true only when the snapshot loaded
@@ -158,6 +175,10 @@ const (
 	// OpHydrateWorkspace restores a node-CAS manifest into the active VM's
 	// /workspace.
 	OpHydrateWorkspace = "hydrate-workspace"
+	// OpSpawnVM brings up an ADDITIONAL same-tenant VM (a new vmID) in a running
+	// husk pod using the experimental multi-VM engine. It is honored ONLY when the
+	// stub runs with --multi-vm; a single-VM stub fails it closed.
+	OpSpawnVM = "spawn-vm"
 )
 
 // WriteControlOp writes the op envelope line that precedes a request.
@@ -211,6 +232,13 @@ func ReadActivateRequestReader(r *bufio.Reader) (ActivateRequest, error) {
 // ReadForkSnapshotRequestReader decodes one ForkSnapshotRequest from a shared reader.
 func ReadForkSnapshotRequestReader(r *bufio.Reader) (ForkSnapshotRequest, error) {
 	return readForkSnapshotRequest(r)
+}
+
+// ReadSpawnVMRequestReader decodes one SpawnVMRequest from a shared reader.
+// Exported for the controller-side client and tests that pipeline op + request
+// on one connection.
+func ReadSpawnVMRequestReader(r *bufio.Reader) (SpawnVMRequest, error) {
+	return readSpawnVMRequest(r)
 }
 
 // readLineReader decodes one newline-delimited JSON value from a shared reader,
@@ -307,6 +335,73 @@ func ReadRemoveForkSnapshotRequest(r io.Reader) (RemoveForkSnapshotRequest, erro
 	var req RemoveForkSnapshotRequest
 	err := readLine(r, &req)
 	return req, err
+}
+
+// SpawnVMRequest asks a RUNNING husk pod to bring up an ADDITIONAL same-tenant VM
+// (a new vmID) inside the same pod, using the experimental multi-VM engine
+// (Options.MultiVM, #764). The stub prepares a dormant per-VM Firecracker for
+// VMID then activates it from Activate, so a spawn-vm is a prepare + activate of
+// one more VM in a pod that is already serving.
+//
+// VMID names the NEW VM to spawn. It is the authoritative routing selector: the
+// stub validates it with checkVMID and derives this VM's per-VM socket, workdir,
+// tap, and /30 from it, so it must be a safe node-local identifier (never a path
+// traversal). Activate carries the SAME activation inputs a plain activate takes
+// (snapshot dir/source and expected digest, per-fork network, egress policy and
+// allowlists, inbound policy, secrets, env, token); its own VMID field is not the
+// selector and is ignored, the top-level VMID governs. Activate.Secrets and
+// Activate.Token are SECRETS: they ride the mTLS control channel and are NEVER
+// logged.
+type SpawnVMRequest struct {
+	VMID     string          `json:"vm_id"`
+	Activate ActivateRequest `json:"activate"`
+}
+
+// SpawnVMResult is the control reply for a spawn-vm op. It mirrors the fields
+// activateInstance returns for the new VM. OK is true only when the additional VM
+// prepared, loaded its snapshot, and its guest agent answered over vsock.
+// VsockPath is the host UDS path of the newly spawned guest agent (only meaningful
+// when OK). VMID echoes which VM this result is for. LatencyMs is the activate
+// wall time. AlreadyActive is set when the spawn was refused because that vmID is
+// already active. Error carries actionable remediation text when OK is false; it
+// never carries secrets.
+type SpawnVMResult struct {
+	OK            bool    `json:"ok"`
+	VMID          string  `json:"vm_id,omitempty"`
+	VsockPath     string  `json:"vsock_path,omitempty"`
+	LatencyMs     float64 `json:"latency_ms"`
+	Error         string  `json:"error,omitempty"`
+	AlreadyActive bool    `json:"already_active,omitempty"`
+}
+
+func readSpawnVMRequest(r *bufio.Reader) (SpawnVMRequest, error) {
+	var req SpawnVMRequest
+	err := readLineReader(r, &req)
+	return req, err
+}
+
+// WriteSpawnVMRequest writes a SpawnVMRequest as one JSON line.
+func WriteSpawnVMRequest(w io.Writer, req SpawnVMRequest) error {
+	return writeLine(w, req)
+}
+
+// ReadSpawnVMRequest reads one line-delimited SpawnVMRequest.
+func ReadSpawnVMRequest(r io.Reader) (SpawnVMRequest, error) {
+	var req SpawnVMRequest
+	err := readLine(r, &req)
+	return req, err
+}
+
+// WriteSpawnVMResult writes a SpawnVMResult as one JSON line.
+func WriteSpawnVMResult(w io.Writer, res SpawnVMResult) error {
+	return writeLine(w, res)
+}
+
+// ReadSpawnVMResult reads one line-delimited SpawnVMResult.
+func ReadSpawnVMResult(r io.Reader) (SpawnVMResult, error) {
+	var res SpawnVMResult
+	err := readLine(r, &res)
+	return res, err
 }
 
 // DehydrateWorkspaceRequest asks a husk stub holding a RUNNING (active) VM to

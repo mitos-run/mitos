@@ -68,7 +68,7 @@ type vmID string
 // gives the scaffold instances map a stable key for the one VM a husk pod holds
 // today, so increment 2 of #764 has a well-defined slot to migrate the single-VM
 // state into. The single-VM code path does not use it.
-const defaultVMID vmID = "default"
+const defaultVMID vmID = v1.DefaultVMID
 
 // vmInstance holds the per-VM lifecycle state of one microVM: its lifecycle
 // State, the VMM handle, the fork generation counter, and the per-activation
@@ -714,7 +714,9 @@ func (s *Stub) Prepare(ctx context.Context) error {
 	// prepareInstance locks s.mu itself, so return before taking the lock here.
 	// When multiVM is false the single-VM body below runs byte-for-byte unchanged.
 	if s.multiVM {
-		return s.prepareInstance(ctx, defaultVMID)
+		// A plain Prepare brings up the pod's default (source) VM from the pool
+		// template, so the rootfs clone source is the template (empty override).
+		return s.prepareInstance(ctx, defaultVMID, "")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -886,21 +888,11 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	overrides := req.NetworkOverrides
 	if s.netRunner != nil && req.Network != nil {
 		tap := netconf.DeriveTapName(req.Network.GuestIP)
-		cfg := NetfilterConfig{
-			Tap:          tap,
-			GuestIP:      net.ParseIP(req.Network.GuestIP),
-			HostIP:       net.ParseIP(req.Network.GatewayIP),
-			Egress:       v1.EgressPolicy(req.Egress),
-			Allow:        req.Allow,
-			BlockNetwork: req.BlockNetwork,
-			AllowCIDRs:   req.AllowCIDRs,
-			Inbound:      v1.InboundPolicy(req.Inbound),
-			InboundCIDRs: req.InboundCIDRs,
-			ResolverIP:   net.ParseIP(req.Network.ResolverIP),
-		}
-		if cfg.Egress == "" {
-			cfg.Egress = v1.EgressDeny
-		}
+		cfg := netfilterPolicyConfig(req)
+		cfg.Tap = tap
+		cfg.GuestIP = net.ParseIP(req.Network.GuestIP)
+		cfg.HostIP = net.ParseIP(req.Network.GatewayIP)
+		cfg.ResolverIP = net.ParseIP(req.Network.ResolverIP)
 		if err := applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
 			werr := fmt.Errorf("husk: apply in-pod egress filter: %w", err)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
@@ -1097,6 +1089,18 @@ func (s *Stub) resumeSourceAfterFork() error {
 }
 
 func (s *Stub) ForkSnapshot(ctx context.Context, req ForkSnapshotRequest) (ForkSnapshotResult, error) {
+	// Multi-VM mode (#764, default off): the source this snapshots is the pod's
+	// DEFAULT VM, whose lifecycle state lives on the per-VM instances map (Activate
+	// advanced inst.state, NOT the single-VM s.state, which stays StateNew). Route
+	// to the default instance so the must-be-active gate reads the state Activate
+	// set; otherwise EVERY fork of a multi-vm source failed "state new: must be
+	// active" (the L1.8 prod canary). Mirrors the Activate/Metering/Close/pingVMM
+	// multiplexing. forkSnapshotInstance locks the instance itself, so return before
+	// taking s.mu. When multiVM is false the single-VM body below runs byte-for-byte
+	// unchanged.
+	if s.multiVM {
+		return s.forkSnapshotInstance(ctx, defaultVMID, req)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1215,6 +1219,14 @@ func (s *Stub) RemoveForkSnapshot(req ForkSnapshotRequest) error {
 // digest is a content address, NOT a secret; workspace CONTENT bytes are never
 // logged or returned in an error. The stub stays StateActive throughout.
 func (s *Stub) DehydrateWorkspace(ctx context.Context, req DehydrateWorkspaceRequest) (DehydrateWorkspaceResult, error) {
+	// Multi-VM mode (#764, default off): capture the pod's DEFAULT VM, whose state
+	// and VM live on the per-VM instances map (s.state stays StateNew and s.vm nil
+	// under multiVM). Route to the default instance so the op runs against the VM
+	// Activate brought up, not the unused single-VM fields. Same L1.8 fix class as
+	// ForkSnapshot. When multiVM is false the single-VM body below is unchanged.
+	if s.multiVM {
+		return s.dehydrateWorkspaceInstance(ctx, defaultVMID, req)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1311,6 +1323,14 @@ func (s *Stub) diffManifests(parent, child cas.Digest) (workspace.Diff, error) {
 // is a content address, NOT a secret; workspace CONTENT bytes are never logged.
 // The stub stays StateActive throughout.
 func (s *Stub) HydrateWorkspace(ctx context.Context, req HydrateWorkspaceRequest) (HydrateWorkspaceResult, error) {
+	// Multi-VM mode (#764, default off): restore into the pod's DEFAULT VM, whose
+	// state and VM live on the per-VM instances map (s.state stays StateNew and s.vm
+	// nil under multiVM). Route to the default instance so the op runs against the VM
+	// Activate brought up. Same L1.8 fix class as ForkSnapshot. When multiVM is false
+	// the single-VM body below is unchanged.
+	if s.multiVM {
+		return s.hydrateWorkspaceInstance(ctx, defaultVMID, req)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

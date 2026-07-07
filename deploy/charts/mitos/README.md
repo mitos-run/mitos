@@ -162,6 +162,7 @@ still accept arbitrary keys by design.
 | `forkd.enableNetworking` | `true` | Render `--enable-networking`. |
 | `forkd.priorityClassName` | `system-node-critical` | Keeps forkd from kubelet eviction; set `""` to disable. |
 | `forkd.seccompProfile` | `RuntimeDefault` | forkd seccomp profile; hardened runtimes (Talos) need a jailer-compatible profile, see `values/talos.yaml`. |
+| `forkd.appArmorProfile` | unset | Optional AppArmor profile rendered into forkd's security context. A Localhost profile must be loaded on every eligible node. |
 | `forkd.extraCapabilities` | `[]` | Capabilities ADDED to forkd's fixed builder set (hardened runtimes only). |
 | `forkd.nodeSelector` | `mitos.run/kvm: "true"` | forkd and kernel-stage nodeSelector. |
 | `forkd.tolerations` | `mitos.run/dedicated` NoSchedule | forkd and kernel-stage tolerations. |
