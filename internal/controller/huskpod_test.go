@@ -238,11 +238,32 @@ func TestBuildHuskPodThreadsLiveCowFork(t *testing.T) {
 	if !argsContain(on.Spec.Containers[0].Args, "--live-cow-fork") {
 		t.Errorf("husk args missing --live-cow-fork when enabled: %v", on.Spec.Containers[0].Args)
 	}
+	// The live-cow write-protect fork needs a kernel-mode userfaultfd, which an
+	// unprivileged container can only create with CAP_SYS_PTRACE (issue #832). It is
+	// added ONLY on the live-cow pod so a non-live-cow pool keeps the minimal cap set.
+	if onCaps := on.Spec.Containers[0].SecurityContext.Capabilities.Add; !capsContain(onCaps, "SYS_PTRACE") || !capsContain(onCaps, "NET_ADMIN") {
+		t.Errorf("live-cow husk Capabilities.Add = %+v, want both NET_ADMIN and SYS_PTRACE", onCaps)
+	}
 
 	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img"})
 	if argsContain(off.Spec.Containers[0].Args, "--live-cow-fork") {
 		t.Errorf("husk args must omit --live-cow-fork by default: %v", off.Spec.Containers[0].Args)
 	}
+	// A non-live-cow pod must NOT carry SYS_PTRACE: the capability is scoped to the
+	// pools that actually use the write-protect fork.
+	if offCaps := off.Spec.Containers[0].SecurityContext.Capabilities.Add; capsContain(offCaps, "SYS_PTRACE") {
+		t.Errorf("non-live-cow husk must not add SYS_PTRACE; Capabilities.Add = %+v", offCaps)
+	}
+}
+
+// capsContain reports whether a capability is present in the add list.
+func capsContain(caps []corev1.Capability, want corev1.Capability) bool {
+	for _, c := range caps {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 // argsContain reports whether a standalone flag is present in args.

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -471,6 +472,18 @@ func (h *wpForkHandler) Serve() error {
 // has not seen a write to this page since (bit clear). An epoch that already froze
 // the page (bit set) is skipped, so an earlier fork's frozen bytes are never
 // overwritten by a write that happens after a later fork.
+// dumpRegions renders the registered region layout compactly for diagnostics: the
+// base host virtual address, size, and mem-file offset of every region the WP
+// handshake advertised. It is used only in error context, so it never runs on the
+// hot fault path.
+func dumpRegions(regions []uffdMapping) string {
+	parts := make([]string, 0, len(regions))
+	for i, r := range regions {
+		parts = append(parts, fmt.Sprintf("[%d base=%#x size=%#x off=%#x]", i, r.BaseHostVirtAddr, r.Size, r.Offset))
+	}
+	return strings.Join(parts, " ")
+}
+
 func (h *wpForkHandler) serveFault(addr uint64) error {
 	h.mu.Lock()
 	regions := h.regions
@@ -486,7 +499,7 @@ func (h *wpForkHandler) serveFault(addr uint64) error {
 		return nil
 	}
 	if fileOffset+pageSize > uint64(len(live)) {
-		return fmt.Errorf("wpfork: fault page [%#x,+%#x) past mapped memory", fileOffset, pageSize)
+		return fmt.Errorf("wpfork: fault page [%#x,+%#x) past mapped memory (addr=%#x live=%d regions=%s)", fileOffset, pageSize, addr, len(live), dumpRegions(regions))
 	}
 	pageIdx := fileOffset / pageSize
 	// COPY-BEFORE-UNPROTECT: the writer is blocked on this WP fault, so live[fileOffset]
@@ -496,7 +509,7 @@ func (h *wpForkHandler) serveFault(addr uint64) error {
 	// the parent's new value while a fork-time value is still owed to it.
 	for _, ep := range epochs {
 		if fileOffset+pageSize > uint64(len(ep.frozen)) {
-			return fmt.Errorf("wpfork: fault page [%#x,+%#x) past frozen image", fileOffset, pageSize)
+			return fmt.Errorf("wpfork: fault page [%#x,+%#x) past frozen image (frozen=%d)", fileOffset, pageSize, len(ep.frozen))
 		}
 		if testFrozenBit(ep.frozenBM, pageIdx) {
 			continue // this fork already captured the page's fork-time bytes
