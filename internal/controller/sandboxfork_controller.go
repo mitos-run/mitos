@@ -843,9 +843,22 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 				// status, so a live VM that exists in srcPod but is not yet recorded would
 				// let a concurrent same-source fork read stale occupancy and over-admit.
 				// Writing after each spawn shrinks that window from the whole fan-out to a
-				// single spawn-then-write. The final batched Status().Update below is then
-				// idempotent (Children already carries this child).
-				fork.Status.Children = forks
+				// single spawn-then-write. The persisted set is the full child ledger, not
+				// the prefix processed so far: `forks` only holds slots 0..i, so any
+				// already-recorded HIGHER-index child (carried forward, appended later in
+				// this loop) must be merged in or an early exit would persist a TRUNCATED
+				// ledger and cross-fork occupancy would under-count.
+				persisted := append([]v1.SandboxChild(nil), forks...)
+				inForks := make(map[string]bool, len(forks))
+				for _, f := range forks {
+					inForks[f.Name] = true
+				}
+				for name, rec := range recorded {
+					if !inForks[name] {
+						persisted = append(persisted, rec)
+					}
+				}
+				fork.Status.Children = persisted
 				if err := r.Status().Update(ctx, fork); err != nil {
 					// A conflict means a concurrent writer advanced the fork; returning the
 					// error requeues so the next pass re-reads and recounts occupancy fresh,
