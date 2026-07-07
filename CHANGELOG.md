@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.26.2](https://github.com/mitos-run/mitos/compare/v1.26.1...v1.26.2) (2026-07-07)
+
+
+### Bug Fixes
+
+* **controller:** multi-vm fork co-location reconcile (canary re-get-pod-not-found) ([#809](https://github.com/mitos-run/mitos/issues/809)) ([80e98a1](https://github.com/mitos-run/mitos/commit/80e98a1b38c097910822600860ae84030c3ed1c5))
+
 ## [1.26.1](https://github.com/mitos-run/mitos/compare/v1.26.0...v1.26.1) (2026-07-06)
 
 
