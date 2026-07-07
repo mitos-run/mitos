@@ -192,6 +192,7 @@ func run() error {
 		dnsUpstream     = flag.String("dns-upstream", "", "Comma-separated real DNS resolver list (host:port) the per-pod egress proxy forwards allowlisted queries to, tried in failover order (recommended: 1.1.1.1:53,8.8.8.8:53). Empty disables name-based egress (IP-only allowlist mode).")
 		enableEgress    = flag.Bool("enable-egress-filter", true, "Program the in-pod nftables egress filter (default-deny + metadata block) for the activated VM. Requires NET_ADMIN in the pod netns. Default true (the husk isolation guarantee).")
 		multiVM         = flag.Bool("multi-vm", false, "EXPERIMENTAL, default false: opt into the multi-VM-per-pod execution mode (#764), running many same-tenant CoW forks inside ONE husk pod instead of one pod per VM. Increment 1 wires only a default-off scaffold; false (the default, and the only value the controller emits) keeps the single-VM behavior byte-for-byte. Not a secret.")
+		liveCowFork     = flag.Bool("live-cow-fork", false, "EXPERIMENTAL, default false: opt a CO-LOCATED fork child onto the live copy-on-write path (share the PARENT's resident guest memory via the patched Firecracker memfd + userfaultfd write-protect handler) instead of restoring from the disk fork snapshot (milestone m4b). SEPARATE from --multi-vm so it can be deployed off and canaried independently. Off (the default, and the only value the controller emits unless the operator opts in) keeps the co-located fork on the disk snapshot restore byte-for-byte. No-op off Linux (userfaultfd write-protect is Linux-only), failing closed to the disk restore. Not a secret.")
 	)
 	var envFlag, secretFlag kvFlag
 	flag.Var(&envFlag, "env", "activate client mode: repeatable KEY=VALUE guest env var")
@@ -420,6 +421,11 @@ func run() error {
 		// without colliding on the single fixed socket the single-VM path uses. No
 		// production caller sets this yet; the controller is not wired to it.
 		MultiVM: *multiVM,
+		// LiveCowFork opts the co-located fork child onto the live copy-on-write path
+		// (parent memory share + write-protect handler) instead of the disk snapshot
+		// restore (milestone m4b). Default off; SEPARATE from --multi-vm so it
+		// canaries independently. Off is byte-for-byte the disk co-location.
+		LiveCowFork: *liveCowFork,
 	})
 	// Publish the constructed stub to the already-serving metering source.
 	publishedStub.Store(stub)

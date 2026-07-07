@@ -469,6 +469,16 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 	if req.Activate.ForkSnapshot && req.Activate.SnapshotDir != "" {
 		rootfsSrcOverride = filepath.Join(req.Activate.SnapshotDir, "rootfs.ext4")
 	}
+	if s.liveCowForkApplies(req.Activate) {
+		// Milestone m4b: the parent-side live-cow engine (memfd share + write-protect
+		// handler, internal/fork) is armed and KVM-tested for the inheritance/no-leak
+		// invariant, but the CHILD-side memfd import (booting this child's guest RAM
+		// from the parent's LIVE memory instead of the disk snapshot mem file) needs a
+		// matching Firecracker patch and lands next. Until then a live-cow-enabled pod
+		// still restores the co-located child from the disk fork snapshot (fail-closed):
+		// the flag never breaks a fork, it only opts into the new path where complete.
+		fmt.Fprintf(os.Stderr, "husk: live-cow fork enabled for co-located child vm %q; child memfd-import pending, restoring from disk fork snapshot this pass\n", req.VMID)
+	}
 	if err := s.prepareInstance(ctx, id, rootfsSrcOverride); err != nil {
 		return SpawnVMResult{
 			OK:    false,

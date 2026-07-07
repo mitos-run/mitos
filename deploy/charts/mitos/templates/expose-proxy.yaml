@@ -41,7 +41,7 @@ spec:
             {{- if .Values.expose.oidc.issuer }}
             - --oidc-issuer={{ .Values.expose.oidc.issuer }}
             - --oidc-client-id={{ .Values.expose.oidc.clientID }}
-            {{- $resolveURL := .Values.expose.identityResolve.resolveURL | default (printf "http://mitos-console.%s.svc:80" (include "mitos.namespace" .)) }}
+            {{- $resolveURL := .Values.expose.identityResolve.resolveURL | default (printf "http://mitos-console.%s.svc:8091" (include "mitos.namespace" .)) }}
             - --resolve-url={{ $resolveURL }}
             {{- end }}
           env:

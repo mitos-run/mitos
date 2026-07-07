@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -40,6 +41,38 @@ type Client struct {
 	jailedUID   uint32
 	jailedGID   uint32
 	allocator   *UIDAllocator
+}
+
+// launchEnv returns the process environment for a Firecracker launch: the
+// inherited environment with any extra "KEY=VALUE" entries, where an extra
+// OVERRIDES an inherited variable of the same name. nil extra (every stock
+// launch) returns nil so exec uses the inherited environment unchanged
+// (byte-for-byte the prior behavior); a non-empty extra is the live-cow fork
+// path arming the parent (VMConfig.Env). Appending alone would not override,
+// because exec resolves duplicate names by the FIRST occurrence, so a stray
+// inherited FIRECRACKER_MITOS_* would win; drop colliding inherited keys first.
+func launchEnv(extra []string) []string {
+	if len(extra) == 0 {
+		return nil
+	}
+	override := make(map[string]struct{}, len(extra))
+	for _, kv := range extra {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			override[kv[:i]] = struct{}{}
+		}
+	}
+	inherited := os.Environ()
+	out := make([]string, 0, len(inherited)+len(extra))
+	for _, kv := range inherited {
+		i := strings.IndexByte(kv, '=')
+		if i > 0 {
+			if _, clash := override[kv[:i]]; clash {
+				continue
+			}
+		}
+		out = append(out, kv)
+	}
+	return append(out, extra...)
 }
 
 // StartVM launches a Firecracker process and returns a client connected
@@ -98,6 +131,10 @@ func StartVM(cfg VMConfig) (*Client, error) {
 	cmd.Dir = cfg.WorkDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Append any live-fork env (FIRECRACKER_MITOS_*) on top of the inherited
+	// environment. Empty for every stock launch, so this is a no-op unless the
+	// live-cow fork path armed the parent (VMConfig.Env).
+	cmd.Env = launchEnv(cfg.Env)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start firecracker: %w", err)
@@ -132,6 +169,14 @@ func StartVM(cfg VMConfig) (*Client, error) {
 // per-VM uid/gid, hard-links the configured files into the per-VM
 // chroot, and waits for the API socket at its jailed location.
 func startJailedVM(cfg VMConfig) (*Client, error) {
+	// The Firecracker jailer scrubs its environment (clean_env_vars) before it
+	// exec's the jailed VMM, so per-launch env cannot reach it on this path. The
+	// live-cow fork therefore runs only on the direct-exec husk path (which sets no
+	// JailerConfig). Fail closed BEFORE allocating any jail resources rather than
+	// silently booting a stock VMM a caller believes is armed.
+	if len(cfg.Env) > 0 {
+		return nil, fmt.Errorf("firecracker: per-launch env (%d vars) is unsupported on the jailed path; the jailer scrubs its environment, so the live-cow fork is direct-exec only", len(cfg.Env))
+	}
 	if cfg.ID == "" {
 		return nil, fmt.Errorf("jailer launch requires a VM id (jailer --id)")
 	}
@@ -206,6 +251,9 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 	cmd := exec.Command(cfg.Jailer.JailerBin, jArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	// Jailed launches carry no per-launch env (guarded at entry: the jailer scrubs
+	// its environment). nil keeps the inherited-env behavior byte-for-byte.
+	cmd.Env = launchEnv(cfg.Env)
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start jailer: %w", err)

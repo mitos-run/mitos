@@ -4,7 +4,47 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
+
+// TestSessionStoreResolveRejectsExpired asserts that with an absolute max-age
+// configured, a session older than the max-age no longer resolves, so a leaked
+// session token cannot stay valid forever (issue #733, item 2). A session inside
+// the window still resolves.
+func TestSessionStoreResolveRejectsExpired(t *testing.T) {
+	base := time.Unix(1_000_000, 0)
+	now := base
+	s := NewSessionStore(WithSessionMaxAge(24*time.Hour), withSessionClock(func() time.Time { return now }))
+	s.IssueSession("acct-1", "tok", "browser")
+
+	// Inside the window: resolves.
+	now = base.Add(23 * time.Hour)
+	if id, err := s.Resolve("tok"); err != nil || id != "acct-1" {
+		t.Fatalf("in-window Resolve = (%q, %v), want (acct-1, nil)", id, err)
+	}
+
+	// Past the window: rejected as invalid.
+	now = base.Add(25 * time.Hour)
+	if _, err := s.Resolve("tok"); !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("expired Resolve err = %v, want ErrSessionInvalid", err)
+	}
+}
+
+// TestSessionStoreDefaultMaxAgeEnforced asserts the default constructor enforces
+// an absolute max-age (self-host gets expiry without extra wiring).
+func TestSessionStoreDefaultMaxAgeEnforced(t *testing.T) {
+	if DefaultSessionMaxAge <= 0 {
+		t.Fatalf("DefaultSessionMaxAge = %v, want a positive absolute ceiling", DefaultSessionMaxAge)
+	}
+	base := time.Unix(2_000_000, 0)
+	now := base
+	s := NewSessionStore(withSessionClock(func() time.Time { return now }))
+	s.IssueSession("acct-1", "tok", "browser")
+	now = base.Add(DefaultSessionMaxAge + time.Hour)
+	if _, err := s.Resolve("tok"); !errors.Is(err, ErrSessionInvalid) {
+		t.Fatalf("past-default Resolve err = %v, want ErrSessionInvalid", err)
+	}
+}
 
 // TestSessionResolvesToAccountAndOrgs asserts an issued session token resolves to
 // its account and that account's orgs.
