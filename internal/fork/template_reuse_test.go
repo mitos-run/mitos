@@ -28,20 +28,19 @@ func makeTemplateArtifactsCompliant(t *testing.T, dataDir, id string) {
 }
 
 // TestCheckTemplateArtifactInvariantsRejectsUnnormalized runs everywhere
-// (non-root CI included): a freshly written fixture is owned by the test
-// process's own group at mode 0o644, i.e. it was NEVER normalized to the shared
-// kvm group. The invariant gate must refuse it (the group does not match
-// SharedKVMGID) and name the offending path, proving the reuse gate is active
-// without needing root to construct a foreign-group fixture.
+// (non-root CI included): a freshly written fixture is mode 0o644, i.e. it was
+// NEVER normalized to the group-readable 0o640 contract. The invariant gate
+// must refuse it and name the offending path, proving the reuse gate is active
+// without needing root to construct a foreign-group fixture. The fixture is
+// owned by the test process's own gid, which the gate accepts for a non-root
+// builder (a root builder tags the shared kvm gid instead), so the mode is the
+// difference the gate catches here.
 func TestCheckTemplateArtifactInvariantsRejectsUnnormalized(t *testing.T) {
-	if os.Getegid() == firecracker.SharedKVMGID {
-		t.Skip("test process already runs in the shared kvm group; cannot assert rejection")
-	}
 	id := "py"
 	dataDir := writeFakeTemplate(t, id)
 	// The gate checks artifacts in a stable sorted order (mem, rootfs, vmstate),
 	// so it names the first non-compliant one; assert it names an artifact under
-	// this template's dir and cites the group mismatch.
+	// this template's dir and cites the group-readable mode mismatch.
 	templatePath := filepath.Join(dataDir, "templates", id)
 
 	err := checkTemplateArtifactInvariants(dataDir, id)
@@ -51,8 +50,8 @@ func TestCheckTemplateArtifactInvariantsRejectsUnnormalized(t *testing.T) {
 	if !strings.Contains(err.Error(), templatePath) {
 		t.Fatalf("error %q does not name an artifact under %q", err.Error(), templatePath)
 	}
-	if !strings.Contains(err.Error(), "group-owned") {
-		t.Fatalf("error %q should cite the group ownership mismatch", err.Error())
+	if !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("error %q should cite the group-readable mode mismatch", err.Error())
 	}
 }
 

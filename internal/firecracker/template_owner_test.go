@@ -1,7 +1,7 @@
 package firecracker
 
 import (
-	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -155,14 +155,19 @@ func TestNormalizeTemplateArtifactsRestorableByNonRootGroupMember(t *testing.T) 
 	// t.TempDir() and its parents must be traversable by the group member, or
 	// the group read is refused before it reaches the artifact. Widen the search
 	// path to o+x (no read), which does not affect the artifacts' own 0o640.
+	// These ancestors can sit outside t.TempDir() (up to /tmp), so capture and
+	// restore each original mode instead of leaking the widened bit.
 	for d := root; d != "/" && d != "."; d = filepath.Dir(d) {
 		info, statErr := os.Stat(d)
 		if statErr != nil {
 			break
 		}
-		if err := os.Chmod(d, info.Mode().Perm()|0o001); err != nil {
-			t.Fatalf("widen traverse on %s: %v", d, err)
+		orig := info.Mode().Perm()
+		dir := d
+		if err := os.Chmod(dir, orig|0o001); err != nil {
+			t.Fatalf("widen traverse on %s: %v", dir, err)
 		}
+		t.Cleanup(func() { _ = os.Chmod(dir, orig) })
 	}
 
 	const nobodyUID = 65534
@@ -176,7 +181,7 @@ func TestNormalizeTemplateArtifactsRestorableByNonRootGroupMember(t *testing.T) 
 				Credential: &syscall.Credential{Uid: uid, Gid: gid, Groups: groups},
 			}
 			if out, runErr := cmd.CombinedOutput(); runErr != nil {
-				return errors.New(f + ": " + string(out) + runErr.Error())
+				return fmt.Errorf("%s: %s: %w", f, out, runErr)
 			}
 		}
 		return nil
@@ -193,6 +198,88 @@ func TestNormalizeTemplateArtifactsRestorableByNonRootGroupMember(t *testing.T) 
 	const otherGID = 65533
 	if err := readAs(nobodyUID, otherGID, []uint32{otherGID}); err == nil {
 		t.Fatal("a non-root process outside the shared kvm group must NOT be able to read the 0o640 template artifacts")
+	}
+}
+
+// TestNormalizeTemplateArtifactsFallsBackForNonRootBuilder proves the non-root
+// builder path (standalone sandbox-server, self-host): a builder that cannot
+// chgrp the artifacts to the shared kvm gid must still succeed, handing them to
+// its OWN uid and gid with the group-readable contract, because it restores as
+// the same uid it built. This runs in the ordinary non-root test environment
+// and regresses the tmpl-smoke failure where normalize aborted with EPERM
+// chgrping to the shared kvm gid.
+func TestNormalizeTemplateArtifactsFallsBackForNonRootBuilder(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("this exercises the non-root fallback; as root the chgrp to the shared kvm gid succeeds")
+	}
+	root := t.TempDir()
+	snapDir := filepath.Join(root, "snapshot")
+	if err := os.MkdirAll(snapDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := []string{
+		filepath.Join(root, "rootfs.ext4"),
+		filepath.Join(snapDir, "mem"),
+		filepath.Join(snapDir, "vmstate"),
+	}
+	for _, f := range files {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := normalizeTemplateArtifacts(root); err != nil {
+		t.Fatalf("normalizeTemplateArtifacts must succeed for a non-root builder, got: %v", err)
+	}
+
+	wantUID, wantGID := os.Geteuid(), os.Getegid()
+	for _, f := range files {
+		st := statT(t, f)
+		if int(st.Uid) != wantUID || int(st.Gid) != wantGID {
+			t.Errorf("%s owned %d:%d, want %d:%d (the builder's own uid:gid)", f, st.Uid, st.Gid, wantUID, wantGID)
+		}
+		if got := os.FileMode(st.Mode).Perm(); got != 0o640 {
+			t.Errorf("%s mode = %o, want 0640", f, got)
+		}
+	}
+	for _, d := range []string{root, snapDir} {
+		st := statT(t, d)
+		if got := os.FileMode(st.Mode).Perm(); got != 0o750 {
+			t.Errorf("%s mode = %o, want 0750", d, got)
+		}
+	}
+}
+
+// TestNormalizeTemplateArtifactsSkipsSymlinks proves normalize never follows a
+// symlink in the build tree. os.Chown and os.Chmod dereference symlinks, so a
+// link planted in the build output could redirect a privileged ownership or
+// mode change onto a target outside the template directory; normalize must
+// leave that target untouched (addresses the CodeRabbit traversal finding).
+func TestNormalizeTemplateArtifactsSkipsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "rootfs.ext4"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A target OUTSIDE the template tree, and a symlink to it planted inside.
+	outside := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(outside, []byte("y"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := statT(t, outside)
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := normalizeTemplateArtifacts(root); err != nil {
+		t.Fatalf("normalizeTemplateArtifacts: %v", err)
+	}
+
+	after := statT(t, outside)
+	if before.Uid != after.Uid || before.Gid != after.Gid ||
+		os.FileMode(before.Mode).Perm() != os.FileMode(after.Mode).Perm() {
+		t.Errorf("symlink target changed %d:%d %o -> %d:%d %o; normalize followed a symlink out of the template tree",
+			before.Uid, before.Gid, os.FileMode(before.Mode).Perm(),
+			after.Uid, after.Gid, os.FileMode(after.Mode).Perm())
 	}
 }
 

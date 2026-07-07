@@ -62,8 +62,15 @@ func checkTemplateArtifactInvariants(dataDir, id string) error {
 		if gotUID := int(st.Uid); gotUID != wantUID {
 			return fmt.Errorf("template %s artifact %s is owned by uid %d, expected uid %d (this process's euid); the jailed build likely flipped ownership (issues #583, #597), so the template is unusable until rebuilt or its ownership is fixed", id, path, gotUID, wantUID)
 		}
-		if gotGID := int(st.Gid); gotGID != firecracker.SharedKVMGID {
-			return fmt.Errorf("template %s artifact %s is group-owned by gid %d, expected gid %d (the shared kvm group a husk reads the template through, issues #585, #597); the template is unusable until rebuilt or its group is fixed", id, path, gotGID, firecracker.SharedKVMGID)
+		// A root builder tags artifacts with the shared kvm gid so a separate
+		// husk uid reads them through the group class. A non-root builder
+		// (standalone sandbox-server, self-host) cannot chgrp to that group and
+		// does not need to: it restores as the same uid that built, so its own
+		// gid is correct. Accept either, mirroring normalizeTemplateArtifacts'
+		// fallback, so a non-root deployment reuses its templates instead of
+		// rebuilding every one.
+		if gotGID := int(st.Gid); gotGID != firecracker.SharedKVMGID && gotGID != os.Getegid() {
+			return fmt.Errorf("template %s artifact %s is group-owned by gid %d, expected gid %d (the shared kvm group a husk reads the template through, issues #585, #597) or this process's gid %d; the template is unusable until rebuilt or its group is fixed", id, path, gotGID, firecracker.SharedKVMGID, os.Getegid())
 		}
 		if mode := info.Mode().Perm(); mode != 0o640 {
 			return fmt.Errorf("template %s artifact %s has mode %#o, expected mode 0o640 (group-readable, not world-writable); the template is unusable until rebuilt or its mode is fixed", id, path, mode)

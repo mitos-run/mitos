@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -579,16 +580,46 @@ func (tm *TemplateManager) CreateTemplate(id string, cfg VMConfig, initCommands 
 // engine never calls it.
 func normalizeTemplateArtifacts(root string) error {
 	uid := os.Geteuid()
+	// The group is the shared kvm gid so a future non-root husk (issue #585)
+	// carrying it as a supplemental group reads the template through the group
+	// class. Only a builder able to chgrp to a group it does not belong to (a
+	// root forkd) can set it. A non-root builder (standalone sandbox-server,
+	// self-host) both builds and restores the template as the SAME uid, so it
+	// needs no shared-group contract and cannot set it. Attempt the shared gid
+	// and fall back to the builder's own gid on the first permission error; the
+	// reuse invariant (internal/fork.checkTemplateArtifactInvariants) accepts
+	// either group so the two stay in lockstep.
+	gid := SharedKVMGID
+	fellBack := false
 	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		// Never follow symlinks: os.Chown and os.Chmod dereference them, so a
+		// symlink planted in the build output could redirect this ownership or
+		// mode change onto a target outside the template tree. Template
+		// artifacts are regular files and directories; skip anything else, and
+		// use Lchown so the link inode itself is retargeted, never its target.
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
 		}
 		mode := os.FileMode(0o640)
 		if d.IsDir() {
 			mode = 0o750
 		}
-		if err := os.Chown(path, uid, SharedKVMGID); err != nil {
-			return fmt.Errorf("chown %s: %w", path, err)
+		if err := os.Lchown(path, uid, gid); err != nil {
+			if !fellBack && errors.Is(err, os.ErrPermission) {
+				// Not privileged enough to hand the artifacts to the shared kvm
+				// group: the non-root builder path. Keep the builder's own gid,
+				// which it can always set, for this and every remaining entry.
+				gid = os.Getegid()
+				fellBack = true
+				if err := os.Lchown(path, uid, gid); err != nil {
+					return fmt.Errorf("chown %s: %w", path, err)
+				}
+			} else {
+				return fmt.Errorf("chown %s: %w", path, err)
+			}
 		}
 		if err := os.Chmod(path, mode); err != nil {
 			return fmt.Errorf("chmod %s: %w", path, err)
