@@ -2,7 +2,6 @@ package fork
 
 import (
 	"fmt"
-	"math"
 	"strconv"
 	"strings"
 )
@@ -124,39 +123,40 @@ func ParseChildMemfdImport(s string) (ChildMemfdImport, error) {
 		}
 		v[i] = u
 	}
-	// The pid/fd fields land in int; bound-check on a local scalar before the
-	// narrowing conversion so a value above the int range cannot wrap to a negative
-	// pid/fd. Bounding to MaxInt32 keeps the conversion safe on every platform
-	// (int is at least 32 bits) and a real pid or fd is far below it, so a larger
-	// value is malformed input, rejected. Operating on the passed value (not an
-	// array index) keeps the guard and the conversion on the same variable.
-	pidFD := func(u uint64) (int, error) {
-		if u > math.MaxInt32 {
-			return 0, fmt.Errorf("parse child memfd import %q: field value %d exceeds int range", s, u)
+	// The pid/fd fields land in int. Re-parse them from the original field string
+	// with bitSize 31 so the result is bounded to [0, 2^31-1] AT PARSE TIME: that
+	// fits int on every platform (int is at least 32 bits) and, unlike a bound
+	// check on an already-widened uint64, lets the static integer-conversion
+	// analyzer track the bound straight through to the int() conversion. A real pid
+	// or fd is far below 2^31; a larger value is malformed input, rejected here.
+	pidFD := func(idx int) (int, error) {
+		u, err := strconv.ParseUint(fields[idx], 10, 31)
+		if err != nil {
+			return 0, fmt.Errorf("parse child memfd import %q: pid/fd field %d (%q): %w", s, idx, fields[idx], err)
 		}
 		return int(u), nil
 	}
-	parentPID, err := pidFD(v[0])
+	parentPID, err := pidFD(0)
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
-	parentFD, err := pidFD(v[1])
+	parentFD, err := pidFD(1)
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
-	frozenPID, err := pidFD(v[5])
+	frozenPID, err := pidFD(5)
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
-	frozenFD, err := pidFD(v[6])
+	frozenFD, err := pidFD(6)
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
-	bitmapPID, err := pidFD(v[9])
+	bitmapPID, err := pidFD(9)
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
-	bitmapFD, err := pidFD(v[10])
+	bitmapFD, err := pidFD(10)
 	if err != nil {
 		return ChildMemfdImport{}, err
 	}
