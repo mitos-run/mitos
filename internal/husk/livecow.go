@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"mitos.run/mitos/internal/fork"
 )
@@ -107,6 +108,39 @@ func (s *Stub) liveCowChildImportEnv(req ActivateRequest) ([]string, error) {
 // path enabled (--live-cow-fork). Exported for the controller-driven status and
 // for tests.
 func (s *Stub) LiveCowForkEnabled() bool { return s.liveCowFork }
+
+// liveCowForkFreezer is the subset of the armed parent-side live-cow WP handle
+// (fork.WPForkHandle) that forkSnapshotInstance needs at the fork point: FREEZE
+// the source guest region (UFFD write-protect the whole live mapping, ~9us) so a
+// RESUMED source cannot leak a post-fork write forward into a co-located child (the
+// m2 no-leak invariant, docs/fork-correctness.md). The real armed handle satisfies
+// BOTH this and fork.ChildImportProvider; a nil or non-freezing parent keeps the
+// Full-snapshot (disk mem) fallback.
+type liveCowForkFreezer interface {
+	Freeze() (time.Duration, error)
+}
+
+// liveCowSnapshotFreezer returns the armed parent handle as a freezer when the
+// live-cow fork path is on AND a parent that can freeze is armed; nil otherwise
+// (the Full CreateSnapshot fallback). The freeze at the fork point is what lets
+// forkSnapshotInstance capture ONLY the vmstate and SKIP the ~364ms mem-file copy
+// (issue #832): the source RAM stays in the shared memfd the child imports (m5),
+// and the freeze keeps a resumed source from mutating it out from under the child.
+// Read under s.mu because SetLiveCowParent may arm the parent from a sibling VM's
+// path concurrently.
+func (s *Stub) liveCowSnapshotFreezer() liveCowForkFreezer {
+	if !s.liveCowFork {
+		return nil
+	}
+	s.mu.Lock()
+	parent := s.liveCowParent
+	s.mu.Unlock()
+	fr, ok := parent.(liveCowForkFreezer)
+	if !ok {
+		return nil
+	}
+	return fr
+}
 
 // liveCowForkApplies reports whether a spawn is a co-located fork child that the
 // live-cow path would accelerate: the flag is on AND the activate is a fork
