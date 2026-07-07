@@ -48,7 +48,8 @@ fi
 bin="$(mktemp)"
 trap 'rm -f "$bin"' EXIT
 
-curl -fsSL -o "$bin" "$PATCHED_FC_URL"
+curl -fsSL --connect-timeout 30 --max-time 300 --retry 3 --retry-connrefused \
+    -o "$bin" "$PATCHED_FC_URL"
 # Verify the download against the pinned digest BEFORE installing anything.
 echo "${PATCHED_FC_SHA256}  ${bin}" | sha256sum -c -
 

@@ -12,12 +12,17 @@
 # the jailer stays stock (live-fork is runtime-gated; see install-firecracker-patched.sh).
 set -euo pipefail
 
-# Pinned Mitos-patched firecracker sha256 (mitos-run/firecracker
-# mitos-fc-uffd-wp-v1.15.0). Keep in lockstep with hack/install-firecracker-patched.sh.
-PATCHED_FC_SHA256="0209700d794acb7b77a919c0aa50506b2186642d80e5c0d13220ee51003b823b"
-
 root="$(cd "$(dirname "$0")/.." && pwd)"
 img="mitos-fc-install-smoke:test"
+
+# Single source of truth for the pinned Mitos-patched firecracker sha256: read it
+# straight out of hack/install-firecracker-patched.sh so a version bump only has to
+# touch that one file and this test cannot drift from what the images actually install.
+PATCHED_FC_SHA256="$(grep -oE 'PATCHED_FC_SHA256="[0-9a-f]{64}"' "$root/hack/install-firecracker-patched.sh" | grep -oE '[0-9a-f]{64}')"
+if [ -z "$PATCHED_FC_SHA256" ]; then
+  echo "could not read PATCHED_FC_SHA256 from hack/install-firecracker-patched.sh" >&2
+  exit 1
+fi
 
 # Build/run for linux/amd64: the Mitos-patched firecracker is x86_64-only (as are
 # the forkd/husk-stub images, whose rust agent targets x86_64-unknown-linux-musl),
