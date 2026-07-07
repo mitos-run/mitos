@@ -14,9 +14,9 @@ import (
 // check flag, so the parse test can run each emitted script under its real
 // shell when that shell is installed.
 var shells = []struct {
-	name    string
-	binary  string
-	parseer func(path string) *exec.Cmd
+	name   string
+	binary string
+	parser func(path string) *exec.Cmd
 }{
 	{"bash", "bash", func(p string) *exec.Cmd { return exec.Command("bash", "-n", p) }},
 	{"zsh", "zsh", func(p string) *exec.Cmd { return exec.Command("zsh", "-n", p) }},
@@ -59,6 +59,33 @@ func TestCompletionCoversCommandTree(t *testing.T) {
 		for _, tok := range tokens {
 			if !strings.Contains(script, tok) {
 				t.Errorf("%s script missing token %q", sh, tok)
+			}
+		}
+	}
+}
+
+// TestCompletionCoversFlags guards the global flag set: every long and short
+// flag in completionTree must appear in each emitted script. fish registers
+// short flags with -s (the bare char), so assert the bare token for those.
+func TestCompletionCoversFlags(t *testing.T) {
+	for _, sh := range []string{"bash", "zsh", "fish"} {
+		var out bytes.Buffer
+		if code := cmdCompletion([]string{sh}, &out, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("%s: exit %d", sh, code)
+		}
+		script := out.String()
+		// bash and zsh keep the leading dashes (--pool, -A); fish registers the
+		// bare name with -l (long) or -s (short). Accept either form.
+		for _, f := range completionTree.flags {
+			bare := strings.TrimLeft(f, "-")
+			if !strings.Contains(script, f) && !strings.Contains(script, "-l "+bare) {
+				t.Errorf("%s script missing long flag %q", sh, f)
+			}
+		}
+		for _, f := range completionTree.shortFlags {
+			bare := strings.TrimLeft(f, "-")
+			if !strings.Contains(script, f) && !strings.Contains(script, "-s "+bare) {
+				t.Errorf("%s script missing short flag %q", sh, f)
 			}
 		}
 	}
@@ -122,7 +149,7 @@ func TestCompletionScriptsParse(t *testing.T) {
 			if err := os.WriteFile(path, out.Bytes(), 0o644); err != nil {
 				t.Fatalf("write script: %v", err)
 			}
-			if combined, err := sh.parseer(path).CombinedOutput(); err != nil {
+			if combined, err := sh.parser(path).CombinedOutput(); err != nil {
 				t.Fatalf("%s failed to parse the emitted script: %v\n%s", sh.binary, err, combined)
 			}
 		})

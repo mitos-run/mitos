@@ -128,14 +128,17 @@ command tree without contacting a cluster, so they work offline and never block
 your shell.
 
 ```bash
-# bash: current shell now, or persist for new shells
+# current shell now, or persist for new shells
 source <(mitos completion bash)
 mitos completion bash | sudo tee /etc/bash_completion.d/mitos > /dev/null
+```
 
-# zsh: ensure `autoload -U compinit && compinit` runs in ~/.zshrc first
+```zsh
+# ensure `autoload -U compinit && compinit` runs in ~/.zshrc first
 mitos completion zsh > "${fpath[1]}/_mitos"
+```
 
-# fish
+```fish
 mitos completion fish > ~/.config/fish/completions/mitos.fish
 ```
 

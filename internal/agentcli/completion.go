@@ -15,8 +15,13 @@ type completionCommand struct {
 	top []string
 	// subs maps a verb to its second-position subcommands.
 	subs map[string][]string
-	// flags is the set of global flags offered once a verb is chosen.
+	// flags is the set of long global flags offered once a verb is chosen.
 	flags []string
+	// shortFlags is the set of single-dash global flags. They are kept apart
+	// from flags so fish can register them with -s (a short option) rather than
+	// -l (a long option), and so the other shells can still fold them into one
+	// completion word list.
+	shortFlags []string
 }
 
 // completionTree enumerates every verb the CLI dispatches. When a verb or a
@@ -39,10 +44,14 @@ var completionTree = completionCommand{
 	// Global flags a user can append after any verb. Kept flat and static: the
 	// hand-rolled parser accepts these before or after the subcommand, so
 	// offering them broadly is honest without over-promising per-verb specifics.
+	// --replicas is the documented alias of --count (fork).
 	flags: []string{
-		"--pool", "--timeout", "--namespace", "--count",
+		"--pool", "--timeout", "--namespace", "--count", "--replicas",
 		"--api-key", "--server", "--help",
 	},
+	// Short flags documented in cli.go usage: -n (namespace), -A (all
+	// namespaces), -h (help).
+	shortFlags: []string{"-n", "-A", "-h"},
 }
 
 // completionUsage is printed when `mitos completion` is called without a valid
@@ -103,9 +112,15 @@ func subCases(renderCase func(verb string, subs []string) string) string {
 	return b.String()
 }
 
+// allFlags returns the long and short global flags as one space-joined word
+// list, for the shells (bash, zsh) that complete both from a single set.
+func allFlags() string {
+	return strings.Join(append(append([]string{}, completionTree.flags...), completionTree.shortFlags...), " ")
+}
+
 func bashCompletion() string {
 	top := strings.Join(completionTree.top, " ")
-	flags := strings.Join(completionTree.flags, " ")
+	flags := allFlags()
 	cases := subCases(func(verb string, subs []string) string {
 		return fmt.Sprintf("        %s) opts=%q ;;\n", verb, strings.Join(subs, " "))
 	})
@@ -140,7 +155,7 @@ complete -F _mitos mitos
 
 func zshCompletion() string {
 	top := strings.Join(completionTree.top, " ")
-	flags := strings.Join(completionTree.flags, " ")
+	flags := allFlags()
 	cases := subCases(func(verb string, subs []string) string {
 		return fmt.Sprintf("        %s) _values 'subcommand' %s ;;\n", verb, strings.Join(subs, " "))
 	})
@@ -173,10 +188,14 @@ func fishCompletion() string {
 		}
 		b.WriteString(fmt.Sprintf("complete -c mitos -n '__fish_seen_subcommand_from %s' -a '%s'\n", verb, strings.Join(subs, " ")))
 	}
-	// Global flags, offered everywhere. Strip the leading -- so fish -l takes the
-	// bare long-option name.
+	// Global flags, offered everywhere. Long flags register with -l (the bare
+	// long-option name); single-dash flags register with -s (the bare short
+	// character), so fish does not turn -A into a spurious --A.
 	for _, f := range completionTree.flags {
 		b.WriteString(fmt.Sprintf("complete -c mitos -l %s\n", strings.TrimLeft(f, "-")))
+	}
+	for _, f := range completionTree.shortFlags {
+		b.WriteString(fmt.Sprintf("complete -c mitos -s %s\n", strings.TrimLeft(f, "-")))
 	}
 	return b.String()
 }
