@@ -103,9 +103,10 @@ spec:
           # /dev/kvm, /dev/net/tun, and /dev/vhost-vsock come from the device plugin (mitos.run/kvm),
           # not a privileged hostPath. allowPrivilegeEscalation: false and the
           # seccomp profile complete the hardening. The base capability set and
-          # privileged: false are fixed; forkd.seccompProfile and
-          # forkd.extraCapabilities are the only securityContext knobs, for
-          # hardened runtimes (Talos), and default to the CI-proven values. See
+          # privileged: false are fixed; forkd.seccompProfile,
+          # forkd.appArmorProfile, and forkd.extraCapabilities are the only
+          # securityContext knobs. Seccomp and AppArmor profiles can be configured,
+          # while capabilities can only be added to the base set. See
           # docs/threat-model.md, docs/platforms/hardened-runtimes.md, and
           # cmd/forkd/jailer.go forkdRequiredCapabilities (#525).
           securityContext:
@@ -127,6 +128,10 @@ spec:
                 {{- end }}
             seccompProfile:
               {{- toYaml .Values.forkd.seccompProfile | nindent 14 }}
+            {{- with .Values.forkd.appArmorProfile }}
+            appArmorProfile:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
           resources:
             {{- toYaml .Values.forkd.resources | nindent 12 }}
           volumeMounts:

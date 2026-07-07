@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,12 +18,26 @@ import (
 // sha256 hash of the session token (matching internal/saas/session.go), never
 // the raw token.
 type PgSessionStore struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	maxAge time.Duration // absolute session lifetime; 0 disables expiry
+}
+
+// PgSessionStoreOption configures a PgSessionStore at construction.
+type PgSessionStoreOption func(*PgSessionStore)
+
+// WithPgSessionMaxAge sets the absolute session lifetime enforced at Resolve. A
+// non-positive value disables expiry (issue #733, item 2).
+func WithPgSessionMaxAge(d time.Duration) PgSessionStoreOption {
+	return func(s *PgSessionStore) { s.maxAge = d }
 }
 
 // NewPgSessionStore constructs a PgSessionStore backed by the given pool.
-func NewPgSessionStore(pool *pgxpool.Pool) *PgSessionStore {
-	return &PgSessionStore{pool: pool}
+func NewPgSessionStore(pool *pgxpool.Pool, opts ...PgSessionStoreOption) *PgSessionStore {
+	s := &PgSessionStore{pool: pool}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // compile-time assertion that PgSessionStore satisfies saas.Sessions.
@@ -59,10 +74,23 @@ func (s *PgSessionStore) Issue(accountID, token string) {
 }
 
 // Resolve returns the account id for a session token, or saas.ErrSessionInvalid.
+// When an absolute max-age is configured, a session older than it is treated as
+// invalid (issue #733, item 2): the age filter is applied in the query so an
+// expired session is indistinguishable from an unknown one.
 func (s *PgSessionStore) Resolve(token string) (string, error) {
-	const q = `SELECT account_id FROM sessions WHERE token_hash = $1`
+	var (
+		q    string
+		args []any
+	)
+	if s.maxAge > 0 {
+		q = `SELECT account_id FROM sessions WHERE token_hash = $1 AND created_at > now() - make_interval(secs => $2)`
+		args = []any{hashSessionToken(token), s.maxAge.Seconds()}
+	} else {
+		q = `SELECT account_id FROM sessions WHERE token_hash = $1`
+		args = []any{hashSessionToken(token)}
+	}
 	var acct string
-	err := s.pool.QueryRow(context.Background(), q, hashSessionToken(token)).Scan(&acct)
+	err := s.pool.QueryRow(context.Background(), q, args...).Scan(&acct)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", saas.ErrSessionInvalid
 	}

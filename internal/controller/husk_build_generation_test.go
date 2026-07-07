@@ -159,3 +159,52 @@ func TestHuskPodHasStaleDigestFallsBackToSpecNodeName(t *testing.T) {
 		t.Error("pod with no node information must not be reaped")
 	}
 }
+
+// TestBuildHuskPodMultiVMArgAndLabel proves the L1.7d capability wiring: with
+// HuskPodOptions.MultiVM the built husk pod runs the stub with --multi-vm and
+// carries the mitos.run/multi-vm label huskPodMultiVMCapable reads, and without
+// it neither is present (single-VM default, unchanged).
+func TestBuildHuskPodMultiVMArgAndLabel(t *testing.T) {
+	r := &SandboxPoolReconciler{}
+	pool := genTestPool("mvm-cap", 1)
+
+	on := r.buildHuskPod(pool, pool.Spec.Template, HuskPodOptions{MultiVM: true})
+	if on.Labels[huskMultiVMLabel] != huskMultiVMLabelValue {
+		t.Errorf("MultiVM pod missing %s label, got %v", huskMultiVMLabel, on.Labels)
+	}
+	if !huskPodMultiVMCapable(on) {
+		t.Error("MultiVM pod must be huskPodMultiVMCapable")
+	}
+	if !hasArg(on, "--multi-vm") {
+		t.Errorf("MultiVM pod stub args must include --multi-vm, got %v", huskStubArgs(on))
+	}
+
+	off := r.buildHuskPod(pool, pool.Spec.Template, HuskPodOptions{})
+	if _, ok := off.Labels[huskMultiVMLabel]; ok {
+		t.Error("single-VM pod must not carry the multi-vm label")
+	}
+	if huskPodMultiVMCapable(off) {
+		t.Error("single-VM pod must not be huskPodMultiVMCapable")
+	}
+	if hasArg(off, "--multi-vm") {
+		t.Error("single-VM pod stub args must not include --multi-vm")
+	}
+}
+
+func huskStubArgs(pod *corev1.Pod) []string {
+	for _, c := range pod.Spec.Containers {
+		if c.Name == huskContainerName {
+			return c.Args
+		}
+	}
+	return nil
+}
+
+func hasArg(pod *corev1.Pod, arg string) bool {
+	for _, a := range huskStubArgs(pod) {
+		if a == arg {
+			return true
+		}
+	}
+	return false
+}

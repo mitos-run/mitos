@@ -54,3 +54,28 @@ func TestServingArgsAreAllDefined(t *testing.T) {
 		t.Fatalf("husk-stub rejected a controller-emitted serving flag (the husk fork regression):\n%s", out)
 	}
 }
+
+// TestMultiVMFlagIsRecognized proves the experimental --multi-vm flag (#764) is
+// defined so passing it does not fail flag parsing. It is default-off scaffold
+// for the multi-VM-per-pod density work; the controller does NOT emit it in
+// increment 1 (which is why it is not in the controller-args regression above),
+// so this is a standalone recognition guard. The binary still fails later for an
+// unrelated reason (no firecracker), which is fine: only that the flag parses
+// matters here.
+func TestMultiVMFlagIsRecognized(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "husk-stub")
+	build := exec.Command("go", "build", "-o", bin, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build husk-stub: %v\n%s", err, out)
+	}
+
+	dir := t.TempDir()
+	out, _ := exec.Command(bin,
+		"--workdir", filepath.Join(dir, "vm"),
+		"--control-socket", filepath.Join(dir, "control.sock"),
+		"--multi-vm=false",
+	).CombinedOutput()
+	if strings.Contains(string(out), "flag provided but not defined") {
+		t.Fatalf("husk-stub rejected --multi-vm (the multi-VM scaffold flag):\n%s", out)
+	}
+}

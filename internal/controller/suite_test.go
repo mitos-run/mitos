@@ -16,6 +16,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
@@ -115,7 +116,14 @@ func (r *bufferingRecorder) snapshot() []string {
 // between (issue #630).
 func updateSandboxStatusWithRetry(t *testing.T, name, namespace string, mutate func(*v1.Sandbox)) {
 	t.Helper()
-	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	// retry.DefaultRetry is only ~5 short steps; a source claim whose reconciler
+	// churns the object continuously (it re-reconciles while pending) can conflict
+	// on every one of them, flaking the status write. A ~3s budget was measured to
+	// still flake (the churn outlasts it), so retry for about 6.7s worst case
+	// (20 steps, 40ms base, 1.3x, capped at 500ms), long enough to always catch a
+	// gap in the reconcile loop while still bounding a genuinely wedged write.
+	backoff := wait.Backoff{Steps: 20, Duration: 40 * time.Millisecond, Factor: 1.3, Cap: 500 * time.Millisecond}
+	if err := retry.RetryOnConflict(backoff, func() error {
 		var sb v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sb); err != nil {
 			return err
@@ -176,6 +184,10 @@ var (
 	forkSnapshotter     func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ForkSnapshotRequest) (husk.ForkSnapshotResult, error)
 	forkActivator       func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)
 	forkSnapshotRemover func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error)
+	forkVMSpawner       func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error)
+	// forkMultiVMEnabled is the race-safe MultiVMFork toggle the suite's shared husk
+	// reconciler reads through its gate; a MultiVMFork test flips it per-case.
+	forkMultiVMEnabled bool
 
 	// wsTransferMu guards the swappable workspace hydrate/dehydrate fakes the
 	// suite's raw claim reconciler drives. Tests set them via setWSTransfer.
@@ -443,6 +455,40 @@ func currentForkSnapshotRemover() func(ctx context.Context, addr string, tlsConf
 	return forkSnapshotRemover
 }
 
+// setForkVMSpawner / currentForkVMSpawner swap the spawn-vm seam the suite's husk
+// reconciler dials through when the MultiVMFork routing spawns a child in the source
+// pod.
+func setForkVMSpawner(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error)) {
+	forkSnapshotterMu.Lock()
+	defer forkSnapshotterMu.Unlock()
+	forkVMSpawner = fn
+}
+
+func currentForkVMSpawner() func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error) {
+	forkSnapshotterMu.Lock()
+	defer forkSnapshotterMu.Unlock()
+	if forkVMSpawner == nil {
+		return func(context.Context, string, *tls.Config, husk.SpawnVMRequest) (husk.SpawnVMResult, error) {
+			return husk.SpawnVMResult{OK: false, Error: "no fork vm spawner installed"}, nil
+		}
+	}
+	return forkVMSpawner
+}
+
+// setForkMultiVM / currentForkMultiVM toggle the MultiVMFork routing on the suite's
+// shared husk reconciler race-safely (a MultiVMFork test sets it per-case).
+func setForkMultiVM(on bool) {
+	forkSnapshotterMu.Lock()
+	defer forkSnapshotterMu.Unlock()
+	forkMultiVMEnabled = on
+}
+
+func currentForkMultiVM() bool {
+	forkSnapshotterMu.Lock()
+	defer forkSnapshotterMu.Unlock()
+	return forkMultiVMEnabled
+}
+
 // syncBuffer is a concurrency-safe io.Writer that accumulates everything
 // written and lets a test snapshot the bytes.
 type syncBuffer struct {
@@ -644,6 +690,13 @@ func TestMain(m *testing.M) {
 	huskClaim.SetForkSnapshotRemoverForTest(func(c context.Context, addr string, tlsConf *tls.Config, req husk.RemoveForkSnapshotRequest) (husk.ForkSnapshotResult, error) {
 		return currentForkSnapshotRemover()(c, addr, tlsConf, req)
 	})
+	// The MultiVMFork routing: the spawn-vm seam and a race-safe gate a per-case
+	// test flips. The gate defaults off, so every existing fork test keeps the
+	// byte-for-byte new-pod path.
+	huskClaim.SetForkVMSpawnerForTest(func(c context.Context, addr string, tlsConf *tls.Config, req husk.SpawnVMRequest) (husk.SpawnVMResult, error) {
+		return currentForkVMSpawner()(c, addr, tlsConf, req)
+	})
+	huskClaim.SetMultiVMForkGateForTest(currentForkMultiVM)
 	huskClaim.SetCheckpointForTest(func(c context.Context, claim *v1.Sandbox, pod *corev1.Pod) (bool, error) {
 		if fn := currentHuskTestCheckpointer(); fn != nil {
 			return fn(c, claim, pod)

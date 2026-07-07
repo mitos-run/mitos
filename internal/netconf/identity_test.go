@@ -254,3 +254,46 @@ func TestDeriveTapNameStableAndShort(t *testing.T) {
 		t.Errorf("tap name too long for IFNAMSIZ: %q (%d)", a, len(a))
 	}
 }
+
+func TestDeriveInPodSecondaryLinkDistinctAndInSpace(t *testing.T) {
+	_, secondaryNet, _ := net.ParseCIDR("100.64.0.0/16")
+
+	ga, gwa, maca := DeriveInPodSecondaryLink("vm-a")
+	gb, gwb, macb := DeriveInPodSecondaryLink("vm-b")
+
+	// Deterministic: the same vmID always derives the same link.
+	ga2, gwa2, maca2 := DeriveInPodSecondaryLink("vm-a")
+	if !ga.Equal(ga2) || !gwa.Equal(gwa2) || maca != maca2 {
+		t.Fatalf("not deterministic for vm-a: (%v,%v,%s) != (%v,%v,%s)", ga, gwa, maca, ga2, gwa2, maca2)
+	}
+
+	// Distinct vmIDs get distinct guest IPs, gateways, MACs, and (since the tap
+	// derives from the guest IP) taps, so two secondary VMs in one pod cannot
+	// share a link or cross each other's egress.
+	if ga.Equal(gb) {
+		t.Errorf("two vmIDs share a guest IP: %v", ga)
+	}
+	if gwa.Equal(gwb) {
+		t.Errorf("two vmIDs share a gateway IP: %v", gwa)
+	}
+	if maca == macb {
+		t.Errorf("two vmIDs share a MAC: %s", maca)
+	}
+	if DeriveTapName(ga.String()) == DeriveTapName(gb.String()) {
+		t.Errorf("two vmIDs derive the same tap from distinct guest IPs")
+	}
+
+	// Both links live inside the dedicated 100.64.0.0/16 in-pod space, so they
+	// never alias the PRIMARY VM's node-assigned /30 (a different subnet).
+	for _, ip := range []net.IP{ga, gwa, gb, gwb} {
+		if !secondaryNet.Contains(ip) {
+			t.Errorf("derived address %v is outside the in-pod secondary space %v", ip, secondaryNet)
+		}
+	}
+
+	// The guest side is the gateway + 1 within the same /30 (a point-to-point
+	// link), which the egress masquerade and the guest re-addressing rely on.
+	if want := gwa.To4()[3] + 1; ga.To4()[3] != want {
+		t.Errorf("guest IP %v is not gateway %v + 1 within the /30", ga, gwa)
+	}
+}

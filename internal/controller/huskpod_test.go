@@ -1066,6 +1066,38 @@ func TestBuildForkChildPodOwnedByFork(t *testing.T) {
 	}
 }
 
+// TestBuildForkChildPodCarriesPoolCPUCap is the issue #760 regression for the
+// resource half: a live-fork child built from an EMPTY PoolTemplateSpec lost the
+// pool's cpu burst cap and ran at the default 250m ceiling instead of the
+// tenant's configured cap. buildForkChildPod must thread the resolved source
+// pool template's resources into the child pod, so the child's cpu LIMIT matches
+// the pool cap a warm-claimed sandbox of the same pool gets.
+func TestBuildForkChildPodCarriesPoolCPUCap(t *testing.T) {
+	fork := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "cap-fork", Namespace: "default", UID: "uid-cap"}}
+	srcPod := &corev1.Pod{Spec: corev1.PodSpec{NodeName: "kvm-node-1"}}
+	poolCPU := resource.MustParse("2")
+	child := controller.BuildForkChildPodForTest(fork, srcPod, "cap-child-0", controller.HuskPodOptions{
+		StubImage:      "img",
+		SnapshotID:     "tmpl-a",
+		DataDir:        "/data",
+		ForkSnapshotID: "cap-fork",
+		ForkSourceNode: "kvm-node-1",
+		// The resolved SOURCE pool template: the fork child must inherit its cpu cap.
+		Template: &v1.PoolTemplateSpec{Resources: v1.SandboxResources{CPU: poolCPU}},
+	}, scheme)
+
+	var c corev1.Container
+	for i := range child.Spec.Containers {
+		if child.Spec.Containers[i].Name == "husk-stub" {
+			c = child.Spec.Containers[i]
+		}
+	}
+	got := c.Resources.Limits[corev1.ResourceCPU]
+	if got.Cmp(poolCPU) != 0 {
+		t.Fatalf("fork child cpu limit = %s, want the pool cap %s (not the default): the child lost the pool cpu burst cap", got.String(), poolCPU.String())
+	}
+}
+
 // TestBuildHuskPodDisablesSATokenAutomount asserts the husk pod opts out of the
 // default ServiceAccount token automount. The stub speaks vsock + mTLS and never
 // calls the Kubernetes API, so mounting the namespace default SA token would only
@@ -1293,5 +1325,95 @@ func TestBuildForkChildPodInheritsSourcePodScheduling(t *testing.T) {
 	}
 	if !pinned {
 		t.Errorf("fork child nodeAffinity must pin to the source node kvm-node-1; affinity=%v", aff.NodeAffinity)
+	}
+}
+
+// TestReconcileHuskPodsThreadsMultiVM proves the r.MultiVM to opts.MultiVM
+// threading in reconcileHuskPods (L1.7d): a pool reconciled by a MultiVM-enabled
+// reconciler creates warm husk pods that carry the mitos.run/multi-vm capability
+// label, and a MultiVM-off reconciler creates pods without it. This guards the
+// threading line that TestBuildHuskPodMultiVMArgAndLabel (a direct buildHuskPod
+// call) cannot.
+func TestReconcileHuskPodsThreadsMultiVM(t *testing.T) {
+	c := k8sClient
+	const label = "mitos.run/multi-vm"
+
+	pool := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "husk-pool-mvm", Namespace: "default"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
+	}
+	if err := c.Create(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, p := range listHuskPods(t, c, "husk-pool-mvm") {
+			_ = c.Delete(ctx, &p)
+		}
+		_ = c.Delete(ctx, pool)
+	})
+	var got v1.SandboxPool
+	if err := c.Get(ctx, client.ObjectKeyFromObject(pool), &got); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &controller.SandboxPoolReconciler{
+		Client:          c,
+		NodeRegistry:    controller.NewNodeRegistry(),
+		EnableHuskPods:  true,
+		MultiVM:         true,
+		HuskStubImage:   "mitos-husk-stub:test",
+		KVMResourceName: "mitos.run/kvm",
+	}
+	if _, err := r.ReconcileHuskPodsForTest(ctx, &got, got.Spec.Template); err != nil {
+		t.Fatalf("reconcileHuskPods (multi-vm): %v", err)
+	}
+	pods := waitHuskPodCount(t, c, "husk-pool-mvm", 1)
+	for _, p := range pods {
+		if p.Labels[label] != "true" {
+			t.Fatalf("MultiVM reconciler must stamp %s=true on warm husk pods, got labels %v", label, p.Labels)
+		}
+	}
+
+	// Negative case: a MultiVM-OFF reconciler must NOT stamp the label. This
+	// catches an inverted-condition regression (label always applied) that the
+	// positive case alone would miss.
+	offPool := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "husk-pool-mvm-off", Namespace: "default"},
+		Spec: v1.SandboxPoolSpec{
+			Template: &v1.PoolTemplateSpec{Image: "python:3.12-slim"},
+			Warm:     &v1.PoolWarm{Min: 1},
+		},
+	}
+	if err := c.Create(ctx, offPool); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for _, p := range listHuskPods(t, c, "husk-pool-mvm-off") {
+			_ = c.Delete(ctx, &p)
+		}
+		_ = c.Delete(ctx, offPool)
+	})
+	var gotOff v1.SandboxPool
+	if err := c.Get(ctx, client.ObjectKeyFromObject(offPool), &gotOff); err != nil {
+		t.Fatal(err)
+	}
+	rOff := &controller.SandboxPoolReconciler{
+		Client:          c,
+		NodeRegistry:    controller.NewNodeRegistry(),
+		EnableHuskPods:  true,
+		MultiVM:         false,
+		HuskStubImage:   "mitos-husk-stub:test",
+		KVMResourceName: "mitos.run/kvm",
+	}
+	if _, err := rOff.ReconcileHuskPodsForTest(ctx, &gotOff, gotOff.Spec.Template); err != nil {
+		t.Fatalf("reconcileHuskPods (multi-vm off): %v", err)
+	}
+	for _, p := range waitHuskPodCount(t, c, "husk-pool-mvm-off", 1) {
+		if _, ok := p.Labels[label]; ok {
+			t.Fatalf("MultiVM-off reconciler must NOT stamp %s, got labels %v", label, p.Labels)
+		}
 	}
 }

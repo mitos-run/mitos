@@ -1,5 +1,75 @@
 # Changelog
 
+## [1.28.0](https://github.com/mitos-run/mitos/compare/v1.27.0...v1.28.0) (2026-07-07)
+
+
+### Features
+
+* **husk:** install the patched Firecracker binary (runtime-gated live-fork, stock-identical when off) ([#817](https://github.com/mitos-run/mitos/issues/817)) ([c97c577](https://github.com/mitos-run/mitos/commit/c97c5776cb3d37be1130d389c0f180b5f56b632b))
+
+## [1.27.0](https://github.com/mitos-run/mitos/compare/v1.26.3...v1.27.0) (2026-07-07)
+
+
+### Features
+
+* **controller:** cross-fork co-location reservation so concurrent same-source forks never over-admit ([#814](https://github.com/mitos-run/mitos/issues/814)) ([106f150](https://github.com/mitos-run/mitos/commit/106f15070e7e6ef2c5636505a1c7f8e3e756518c))
+
+## [1.26.3](https://github.com/mitos-run/mitos/compare/v1.26.2...v1.26.3) (2026-07-07)
+
+
+### Bug Fixes
+
+* **husk:** co-located fork restores from the parent snapshot so the child inherits ([#812](https://github.com/mitos-run/mitos/issues/812)) ([10d6981](https://github.com/mitos-run/mitos/commit/10d69816bfa6b683e67b76d4b3921bd02abf9b46))
+
+## [1.26.2](https://github.com/mitos-run/mitos/compare/v1.26.1...v1.26.2) (2026-07-07)
+
+
+### Bug Fixes
+
+* **controller:** multi-vm fork co-location reconcile (canary re-get-pod-not-found) ([#809](https://github.com/mitos-run/mitos/issues/809)) ([80e98a1](https://github.com/mitos-run/mitos/commit/80e98a1b38c097910822600860ae84030c3ed1c5))
+
+## [1.26.1](https://github.com/mitos-run/mitos/compare/v1.26.0...v1.26.1) (2026-07-06)
+
+
+### Bug Fixes
+
+* **husk:** route ForkSnapshot through the default instance state under multi-vm ([#807](https://github.com/mitos-run/mitos/issues/807)) ([00c7cde](https://github.com/mitos-run/mitos/commit/00c7cdec7c57dd38a0093c7a18fca8593262c274))
+
+## [1.26.0](https://github.com/mitos-run/mitos/compare/v1.25.0...v1.26.0) (2026-07-06)
+
+
+### Features
+
+* **api:** add status.vmId to Sandbox for the shared-host multi-vm mapping ([#802](https://github.com/mitos-run/mitos/issues/802)) ([34229c1](https://github.com/mitos-run/mitos/commit/34229c12965d15f40e440008934bc7bd861a84b3))
+* **controller:** account co-located fork VMs against the source pod memory budget ([#804](https://github.com/mitos-run/mitos/issues/804)) ([3064e00](https://github.com/mitos-run/mitos/commit/3064e00ea8d1377f5611f7fa77fb128425b34739))
+* **controller:** route a fork to a VM in the source pod behind a flag ([#803](https://github.com/mitos-run/mitos/issues/803)) ([6596b43](https://github.com/mitos-run/mitos/commit/6596b43478e054dca70470f154403bd3b404e733))
+* **controller:** start warm husk pods with --multi-vm when multi-vm-fork is on ([#805](https://github.com/mitos-run/mitos/issues/805)) ([0f13527](https://github.com/mitos-run/mitos/commit/0f13527532e48823744080e881adf11c53710bdf))
+* **helm:** add controller.multiVMFork value to render --multi-vm-fork ([#806](https://github.com/mitos-run/mitos/issues/806)) ([9f6d75b](https://github.com/mitos-run/mitos/commit/9f6d75be61c5c583c12c2842300afa7dfa062934))
+* **helm:** add forkd AppArmor profile value ([#747](https://github.com/mitos-run/mitos/issues/747)) ([48fbd48](https://github.com/mitos-run/mitos/commit/48fbd48ab6de99b53a7fc2f6c8bb91d6517c2e4c))
+* **husk:** add the spawn-vm control op to add a VM to a running pod ([#801](https://github.com/mitos-run/mitos/issues/801)) ([869e671](https://github.com/mitos-run/mitos/commit/869e671ef973c45436c5582c395aa2d7dc688849))
+* **husk:** spawn a real second firecracker with a per-VM tap and IP ([#799](https://github.com/mitos-run/mitos/issues/799)) ([db00921](https://github.com/mitos-run/mitos/commit/db00921875645c5eba57ba8daef9ba0fc67e8791))
+
+## [1.25.0](https://github.com/mitos-run/mitos/compare/v1.24.2...v1.25.0) (2026-07-06)
+
+
+### Features
+
+* **husk:** host two same-tenant VMs in one stub behind the multi-vm flag ([#772](https://github.com/mitos-run/mitos/issues/772)) ([380b520](https://github.com/mitos-run/mitos/commit/380b520db443ef4f239ceb556027d9a37f3559e9))
+
+
+### Bug Fixes
+
+* **controller:** fork child inherits the source pool network, egress, and resources ([#769](https://github.com/mitos-run/mitos/issues/769)) ([1bfe0b5](https://github.com/mitos-run/mitos/commit/1bfe0b5a05fa21504a27e70f6279a8a11dfa47d4))
+
+## [1.24.2](https://github.com/mitos-run/mitos/compare/v1.24.1...v1.24.2) (2026-07-06)
+
+
+### Bug Fixes
+
+* **fork:** resume the source after a live fork instead of leaving it paused ([#763](https://github.com/mitos-run/mitos/issues/763)) ([34db0db](https://github.com/mitos-run/mitos/commit/34db0db60af76e6f209fac9210cbdca95813ebe3))
+* **saas:** quota denials carry a specific cause and actionable remediation ([#765](https://github.com/mitos-run/mitos/issues/765)) ([a71ae83](https://github.com/mitos-run/mitos/commit/a71ae83b39e38f0a09b7decd3600a8d5c73dbf34))
+* **sdk:** fork POST waits longer than the server ready deadline ([#756](https://github.com/mitos-run/mitos/issues/756)) ([ecb8a78](https://github.com/mitos-run/mitos/commit/ecb8a78712e8ccb4a2d8362c5bdf584d966c229b))
+
 ## [1.24.1](https://github.com/mitos-run/mitos/compare/v1.24.0...v1.24.1) (2026-07-06)
 
 

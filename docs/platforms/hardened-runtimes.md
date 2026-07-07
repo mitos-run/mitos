@@ -1,4 +1,4 @@
-# Hardened container runtimes (forkd seccomp posture)
+# Hardened container runtimes (forkd seccomp and AppArmor posture)
 
 forkd builds template snapshots and runs raw forks through the Firecracker
 jailer, which `pivot_root(2)`s into a per VM chroot. The chart ships forkd with a
@@ -54,8 +54,9 @@ helm install mitos deploy/charts/mitos \
 
 This keeps `privileged: false`, `drop: [ALL]`, and the full base builder
 capability set. It does NOT use `privileged: true`; that also works but is a large
-unnecessary blast radius. The two knobs cannot remove a base capability or enable
-privilege escalation, they only swap the seccomp profile and ADD capabilities.
+unnecessary blast radius. The three knobs cannot remove a base capability or
+enable privilege escalation. They select seccomp or AppArmor confinement, or ADD
+capabilities.
 
 `CAP_FOWNER` is negligible marginal authority next to the `CAP_SYS_ADMIN` the
 builder already holds (the same argument the threat model makes for
@@ -81,6 +82,36 @@ The `seccompProfile` value is rendered verbatim into the container
 securityContext, so any valid profile object is expressible. Shipping and
 distributing the JSON to every node is operator owned and out of scope for the
 chart.
+
+## AppArmor-constrained runtimes
+
+Some runtime-provided AppArmor profiles deny the recursive bind mount and
+private mount propagation forkd needs while it prepares the Firecracker jailer
+chroot. In that case, forkd cannot build template snapshots.
+
+Check the node audit log for an AppArmor denial during a failed template build,
+typically an `apparmor="DENIED"` event associated with a `mount` operation on
+forkd's data directory. The chart default is `/var/lib/mitos`.
+
+The chart leaves AppArmor selection to the runtime unless
+`forkd.appArmorProfile` is configured. On Kubernetes 1.30 or later, prefer a
+reviewed and pre-loaded `Localhost` profile over `Unconfined`:
+
+```yaml
+forkd:
+  appArmorProfile:
+    type: Localhost
+    localhostProfile: mitos-forkd
+```
+
+[`examples/mitos-forkd.apparmor`](examples/mitos-forkd.apparmor) is a
+compatibility example validated with the chart default
+`forkd.dataDir=/var/lib/mitos`. Load it on every eligible KVM node before forkd
+is scheduled, and review it for the Mitos version, container runtime,
+distribution, and any custom data directory.
+
+`Unconfined` removes AppArmor confinement for forkd and should only be an
+explicit, reviewed operator choice.
 
 ## Why the default is not changed
 

@@ -1,3 +1,6 @@
+{{- if and .Values.controller.multiVMFork (not .Values.controller.enableHuskPods) }}
+{{- fail "controller.multiVMFork requires controller.enableHuskPods: the multi-vm fork routing co-locates a fork child in a warm husk pod, which only exists on the husk-pods path. Set enableHuskPods: true or multiVMFork: false." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -35,6 +38,9 @@ spec:
             - --health-probe-bind-address=:8081
             {{- if .Values.controller.enableHuskPods }}
             - --enable-husk-pods
+            {{- end }}
+            {{- if .Values.controller.multiVMFork }}
+            - --multi-vm-fork
             {{- end }}
             - --husk-stub-image={{ include "mitos.image" (dict "root" . "image" .Values.huskStub.image) }}
             - --husk-data-dir={{ .Values.controller.huskDataDir }}

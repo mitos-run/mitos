@@ -129,6 +129,14 @@ open, with a severity on the review rows) is preserved throughout.
 | controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd, husk pods |
 | Snapshot artifacts | files under `/var/lib/mitos` on each node | - | forkd builds them; husk pods mount and execute them as memory images |
 
+### Operator-selected AppArmor confinement
+
+The Helm chart leaves `forkd.appArmorProfile` unset by default, so AppArmor
+selection remains with the container runtime. Operators can explicitly select
+`Unconfined` or a pre-loaded `Localhost` profile for forkd. `Unconfined` removes
+AppArmor confinement, while a Localhost profile must be reviewed, loaded, and
+kept consistent on every eligible KVM node.
+
 ## 0. Default execution surface: the unprivileged husk pod (issue #18)
 
 Pod-native execution is now the DEFAULT (the controller runs
@@ -365,9 +373,13 @@ the controller identity only: `internal/husk.ServeTLS` plus
 `AuthorizeControllerIdentity`; the op rides the same op-dispatched channel that
 delivers secrets on activate). The op carries NO secrets (a fork id and a
 node-local snapshot path). The stub pauses the running VM, writes a Full
-Firecracker snapshot to a node hostPath `<dataDir>/forks/<fork-id>` (read-write
-only to the source pod that owns the VM; read-only to the child pods on the SAME
-node), then resumes the source unless `pauseSource`. The fork snapshot is a LIVE,
+Firecracker snapshot plus a frozen point-in-time copy of the source rootfs to a
+node hostPath `<dataDir>/forks/<fork-id>` (read-write only to the source pod that
+owns the VM; read-only to the child pods on the SAME node), then ALWAYS resumes
+the source (the `pauseSource` field no longer leaves it paused: leaving it paused
+was the v1.24.1 bug that hung a post-fork exec against the source for 30s; the
+frozen rootfs is what keeps the children consistent once the source resumes and
+mutates its own disk). The fork snapshot is a LIVE,
 EPHEMERAL artifact created by a trusted node-local stub and consumed by child
 stubs on the same node within the same trust boundary; it is NOT content-addressed,
 so the children activate it with verify disabled (`--allow-unverified-snapshots`),
@@ -377,13 +389,36 @@ does not exist for a live fork. The child still runs the full fail-closed RNG/cl
 reseed handshake (see `docs/fork-correctness.md`, husk fork children). Per-child
 independence: each child is its own husk pod + dormant VMM + per-activation rootfs
 CoW clone, so guest writes never cross between children or back to the source; the
-children share only the read-only fork snapshot mem+vmstate as a restore image,
-exactly as warm pods share the template snapshot. Each child mints its OWN bearer
+children share only the read-only fork snapshot (mem+vmstate plus the frozen
+source rootfs) as a restore image, exactly as warm pods share the template
+snapshot. Each child mints its OWN bearer
 token (the source's token never opens a child). Lifecycle: the fork snapshot is
 owned by the forking `Sandbox` and removed by its finalizer (`RemoveForkSnapshot` op)
 on delete; the child pods are owner-ref'd to the fork and reaped by Kubernetes GC.
 Residual: a compromised controller can drive a fork-snapshot of any husk pod it
 can reach, the same residual already stated for activate (Surface 2).
+
+Co-located fork child (MultiVMFork routing, `--multi-vm-fork`): when the source
+pod runs a `--multi-vm` stub, the controller may bring a fork child up as an
+ADDITIONAL VM INSIDE the source pod (the `SpawnVM` control op) instead of a new
+child pod. The co-located child restores from the SAME node-local fork snapshot
+`<dataDir>/forks/<fork-id>` (mem + vmstate + the frozen source rootfs at
+`<fork-id>/rootfs.ext4`) that the new-pod child restores from, carried in the
+`SpawnVM` request as `Activate.ForkSnapshot=true` with `SnapshotDir` pointing at
+that dir. It keeps the identical trust posture: the fork snapshot is NOT
+content-addressed, so the co-located activate skips the content-addressed verify
+exactly as the new-pod child does with `--allow-unverified-snapshots` (the
+artifact is root-owned and never tenant-writable, and re-hashing would gate on a
+digest a live fork does not have). Per-VM independence holds: each co-located
+child gets its OWN per-activation rootfs CoW clone of the frozen source rootfs and
+its OWN bearer token, so its guest writes never cross to a sibling or back to the
+source, which shares only the read-only fork snapshot as a restore image. The
+per-VM in-pod egress filter (`internal/husk` `deriveVMNetwork` + `applyEgressFilter`)
+and the full fail-closed RNG/clock reseed handshake run for the co-located child
+too, so a co-located child is never less isolated than a one-pod-per-child fork.
+Before this fix the co-located child activated from the pool TEMPLATE snapshot, so
+it inherited NEITHER the parent's memory NOR its disk: a correctness violation, not
+an isolation gap, now closed.
 
 ### Husk workspace hydrate/dehydrate (W4 transport on the husk path)
 
@@ -443,6 +478,49 @@ against eviction are the architectural fix, tracked in #744; they are a change t
 the warm-pool/shared-CAS model (a warm pod is built before a claim binds, so its
 eventual workspace is unknown at mount time) and need cluster-e2e and a named
 security reviewer, so they are deliberately not rushed here.
+
+### Husk spawn-vm (add a VM to a running pod, multi-VM path)
+
+A `spawn-vm` control op asks a RUNNING husk pod to bring up an ADDITIONAL
+same-tenant VM (a new vmID) INSIDE the same pod, using the experimental
+multi-VM-per-pod engine (`Options.MultiVM`, #764). It rides the SAME
+op-dispatched mTLS channel as activate, fork-snapshot, and the workspace ops,
+authorized to the controller identity ONLY (`internal/husk.ServeTLS` plus
+`AuthorizeControllerIdentity`); the auth is NOT weakened for it. The request
+carries the new VM's id plus the same activation inputs an activate takes
+(snapshot dir/source and expected digest, per-fork network, egress policy and
+allowlists, inbound policy, env, secrets, token), so like activate it CAN carry
+tenant SECRETS; those are never logged. The stub validates the vmID with the
+`checkVMID` allowlist BEFORE deriving any per-VM socket, workdir, tap, or /30 from
+it, so a traversing id can never spawn a VM, then runs the per-VM prepare +
+activate (`internal/husk/multivm.go` `SpawnVM` -> `prepareInstance` +
+`activateInstance`), which fails closed per instance and never disturbs a sibling.
+The op FAILS CLOSED on the flag: a stub NOT started with `--multi-vm` refuses
+spawn-vm, so a single-VM pod is never driven to host a second VM. The spawned VM
+lands on its OWN tap + /30 + default-deny egress chain derived from the vmID (the
+per-VM network isolation in the multi-VM-per-pod row of Surface 2, Guest to guest), so a
+co-located VM's egress cannot cross into a sibling's. This is DEFAULT OFF. The
+controller CAN now drive it behind its own default-off flag (`--multi-vm-fork`,
+`SandboxReconciler.MultiVMFork`): when on AND the source husk pod is multi-VM
+capable (its stub runs `--multi-vm`, recorded by the `mitos.run/multi-vm` pod
+label), a hosted fork child is spawned as an ADDITIONAL VM inside the SOURCE pod
+instead of a new child pod (`internal/controller/sandboxfork_controller.go`
+`spawnForkChildInSourcePod`), threading the SAME snapshot + network + egress posture
+the new-pod fork child inherits and reusing the SAME mTLS control channel and
+fork-snapshot flow; the child's `status.pod`/`status.vmId`/`status.node` record the
+shared host. The flag is DEFAULT OFF, and off is byte-for-byte the new-pod path, so
+the shipped surface is unchanged: nothing spawns a second VM in production today. A
+non-capable source silently falls back to the new-pod path, and a spawn failure
+fails toward a clear pending (logged, requeued), never a silent hang. The
+CONSERVATIVE increment caps co-location per pod at a small fixed number
+(`maxCoLocatedForkVMsPerPod`) and spills the rest to new pods; the real per-pod and
+node MEMORY ACCOUNTING that bounds how many VMs a pod may hold (so a fork can never
+overcommit a host) is a named follow-up (L1.7b). Residual: a compromised controller
+can drive a spawn-vm against any multi-VM husk pod it can reach, the same residual
+already stated for activate and fork-snapshot (Surface 2); and it inherits the
+shared-pod-netns residual of the multi-VM-per-pod mode (Surface 2, Guest to guest),
+which is why it stays flag-gated behind that mode's per-VM tap + /30 isolation and a
+named security review before it ships.
 
 **Surface 4: the DEVICE `/dev/kvm`.** KVM access is injected by the device plugin
 (`cmd/kvm-device-plugin`, `internal/deviceplugin`): the pod requests
@@ -821,6 +899,7 @@ The primary boundary is KVM hardware virtualization via Firecracker.
 | Control | Status | Detail |
 |---|---|---|
 | Separate KVM VMs per sandbox | **mitigated** | No two sandboxes share a kernel. |
+| Multi-VM-per-pod: co-located same-tenant VMs share ONE pod netns | **flag-gated, default off; per-VM tap + /30 isolation** | The experimental multi-VM-per-pod mode (`Options.MultiVM`, #764) hosts several same-tenant CoW forks inside ONE husk pod instead of one pod per VM, so those VMs share the pod's single network namespace instead of each getting its own. Isolation between the co-located VMs is then by the SAME mechanism forkd's shared host netns already uses across sandboxes: each VM gets its OWN tap and its OWN /30 point-to-point link derived deterministically from its vmID (`internal/husk/multivm.go` `deriveVMNetwork` + `internal/netconf` `DeriveInPodSecondaryLink`; secondary /30s live in a dedicated in-pod `100.64.0.0/16` space so they can never alias the primary VM's node-assigned link), its OWN default-deny nftables egress chain with the unconditional metadata block, and `ip saddr` anti-spoof pinning, so one VM's egress cannot cross into a sibling's tap or borrow its allowlist. This is a NETWORK SURFACE MOVE from the shipped model (one VM per pod netns, a kernel boundary between VMs): behind this flag the boundary between two same-tenant VMs in a pod is per-tap dispatch, not a netns boundary, the same defense-in-depth posture and residuals as forkd's host-netns row in section 4. The mode is DEFAULT OFF and no production caller (nor the controller) sets it, so the shipped surface is unchanged. Proven by `internal/husk` mock-level tests (distinct tap/IP/gateway/MAC per vmID) and a KVM firecracker-test that boots two real Firecrackers in one pod each exec-ing over its own vsock; the per-VM DNS-proxy fan-out is deferred (multi-VM egress is IP-allowlist only until L1.4b), so name-based egress is disabled in this mode rather than shared. |
 | raw-forkd: forks share ONE writable rootfs inode (cross-fork filesystem channel) | **fixed (per-fork rootfs CoW) on raw-forkd** | Previously, on the raw-forkd fork path the template rootfs was hard-linked into each fork's chroot and the rootfs drive was attached with `readOnly=false` (`internal/firecracker/template.go` `AddDrive("rootfs", templateRootfs, false, true)`) and NEVER rebound, so all forks of one template on a node shared a SINGLE writable rootfs inode: a write by one fork was visible to its siblings (and across tenants, since snapshots are node-flat), a cross-fork filesystem read/write channel and a corruption vector. FIXED: `internal/fork/engine.go` now gives each fork its OWN copy-on-write clone of the template rootfs (`prepareForkRootfs` reflink-clones the template rootfs to `<dataDir>/sandboxes/<id>/rootfs.ext4` through the SAME `volume.Backend.ReflinkCopy` owner the husk path uses), loads the snapshot PAUSED (`resume=false`), rebinds the baked `rootfs` drive to that per-fork clone with `PatchDrive` while the guest is frozen, then `Resume`s, exactly mirroring the husk `Stub.Prepare`/`Stub.Activate` fix (section 0 surface 3). The template rootfs is now the READ-ONLY CoW SOURCE; no two forks, and no fork and the source, ever write the same rootfs path. The per-fork clone is hard-linked into the jailer chroot (never the shared template) and reaped with the sandbox dir at Terminate. Proven by `internal/fork/rootfs_cow_test.go` (distinct backing paths, distinct inodes, and a write in one fork's rootfs not visible in a sibling or the template); real-VM cross-fork isolation is KVM-gated (firecracker-test). Residual: raw-forkd is STILL not for untrusted multi-tenant for the OTHER reason below (node-flat snapshots); the privileged-DaemonSet and jailer-disabled reasons are closed since #352 (forkd is non-privileged with the jailer enabled). |
 | CoW page sharing side channels | **open** | All forks of a snapshot share read-only pages via `mmap(MAP_PRIVATE)` of the same mem file. Flush+Reload-style attacks across forks of the *same tenant's* snapshot are in scope to document; cross-tenant page sharing must be prevented by never sharing snapshot files across trust boundaries. Not yet enforced anywhere. |
 | KSM | **open** | We must mandate KSM off on hosts (we control the reference platform). Not yet documented in any platform guide or checked by forkd at startup. |
@@ -1335,7 +1414,7 @@ with `spec.expose` set and `Status.Phase==Ready` is reachable at
 | CSRF state and open-redirect defense | mitigated (unit-tested) | CSRF state: before redirecting to the OIDC provider the auth origin mints a signed CSRF state token (a `SessionCodec`-signed `{rd,path}` JSON payload, short TTL) stored in a `__Host-` state cookie. On the `/auth/callback` return the `state` query parameter is verified against the cookie value with constant-time compare; a missing, tampered, or expired state is rejected 400 before the code exchange runs. Open-redirect defense: the `rd` (redirect) parameter in `/start?rd=<label>` is validated against the live route table; an unknown label is rejected 400. The `path` (callback path) parameter rejects values beginning with `//` or containing a backslash or CRLF via `safeRelPath`, preventing scheme-relative or header-injection redirects. `internal/preview/oidc.go`. Unit-tested: state cookie round-trip; tampered state rejected; expired state rejected; unknown label in `rd` rejected. |
 | Verified-email audience rule: unverified email rejected | mitigated (unit-tested) | The `allowedEmailDomains` audience selector in the authorization pipeline checks BOTH that `email_verified == true` in the session identity AND that `emailDomain(identity.Email)` EXACTLY matches one of the listed domains (case-folded; a domain such as `evilacme.com` does NOT match an entry `acme.com`). An unverified email is rejected 403 regardless of its domain. In addition, `resolveOrgs` in `internal/preview/oidc.go` returns empty org IDs when `EmailVerified` is false, so the org/private tier also 403s for an unverified-email identity even if the Resolver or GroupsToOrgs fallback would otherwise return org memberships. `internal/preview/authz.go`, `internal/preview/oidc.go`. Unit-tested: unverified email with a matching domain is rejected by the audience check; verified email with matching domain is accepted; verified email with non-matching domain is rejected; callback with `email_verified=false` yields a grant with empty OrgIDs. |
 | ForwardAuth BYO-IdP subrequest: client header spoof prevention | mitigated (unit-tested) | The `ForwardAuth` function builds the subrequest from scratch (`http.NewRequestWithContext`), forwarding only `X-Forwarded-Method`, `X-Forwarded-Uri`, `X-Forwarded-Host`, `X-Forwarded-For`, and `Cookie`. `StripForwardAuthHeaders` deletes all `X-Auth-Request-*` keys from the inbound request BEFORE `ForwardAuth` is called and BEFORE the request is proxied upstream, so a client cannot inject a forged `X-Auth-Request-Email` or `X-Auth-Request-User` to claim an identity the auth service did not assert. Identity is built exclusively from the auth service RESPONSE headers. The network-layer CIDR check runs before the forwardAuth subrequest, so a request from a disallowed IP is rejected before the external auth service is contacted. `internal/preview/forwardauth.go`. Unit-tested: 2xx allow with identity from response; 401 deny; `StripForwardAuthHeaders` removes client-supplied `X-Auth-Request-*`; non-request headers are not removed; `X-Forwarded-For` is forwarded to the auth service. |
-| Verified-email to org resolution: bearer-gated in-cluster hop | mitigated (unit-tested) | The `POST /internal/identity/resolve` endpoint in the console binary resolves a verified email to an account ID and org IDs via `AccountService.FindOrCreateByEmail` and `Organizations`. The endpoint is protected by a shared bearer secret (`MITOS_IDENTITY_RESOLVE_TOKEN`, environment variable, never logged) compared with `hmac.Equal` (constant-time for equal-length inputs; a mismatched length returns early without iterating, which is acceptable here because the token is operator-configured and fixed-length in practice, and the empty-token guard fires before the compare so an unconfigured endpoint is always denied). The email-to-org mapping is NEVER logged; only the org count is logged. The resolver client (`internal/preview/resolve.go`) also never logs the token or email-to-org mapping; a non-empty configured URL is required or `ErrResolveDisabled` is returned immediately without making a request. `internal/saas/identity_resolve.go`, `cmd/console/main.go`. Unit-tested: bearer gate (missing, wrong, empty configured token); email resolves to account+orgs; bad body returns 400; empty URL returns `ErrResolveDisabled` with no HTTP request; non-2xx returns error without token in message. |
+| Verified-email to org resolution: bearer-gated in-cluster hop | mitigated (unit-tested; now served off the public listener) | The `POST /internal/identity/resolve` endpoint (with `/internal/session/resolve` and `/internal/approve-signup`) resolves a verified email to an account ID and org IDs via `AccountService.FindOrCreateByEmail` and `Organizations`. It is protected by a shared bearer secret (`MITOS_IDENTITY_RESOLVE_TOKEN`, environment variable, never logged) compared with `hmac.Equal` (constant-time for equal-length inputs; a mismatched length returns early, acceptable because the token is operator-configured and fixed-length, and the empty-token guard fires first so an unconfigured endpoint is always denied). PREVIOUSLY these M2M endpoints were mounted on the console's PUBLIC mux, so they were internet-reachable and the bearer was the only gate; identity/resolve additionally provisions accounts via `FindOrCreateByEmail`, so a leaked bearer allowed account creation and org-membership enumeration from the internet (GHSA-rcf5-cfv3-jxvv). FIX: they are now served ONLY on a dedicated cluster-internal listener (`--internal-addr`, default `:8091`, `cmd/console/internal_listener.go`), exactly like `/metrics`; the public `:8080` mux never mounts them, and no HTTPRoute forwards to `:8091`, so the endpoints are reachable only from in-cluster callers (the frontdoor session-resolve and the expose proxy identity-resolve, both pointed at the console Service internal port by the chart). An empty `--internal-addr` falls back to the public mux for legacy/dev only, with a loud startup warning. The email-to-org mapping is NEVER logged; only the org count is. `internal/saas/identity_resolve.go`, `cmd/console/internal_listener.go`, `cmd/console/main.go`. Unit-tested: bearer gate on the internal mux (`TestInternalMuxServesResolveBehindBearer`), unmounted-without-token is 404 (`TestInternalMuxDoesNotMountWithoutToken`), plus the existing resolve-behavior tests. Residual (follow-up): a resolve is a READ, so `FindOrCreateByEmail` should become a non-provisioning `FindByEmail` (an unknown email resolves to zero orgs, denying access, without creating an account); tracked separately to avoid a behavior change in this hardening PR. |
 | Authorization pipeline: fail-closed tier, network, audience | mitigated (unit-tested) | The `Authorize` function in `internal/preview/authz.go` applies three layers in sequence: (1) NETWORK: `route.Network` is a CIDR allowlist (`Route.Network []string`); if non-empty the client IP must fall within at least one listed CIDR (`NetworkAllows`). A nil or out-of-range IP against a non-empty allowlist is denied. Malformed CIDRs are skipped (fail closed: no match returns `DenyForbidden`). (2) TIER: `route.Sharing` selects the tier. `public` always allows (but `DenyForbidden` if audience fields are set, because audience evaluation requires an identity). `authenticated` requires a non-nil identity. `org`/`private` require a non-nil identity AND `route.OrgID` present in `identity.OrgIDs`. `link` requires a non-nil identity (the proxy decodes the link cookie before calling `Authorize`). Unknown or empty `Sharing` is `DenyForbidden` (fail closed; no default-deny coercion to a different tier). (3) AUDIENCE: `AllowedPrincipals` uses case-folded exact email match; `AllowedEmailDomains` requires `identity.EmailVerified == true` and an EXACT case-folded domain match (`containsDomainFolded`); a suffix like `evilacme.com` does NOT match an entry `acme.com`. Empty allowlist entries are skipped. `internal/preview/authz.go`. Unit-tested across all tier/network/audience combinations; CIDR gate; suffix-trick rejected; case-insensitive; empty entries guarded. |
 | OIDC live-IdP path: honest CI scope | partial | The OIDC authorization code flow (discovery, redirect to provider, callback with state validation, code exchange, ID token verify) is tested with a fake token verifier (`oidcauth.FakeVerifier`) in unit CI so the flow handlers can be exercised without a live issuer. The live-IdP path (a real `/.well-known/openid-configuration` discovery, a real code exchange) is maintainer-verified only; it is not covered by an automated CI job. PKCE is a documented follow-up. SAML and SCIM are deferred. This surface stays gated behind the external security review (issue #194) and the abuse-control envelope (issue #213). |
 
@@ -1358,6 +1437,20 @@ CDP.
 | Chromium `--no-sandbox`: the microVM is the boundary | mitigated | Chromium runs with `--no-sandbox`, disabling its in-process seccomp/namespace sandbox, the same posture as E2B Desktop and Browserbase. The containment boundary is the Firecracker microVM (sections 1 and 2): a hostile page or malicious script is confined to the one sandbox and cannot reach the host, the control plane, or sibling sandboxes. Rendering untrusted web content is the intended isolation use case. |
 | Chromium pinned to 147, behind the current security build | accepted, tracked | `images/computer-use/Dockerfile` pins `chromium=147.0.7727.137-1~deb13u1` (debian stable/main) and `apt-mark hold`s it. The newer debian-security rebuild `150.0.7871.46-1~deb13u1` SIGTRAPs on launch (TRAP_BRKPT from Chromium's own `IMMEDIATE_CRASH`, no diagnostic flushed) and never binds the CDP port, so the template does not start; reproduced on amd64 and arm64, independent of `--no-sandbox`, the container seccomp profile, and every headless/GPU flag combination tried. The pin trades a launchable browser for skipping the 150 security update. Exposure delta is bounded by the row above: the browser already runs `--no-sandbox` inside the Firecracker microVM, so an in-renderer CVE only reaches the already-untrusted guest, not the host, control plane, or sibling sandboxes. The CI CDP smoke (`docker-build`) proves the pinned image launches; it dumps filtered Chromium logs on failure so a future unlaunchable package is caught in CI, not in production. Revert to the security build once Debian ships a launchable 150+: tracked in #723. |
 
+## 7d. Front-door defense-in-depth hardening (issue #733)
+
+Non-exploitable hardening from an authorized battle-test of the deployed service
+(exploitable findings were handled privately per SECURITY.md). Each row is a
+defense-in-depth gap, not a live vulnerability.
+
+| Surface | Status | Notes |
+| --- | --- | --- |
+| Browser session cookie prefix | **mitigated** | The console session cookie is set with the `__Host-` prefix on a Secure connection (`__Host-mitos_session`), matching the expose subsystem's `__Host-mitos_expose`. The prefix makes the browser pin the cookie to the exact host with `Path=/` and no `Domain`, so a compromised sibling subdomain cannot set or overwrite it (cookie tossing). A plain-http self-host/dev deployment (where the browser rejects a `__Host-` cookie) falls back to the legacy unprefixed name; readers (`console.ReadSessionCookie`, the frontdoor) accept both, preferring the hardened one, and logout expires both so a pre-rollout cookie cannot keep a session alive. Code: `internal/saas/console/session_middleware.go`, `internal/saas/onboarding/http.go`, `internal/saas/oidcauth/handlers.go`, `internal/frontdoor/proxy.go`. |
+| Server-side session absolute max-age | **mitigated** | Session resolve now enforces an absolute lifetime (`saas.DefaultSessionMaxAge`, 30 days) in both the in-memory and Postgres session stores, so a leaked session token cannot stay valid indefinitely; an expired session is lazily reaped (in-memory) and filtered in the query (Postgres). Code: `internal/saas/session.go`, `internal/saas/pgstore/sessionstore.go`. Residual: IDLE (sliding) max-age needs a per-request last-seen write and is a documented follow-up; the absolute ceiling is enforced today. |
+| API key hash pepper | **mitigated (opt-in)** | The gateway and console can mix a process-wide pepper into every API key hash (`saas.WithSalt` from `MITOS_API_KEY_PEPPER`, chart value `saas.apiKeyPepperSecret`), so a bare store dump is not directly replayable. Opt-in and OFF by default because introducing a pepper invalidates pre-existing keys and the SAME value must back both pods. Brute force is already infeasible (keys carry 256 bits of entropy); the pepper is a second barrier. Code: `internal/saas/keys.go`, `cmd/gateway/main.go`, `cmd/console/main.go`. |
+| Create `replicas` upper bound | **mitigated** | The control-plane create path caps `replicas` at request validation (`maxCreateReplicas` = 64), refusing a larger value with an LLM-legible 400 before any Sandbox is built, so a huge value cannot churn the controller. Real fleet size is still separately bounded by controller replica admission and the replica-weighted live-usage cap. Code: `internal/saas/controlplane/forward.go`. |
+| Pool-name enumeration scope | **mitigated** | `template.list` lists SandboxPools in the caller's own namespace (`NamespaceForOrg(orgID)`, the same namespace a create resolves its poolRef in) instead of cluster-wide, so a tenant cannot enumerate pool names and readiness in another tenant's namespace. In single-tenant mode this is the shared namespace, so the shared-pool model is unchanged. Code: `internal/saas/controlplane/template.go`. |
+
 ## 8. What we explicitly do NOT claim
 
 - No pod-scoped Kubernetes mechanism (NetworkPolicy, PodSecurity, pod quotas)
@@ -1372,6 +1465,7 @@ CDP.
 | Boundary | Status | Mechanism |
 |---|---|---|
 | Image provenance (controller, forkd, husk-stub) | mitigated for published releases | cosign keyless signing + SPDX SBOM attestation, bound to the image digest, produced by `.github/workflows/publish.yaml`; consumer verification in docs/supply-chain.md. |
+| Patched Firecracker VMM provenance (forkd, husk-stub) | mitigated | The forkd and husk-stub images ship a Mitos-patched `firecracker` (live-fork: memfd/MAP_SHARED guest memory + UFFD write-protect) instead of the stock upstream binary; the stock jailer is unchanged. The patched binary is NOT a general-CDN download: it is built reproducibly in the `mitos-run/firecracker` fork on branch `ci/build-patched-fc` via `.github/workflows/build-patched-fc.yml` (built commit `531a487cf69898a05091d4c7e5f48bec3132309b`) and published as a GitHub release asset (`mitos-fc-uffd-wp-v1.15.0`). `hack/install-firecracker-patched.sh` fetches it from a SINGLE pinned URL and verifies it against a pinned sha256 (`0209700d794acb7b77a919c0aa50506b2186642d80e5c0d13220ee51003b823b`, 5,215,320 bytes) BEFORE install AND re-verifies the on-disk binary after, failing the build CLOSED on any mismatch, so a compromised release or a network substitution cannot install a different VMM. It reports `firecracker --version` = v1.15.0 (same as the stock jailer, so forkd's version-match check still passes) and is behaviour-identical to stock Firecracker v1.15.0 UNLESS `FIRECRACKER_MITOS_SHARED_MEM` or `FIRECRACKER_MITOS_WP_UDS` are set at runtime; this PR sets neither anywhere (the live-fork wiring is a later milestone), so the runtime attack surface is UNCHANGED from stock until that gate is turned on. The swap is a single COPY + RUN per image and is trivially revertable (drop it and the stock upstream firecracker from `hack/install-firecracker.sh` remains). Residual: the patched build does not yet carry cosign/SBOM attestation of its own (tracked with the image-provenance follow-up); trust rests on the pinned sha256 plus the reproducible fork build. |
 | Image CVEs | partial | Trivy scans the built images on every PR for HIGH/CRITICAL fixable findings (ADVISORY today: reported, not yet gating, pending base-image remediation); govulncheck is the BLOCKING gate for Go call-graph-reachable vulnerabilities; base-image and dependency bumps arrive via dependabot. Runtime re-scan of long-lived published tags is not yet automated. |
 | Guest kernel currency | partial | The shipped vmlinux is pinned to an exact version (docs/kernel-cve.md) and validated end to end by the KVM workflow; CVE watch is a documented manual process, not an automated feed. |
 | Guest kernel integrity at stage time | partial | The Helm kernel-stage init container downloads the guest kernel and, when `kernelProvisioner.kernelSha256` is set, verifies the staged file against that digest and FAILS CLOSED on mismatch (covering both a fresh download and an already-cached file), so a swapped upstream object or a MITMed fetch cannot boot a backdoored kernel fleet-wide. The digest is empty by default (a warning is logged); operators should pin it. The privileged forkd, kvm-device-plugin, and kernel-stage pods set `automountServiceAccountToken: false` since none call the Kubernetes API. |
