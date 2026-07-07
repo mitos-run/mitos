@@ -63,6 +63,11 @@ pub fn spawn_detached(command: &str, env: &[(String, String)], cwd: &str) -> std
     for (k, v) in env {
         cmd.env(k, v);
     }
+    // Raise the workload's soft RLIMIT_NOFILE to a sane default (issue #786) so a
+    // long-running serving app inherits the same file-descriptor headroom as an
+    // exec child. Registers a second pre_exec hook; hooks stack in registration
+    // order and this one only touches getrlimit/setrlimit (see sys/rlimit.rs).
+    crate::sys::rlimit::apply_nofile_limit(&mut cmd);
     // SAFETY: setsid(2) is async-signal-safe and has no preconditions; the
     // pre-exec closure runs in the forked child before exec and performs only
     // setsid plus an error read, no allocation. Detaching the child into a new

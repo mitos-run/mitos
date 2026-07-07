@@ -34,6 +34,7 @@
 
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -220,7 +221,11 @@ async fn exec_shell_nostdin(
     let configured = env.snapshot().await;
     let merged_env = build_merged_env(&configured, &req_env);
 
-    let mut child = tokio::process::Command::new("/bin/sh")
+    // Built as a std::process::Command so the RLIMIT_NOFILE pre_exec hook can be
+    // registered (all unsafe stays in sys/), then converted to a tokio Command
+    // to spawn. process_group(0) is equivalent to Setpgid=true.
+    let mut std_cmd = std::process::Command::new("/bin/sh");
+    std_cmd
         .arg("-c")
         .arg(&command)
         .current_dir(&cwd)
@@ -230,7 +235,10 @@ async fn exec_shell_nostdin(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .process_group(0)
+        .process_group(0);
+    // Raise the child's soft RLIMIT_NOFILE to a sane default (issue #786).
+    crate::sys::rlimit::apply_nofile_limit(&mut std_cmd);
+    let mut child = tokio::process::Command::from(std_cmd)
         .spawn()
         .map_err(|e| {
             let _ = tx.try_send(Ok(exit_frame(1, 0.0, format!("start: {e}"))));
@@ -373,7 +381,10 @@ async fn exec_shell(
 
     // Spawn /bin/sh -c <command> in its own process group so SIGKILL kills
     // the whole child tree. process_group(0) is equivalent to Setpgid=true.
-    let mut child = tokio::process::Command::new("/bin/sh")
+    // Built as a std::process::Command so the RLIMIT_NOFILE pre_exec hook can be
+    // registered (all unsafe stays in sys/), then converted to a tokio Command.
+    let mut std_cmd = std::process::Command::new("/bin/sh");
+    std_cmd
         .arg("-c")
         .arg(&open.command)
         .current_dir(&cwd)
@@ -383,7 +394,11 @@ async fn exec_shell(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .process_group(0)
+        .process_group(0);
+    // Raise the child's soft RLIMIT_NOFILE to a sane default (issue #786) so a
+    // command like `python -c 'import pandas'` is not killed by EMFILE.
+    crate::sys::rlimit::apply_nofile_limit(&mut std_cmd);
+    let mut child = tokio::process::Command::from(std_cmd)
         .spawn()
         .map_err(|e| {
             // Best-effort: send a spawn-failure exit frame. Ignore if channel full.
@@ -658,6 +673,11 @@ async fn exec_pty(
     // Register setsid + TIOCSCTTY in pre_exec (see sys/pty.rs for SAFETY).
     pty_sys::apply_pty_session_leader(&mut std_cmd)
         .map_err(|e| Status::internal(format!("exec: apply_pty_session_leader: {e}")))?;
+
+    // Raise the child's soft RLIMIT_NOFILE to a sane default (issue #786) so an
+    // interactive shell and anything it launches can open more than the 1024
+    // files a bare init inherits. See sys/rlimit.rs for the SAFETY contract.
+    crate::sys::rlimit::apply_nofile_limit(&mut std_cmd);
 
     // Convert the master to an AsyncFd for epoll-driven IO. tokio::fs::File
     // uses spawn_blocking and does not work correctly with O_NONBLOCK on a PTY
