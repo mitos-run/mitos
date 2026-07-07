@@ -548,6 +548,23 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		args = append(args, "--live-cow-fork")
 	}
 
+	// Live-cow write-protect needs a KERNEL-MODE userfaultfd over the guest RAM: the
+	// source Firecracker registers UFFD_WP so the KVM guest's own writes fault to the
+	// copy-before-unprotect handler (issue #832). Creating a kernel-mode userfaultfd
+	// from an unprivileged container requires CAP_SYS_PTRACE (the same gate the kernel
+	// applies via `sysctl_unprivileged_userfaultfd`); without it the `userfaultfd(2)`
+	// syscall returns EPERM, the source never offers the write-protect handshake, and
+	// every fork silently falls back to the Full snapshot. `/dev/userfaultfd` is not
+	// injected into the pod, so the source's userfaultfd path is the syscall this
+	// capability gates. It is added ONLY when --live-cow-fork is on, so a pool that
+	// does not use live-cow keeps the minimal NET_ADMIN-only set. Documented as a PSA
+	// exception in docs/threat-model.md; the capability is confined to the pod (not
+	// privileged, not hostPID), so it cannot ptrace another pod's processes.
+	huskCaps := []corev1.Capability{"NET_ADMIN"}
+	if opts.LiveCowFork {
+		huskCaps = append(huskCaps, "SYS_PTRACE")
+	}
+
 	// Name-based egress: when the operator configured DNS upstream(s), pass them
 	// to the stub so the per-pod DNS proxy resolves and pins allowlisted names.
 	// Empty leaves name-based egress off (IP-only allowlists still work); the
@@ -1039,8 +1056,10 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 							// the load-bearing control that gives the husk guest VM
 							// CNI-independent default-deny egress + the unconditional
 							// cloud-metadata block. Documented as a PSA exception in
-							// docs/threat-model.md.
-							Add: []corev1.Capability{"NET_ADMIN"},
+							// docs/threat-model.md. SYS_PTRACE is appended only for a
+							// live-cow pool (see huskCaps above), for the kernel-mode
+							// userfaultfd the write-protect fork needs.
+							Add: huskCaps,
 						},
 						SeccompProfile: &corev1.SeccompProfile{
 							Type: corev1.SeccompProfileTypeRuntimeDefault,
