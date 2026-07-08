@@ -44,20 +44,12 @@ kubectl label namespace mitos \
 helm install mitos deploy/charts/mitos -n mitos --set namespace.create=false
 ```
 
-The command above installs from a checkout. To install the published chart from
-the mitos.run Helm repository instead:
+The command above installs from a checkout. To install the published chart
+instead, pull it straight from the OCI registry on GHCR (no `helm repo add`), the
+same registry the component images live on. Pin `--version` to a release tag:
 
 ```
-helm repo add mitos https://mitos.run/charts
-helm repo update
-helm install mitos mitos/mitos -n mitos --set namespace.create=false
-```
-
-Or install straight from the OCI registry on GHCR (no `helm repo add`), the same
-registry the component images live on:
-
-```
-helm install mitos oci://ghcr.io/mitos-run/charts/mitos -n mitos --set namespace.create=false
+helm install mitos oci://ghcr.io/mitos-run/charts/mitos --version 1.25.0 -n mitos --set namespace.create=false
 ```
 
 The published chart is indexed on Artifact Hub at
