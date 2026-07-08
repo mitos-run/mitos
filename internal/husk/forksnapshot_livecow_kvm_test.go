@@ -406,6 +406,225 @@ func TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM(t *testing.T) {
 		armed, fres.Stages["create_snapshot"])
 }
 
+// TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM is the m5
+// real-KVM gate that closes the loop: with --live-cow-fork AND child import ON, a
+// co-located fork child BOOTS ITS GUEST RAM BY IMPORTING THE SOURCE MEMFD (the
+// patched child restore reads FIRECRACKER_MITOS_CHILD_MEMFD, MAP_PRIVATEs the
+// source's shared memfd, overlays the frozen pages, and loads NO disk mem file), so
+// the create_snapshot mem write disappears end to end and the fork still completes.
+//
+// This is the half TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM
+// deliberately leaves off: that test proves the SAFE fallback (child import OFF ->
+// source writes the disk mem -> child restores from disk, no hang). Here child
+// import is ON, so the source writes NO mem file and the ONLY way the co-located
+// child can boot is by importing the source memfd. It asserts, end to end on KVM:
+//   - (VMSTATE ONLY) the fork wrote NO `mem` file (the ~364ms guest-RAM write is
+//     gone) and create_snapshot is sub-15ms;
+//   - (CHILD IMPORTS, BOOTS, NO DISK MEM) a real co-located SpawnVM child restores
+//     from the fork snapshot that has NO mem file and still boots + execs within a
+//     bounded deadline: it can only have taken its guest RAM from the source memfd;
+//   - (FORK COMPLETES) SpawnVM returns OK (no hang, the v1.32.2 prod failure mode);
+//   - (FORK-TIME MEMORY, NO LEAK) when the restored source can exec, a fork-time
+//     sentinel planted in guest tmpfs is read back by the child as its FORK-TIME
+//     value even after the resumed source overwrites it, so the source's post-fork
+//     write is write-protect-frozen and never leaks into the child (the m2
+//     invariant, observed through the real guest).
+//
+// GATING: skips on no /dev/kvm, no assets, race detector, or a source that does not
+// arm the write-protect handshake (unpatched / uffd-less runner), exactly like the
+// sibling tests. The child-import boot additionally needs the m5 patched binary; a
+// child that cannot boot from the memfd SKIPS unless
+// MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT is set (the firecracker-test job sets it
+// once the re-pinned child-import binary is installed), so an old patched binary is
+// never a false pass and the shipped binary is never a false skip.
+func TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("skipping live-cow child-import KVM test under -race (WP handshake is timing-sensitive; firecracker-test runs it without -race)")
+	}
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("skipping live-cow child-import e2e: /dev/kvm not available (needs a KVM runner)")
+	}
+	snapDir := os.Getenv("MITOS_KVM_HUSK_SNAPSHOT_DIR")
+	if snapDir == "" {
+		t.Skip("skipping live-cow child-import e2e: set MITOS_KVM_HUSK_SNAPSHOT_DIR (the KVM CI sets it)")
+	}
+	for _, name := range []string{"mem", "vmstate"} {
+		if _, err := os.Stat(filepath.Join(snapDir, name)); err != nil {
+			t.Skipf("skipping live-cow child-import e2e: snapshot file %s not present: %v", name, err)
+		}
+	}
+	templateRootfs := filepath.Join(filepath.Dir(snapDir), "rootfs.ext4")
+	if _, err := os.Stat(templateRootfs); err != nil {
+		t.Skipf("skipping live-cow child-import e2e: template rootfs %s not present: %v", templateRootfs, err)
+	}
+	fcBin := os.Getenv("MITOS_KVM_FIRECRACKER")
+	if fcBin == "" {
+		fcBin = "/usr/local/bin/firecracker"
+	}
+	requireArm := os.Getenv("MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM") != ""
+	requireChildImport := os.Getenv("MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT") != ""
+
+	const memMiB = 256
+	// --multi-vm --live-cow-fork source WITH child import ON: the source arms, and
+	// forkSnapshotInstance takes the vmstate-only capture (NO mem file) because the
+	// co-located child is expected to import the source memfd (SpawnVM sets
+	// FIRECRACKER_MITOS_CHILD_MEMFD on it from the armed handle's ChildImport).
+	src := New(firecracker.VMConfig{
+		ID:             "husk-livecow-childimp-src",
+		FirecrackerBin: fcBin,
+		WorkDir:        t.TempDir(),
+		VcpuCount:      1,
+		MemSizeMib:     memMiB,
+	}, Options{
+		AllowUnverified:    true,
+		ReadyTimeout:       30 * time.Second,
+		MultiVM:            true,
+		LiveCowFork:        true,
+		LiveCowChildImport: true,
+		RootfsTemplatePath: templateRootfs,
+		RootfsCoWDir:       t.TempDir(),
+	})
+	defer func() { _ = src.Close() }()
+
+	ctx := context.Background()
+	if err := src.Prepare(ctx); err != nil {
+		t.Fatalf("source Prepare (multi-vm live-cow child-import): %v", err)
+	}
+	sres, err := src.Activate(ctx, ActivateRequest{SnapshotDir: snapDir})
+	if err != nil || !sres.OK {
+		t.Fatalf("source Activate: err=%v res=%+v", err, sres)
+	}
+	srcAgent, err := kvmConnectAgent(sres.VsockPath)
+	if err != nil {
+		t.Fatalf("connect source agent: %v", err)
+	}
+	defer srcAgent.Close() //nolint:errcheck // best-effort teardown
+
+	// Wait bounded for the restored source to arm the write-protect handshake; skip
+	// (or hard-fail under strict) if it never arms, exactly like the sibling tests.
+	deadline := time.Now().Add(20 * time.Second)
+	for src.liveCowSnapshotFreezer() == nil {
+		if time.Now().After(deadline) {
+			const msg = "the RESTORED source Firecracker did not offer the live-cow write-protect handshake; the vmstate-only path is unreachable"
+			if requireArm {
+				t.Fatalf("live-cow child-import e2e (strict, MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM set): %s (issue #832)", msg)
+			}
+			t.Skipf("skipping live-cow child-import e2e: %s (unpatched or restore-path memfd share unsupported on this runner)", msg)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// (FORK-TIME MEMORY, NO LEAK) plant a fork-time sentinel in the source guest's
+	// tmpfs BEFORE the fork, so its page lives in the source guest RAM the child will
+	// import. Scoped behind source execability: a restored source whose guest-agent
+	// vsock reset at restore-resume (issue #838) cannot run this, in which case the
+	// content assertions are skipped but the boot/no-mem/sub-15ms gates below stay
+	// hard. tmpfs (/dev/shm) is guest RAM, so the sentinel is fork-inherited memory.
+	const sentinelPath = "/dev/shm/mitos-childimport-sentinel"
+	const forkVal = "forktime-c0ffee"
+	const leakVal = "postfork-LEAK-dead"
+	sentinelPlanted := false
+	plantCtx, plantCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer plantCancel()
+	if _, err := kvmExecOKCtx(plantCtx, srcAgent, "printf %s > "+sentinelPath+"; /bin/busybox sync || sync || true"); err == nil {
+		sentinelPlanted = true
+	} else {
+		t.Logf("could not plant fork-time sentinel in the source guest (issue #838 restore-resume vsock; content no-leak assertion scoped out): %v", err)
+	}
+
+	// Fork the source down the vmstate-only path (freeze + vmstate, NO mem file).
+	forkDir := filepath.Join(t.TempDir(), "fork-snap")
+	fres, err := src.ForkSnapshot(ctx, ForkSnapshotRequest{ForkID: "livecow-childimp", SnapshotDir: forkDir})
+	if err != nil || !fres.OK {
+		t.Fatalf("source ForkSnapshot (armed live-cow child-import) must succeed on KVM: err=%v res=%+v", err, fres)
+	}
+
+	// (VMSTATE ONLY) NO mem file was written; vmstate + frozen rootfs present.
+	memPath := filepath.Join(forkDir, "mem")
+	if _, err := os.Stat(memPath); err == nil {
+		t.Fatalf("child-import fork must write NO mem file, but %s exists (Full path ran; child would not be importing)", memPath)
+	}
+	if fi, err := os.Stat(filepath.Join(forkDir, "vmstate")); err != nil || fi.Size() == 0 {
+		t.Errorf("child-import fork must write a non-empty vmstate, stat err=%v", err)
+	}
+	if _, ok := fres.Stages["freeze"]; !ok {
+		t.Errorf("child-import fork must freeze the source (vmstate-only path); missing freeze stage: %v", fres.Stages)
+	}
+	// (SUB-15ms CAPTURE) the vmstate-only capture writes only the small device/CPU
+	// state, so create_snapshot is sub-15ms vs the ~364ms Full mem write.
+	capMs := fres.Stages["create_snapshot"]
+	if capMs >= 15 {
+		t.Errorf("create_snapshot stage = %.3fms, want sub-15ms (vmstate-only capture, no ~364ms mem write)", capMs)
+	}
+
+	// (FORK-TIME MEMORY, NO LEAK) after the fork, if the source can still exec,
+	// overwrite the sentinel so a leaked page would be observable in the child. The
+	// write-protect freeze must preserve the fork-time page in FROZEN, which the child
+	// import sources instead of the live (now overwritten) memfd page.
+	sourceOverwrote := false
+	if sentinelPlanted {
+		owCtx, owCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer owCancel()
+		if _, err := kvmExecOKCtx(owCtx, srcAgent, "printf %s > "+sentinelPath+"; /bin/busybox sync || sync || true"); err == nil {
+			sourceOverwrote = true
+		} else {
+			t.Logf("resumed source could not overwrite the sentinel (issue #838); the child must still read the fork-time value: %v", err)
+		}
+	}
+
+	// (CHILD IMPORTS, BOOTS, NO DISK MEM) spawn a real co-located child from the
+	// mem-less fork snapshot. With child import ON and the source armed, SpawnVM sets
+	// FIRECRACKER_MITOS_CHILD_MEMFD on the child from the armed handle's ChildImport,
+	// so the patched child restore imports the source memfd instead of a disk mem file
+	// (there is none). On the v1.32.2 prod binary (no child-import patch) this HANGS;
+	// with the m5 binary it boots.
+	spawnCtx, spawnCancel := context.WithTimeout(ctx, 60*time.Second)
+	defer spawnCancel()
+	childRes := src.SpawnVM(spawnCtx, SpawnVMRequest{
+		VMID:     "livecow-childimp-colo",
+		Activate: ActivateRequest{SnapshotDir: forkDir, ForkSnapshot: true},
+	})
+	if !childRes.OK {
+		if requireChildImport {
+			t.Fatalf("live-cow child-import e2e (strict, MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT set): co-located child must boot BY IMPORTING THE SOURCE MEMFD from the mem-less fork snapshot, got: %+v. The pinned Firecracker must honor FIRECRACKER_MITOS_CHILD_MEMFD (m5)", childRes)
+		}
+		t.Skipf("skipping live-cow child-import e2e: co-located child did not boot from the source memfd (runner Firecracker lacks the m5 child-import patch); the mem-less fork is only bootable by import: %+v", childRes)
+	}
+	// A child that boots from a mem-less fork snapshot proves it read NO disk mem file
+	// (there is none) and took its guest RAM from the imported source memfd.
+	if _, err := os.Stat(memPath); err == nil {
+		t.Errorf("no mem file must exist in the fork snapshot at any point (child imports the memfd), but %s appeared", memPath)
+	}
+	childAgent, err := kvmConnectAgent(childRes.VsockPath)
+	if err != nil {
+		t.Fatalf("connect co-located child agent (child booted from the imported memfd): %v", err)
+	}
+	defer childAgent.Close() //nolint:errcheck // best-effort teardown
+	execCtx, execCancel := context.WithTimeout(ctx, 45*time.Second)
+	defer execCancel()
+	if _, err := kvmExecOKCtx(execCtx, childAgent, "printf childimp-colo-alive"); err != nil {
+		t.Fatalf("co-located child imported the source memfd and restored but could not exec (a corrupt/incoherent RAM import would not boot a working guest): %v", err)
+	}
+
+	// (FORK-TIME MEMORY, NO LEAK) the child must read the sentinel at its FORK-TIME
+	// value, never the source's post-fork overwrite. Hard when the sentinel was
+	// planted; a corrupt import or a leaked source write would fail here.
+	if sentinelPlanted {
+		readCtx, readCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer readCancel()
+		got, err := kvmExecOKCtx(readCtx, childAgent, "cat "+sentinelPath)
+		if err != nil {
+			t.Fatalf("child could not read the imported fork-time sentinel: %v", err)
+		}
+		if got != forkVal {
+			t.Fatalf("child sentinel = %q, want fork-time %q (leaked source post-fork write=%v, sourceOverwrote=%v): the write-protect freeze/frozen overlay did not isolate the child", got, forkVal, got == leakVal, sourceOverwrote)
+		}
+	}
+
+	t.Logf("m5 live-cow child-import PASS: vmstate-only fork wrote NO mem file; create_snapshot=%.3fms freeze=%.3fms (vs ~364ms Full mem write); co-located child BOOTED BY IMPORTING THE SOURCE MEMFD (%dMiB) and execed with no hang; sentinelPlanted=%v sourceOverwrote=%v (child read fork-time value, no leak)",
+		fres.Stages["create_snapshot"], fres.Stages["freeze"], memMiB, sentinelPlanted, sourceOverwrote)
+}
+
 // fullPathRestoredSourceSurvivesFork stands up a SECOND source with live-cow OFF (the
 // FULL mem+vmstate snapshot path), restores it from the same snapshot, forks it, and
 // reports whether the resumed source can still exec. It is the issue #838 isolation
