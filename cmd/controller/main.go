@@ -60,6 +60,7 @@ func main() {
 	var enableRawForkd bool
 	var multiVMFork bool
 	var liveCowFork bool
+	var huskConnReuse bool
 	var liveCowChildImport bool
 	var prewarmChild bool
 	var huskStubImage string
@@ -95,6 +96,7 @@ func main() {
 	flag.BoolVar(&liveCowFork, "live-cow-fork", false, "EXPERIMENTAL, DEFAULT OFF: start warm husk pods with --live-cow-fork so a CO-LOCATED fork child shares the PARENT's resident guest memory (patched Firecracker memfd + userfaultfd write-protect) instead of restoring from the disk fork snapshot (milestone m4b), driving the hosted fork toward sub-100ms. SEPARATE from --multi-vm-fork so it can be deployed off and canaried independently. OFF is byte-for-byte the current disk co-location. The co-located child still falls back to the disk restore where the child-side memfd import is not yet complete, so turning it on never breaks a fork; it is a no-op off Linux (userfaultfd write-protect is Linux-only). Only meaningful with --enable-husk-pods.")
 	flag.BoolVar(&liveCowChildImport, "live-cow-child-import", false, "EXPERIMENTAL, DEFAULT OFF: with --live-cow-fork on, opt warm husk pods onto the VMSTATE-ONLY fork capture (skip the ~364ms disk mem write) so a co-located child boots its guest RAM from the source shared memfd instead of the disk fork snapshot. REQUIRES a child-side-import patched Firecracker; off keeps the armed source writing the disk mem so every child restores from disk and no fork hangs. Only meaningful with --live-cow-fork and --enable-husk-pods.")
 	flag.BoolVar(&prewarmChild, "prewarm-child", false, "EXPERIMENTAL, DEFAULT OFF: keep one dormant generic co-located child Firecracker pre-prepared per multi-vm husk pod so a fork adopts the ready child (fc_boot=0, prepare off the hot path) instead of booting one at fork time. Requires --multi-vm-fork and --enable-husk-pods; a fresh slot re-warms async, a miss falls back to on-demand prepare byte-for-byte.")
+	flag.BoolVar(&huskConnReuse, "husk-conn-reuse", false, "EXPERIMENTAL, DEFAULT OFF: reuse ONE authenticated mTLS husk control connection per husk pod across control-plane RPCs (activate, fork-snapshot, spawn-vm, remove-fork-snapshot) instead of opening a fresh TCP+TLS handshake per RPC. A co-located fork does fork-snapshot then spawn-vm to the SAME source pod, so reuse saves the second full handshake and cuts the per-RPC connection-setup overhead toward zero, driving the hosted fork toward sub-100ms. OFF is byte-for-byte the current one-shot dial-per-RPC path. The husk server always supports both (a one-shot client that closes after one request and a reused connection that sends several), so this flag only changes the CONTROLLER side and can be canaried + rolled back independently. mTLS identity is verified on every dial and one request is in flight per connection, so a reused connection is neither less authenticated nor frame-interleaved (see docs/threat-model.md). Only meaningful with --enable-husk-pods.")
 	flag.StringVar(&huskStubImage, "husk-stub-image", "mitos-husk-stub:latest", "Container image that runs the dormant-VMM stub in a husk pod. Only used with --enable-husk-pods.")
 	flag.StringVar(&huskDNSUpstream, "husk-dns-upstream", "", "Comma-separated DNS resolver list (host:port) the husk-stub per-pod DNS proxy forwards allowlisted name queries to, tried in failover order (recommended: 1.1.1.1:53,8.8.8.8:53). Empty leaves name-based egress off (IP:port allowlists still enforced). Use a public resolver, not cluster DNS, so untrusted sandboxes cannot resolve internal service names.")
 	flag.IntVar(&huskControlPort, "husk-control-port", controller.HuskControlPort, "TCP port the husk stub serves the mTLS network control on; the controller dials podIP:port to activate a dormant husk pod. Only used with --enable-husk-pods.")
@@ -254,6 +256,17 @@ func main() {
 	// husk fields. Its HuskTLS (the controller client mTLS config used to dial a
 	// husk stub's network control) is the SAME config EnsurePKI returns for forkd
 	// dialing; it is assigned below after bootstrap, exactly like nodeRegistry.TLS.
+	// husk control-plane connection reuse (--husk-conn-reuse): when set, hand the
+	// reconciler a connection pool so the activate/fork-snapshot/spawn-vm seams
+	// reuse one authenticated mTLS connection per husk pod instead of dialing a
+	// fresh handshake per RPC. Nil (the default) keeps the byte-for-byte one-shot
+	// dial-per-RPC path.
+	var huskConnPool *controller.HuskConnPool
+	if huskConnReuse {
+		huskConnPool = controller.NewHuskConnPool()
+		logger.Info("husk control connection reuse: ENABLED; the controller reuses one authenticated mTLS control connection per husk pod across RPCs (a co-located fork's fork-snapshot + spawn-vm share one handshake). mTLS identity is verified on every dial")
+	}
+
 	sandboxReconciler := &controller.SandboxReconciler{
 		Client:             mgr.GetClient(),
 		Scheme:             mgr.GetScheme(),
@@ -263,6 +276,7 @@ func main() {
 		EnableHuskPods:     enableHuskPods,
 		MultiVMFork:        multiVMFork,
 		LiveCowFork:        liveCowFork,
+		HuskConns:          huskConnPool,
 		LiveCowChildImport: liveCowChildImport,
 		PrewarmChild:       prewarmChild,
 		HuskControlPort:    huskControlPort,
@@ -321,6 +335,12 @@ func main() {
 		logger.Info("live-cow fork: ENABLED (experimental); warm husk pods run --live-cow-fork so a co-located fork child shares the parent's resident guest memory instead of restoring from the disk fork snapshot, failing closed to the disk restore where the child-side memfd import is not yet complete. Separate from --multi-vm-fork; canary it independently")
 	} else {
 		logger.Info("live-cow fork: disabled (default); co-located fork children restore from the disk fork snapshot. Pass --live-cow-fork to canary parent-memory sharing")
+	}
+
+	if huskConnReuse && !enableHuskPods {
+		logger.Info("WARNING: --husk-conn-reuse is on but --enable-husk-pods is off; connection reuse targets husk control RPCs, which only exist on the husk-pods path, so the flag is a no-op on the raw-forkd path")
+	} else if !huskConnReuse {
+		logger.Info("husk control connection reuse: disabled (default); each husk control RPC dials a fresh mTLS connection. Pass --husk-conn-reuse to reuse one connection per husk pod and cut per-RPC handshake overhead")
 	}
 
 	if enableHuskPods {

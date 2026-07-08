@@ -4,6 +4,9 @@
 {{- if and .Values.controller.liveCowFork (not .Values.controller.enableHuskPods) }}
 {{- fail "controller.liveCowFork requires controller.enableHuskPods: live-cow fork rides the warm husk pod spec, which only exists on the husk-pods path. Set enableHuskPods: true or liveCowFork: false." }}
 {{- end }}
+{{- if and .Values.controller.huskConnReuse (not .Values.controller.enableHuskPods) }}
+{{- fail "controller.huskConnReuse requires controller.enableHuskPods: connection reuse targets husk control RPCs, which only exist on the husk-pods path. Set enableHuskPods: true or huskConnReuse: false." }}
+{{- end }}
 {{- if and .Values.controller.liveCowChildImport (not .Values.controller.liveCowFork) }}
 {{- fail "controller.liveCowChildImport requires controller.liveCowFork: the child-side memfd import only applies to an armed live-cow fork. Set liveCowFork: true or liveCowChildImport: false." }}
 {{- end }}
@@ -53,6 +56,9 @@ spec:
             {{- end }}
             {{- if .Values.controller.liveCowFork }}
             - --live-cow-fork
+            {{- end }}
+            {{- if .Values.controller.huskConnReuse }}
+            - --husk-conn-reuse
             {{- end }}
             {{- if .Values.controller.liveCowChildImport }}
             - --live-cow-child-import

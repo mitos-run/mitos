@@ -678,17 +678,31 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	if sandboxPort == 0 {
 		sandboxPort = huskSandboxPort
 	}
+	// The husk control seams default to the one-shot huskclient.go dialers, or,
+	// when the connection pool is wired (--husk-conn-reuse), to the pool's reusing
+	// variants so the co-located fork's fork-snapshot and spawn-vm to the SAME
+	// source pod share one authenticated mTLS connection. An explicitly-injected
+	// test fake still wins (the nil check).
 	forkSnap := r.forkSnapshot
 	if forkSnap == nil {
 		forkSnap = ForkSnapshotOnHusk
+		if r.HuskConns != nil {
+			forkSnap = r.HuskConns.ForkSnapshotOnHusk
+		}
 	}
 	activate := r.Activate
 	if activate == nil {
 		activate = ActivateHuskPod
+		if r.HuskConns != nil {
+			activate = r.HuskConns.ActivateHuskPod
+		}
 	}
 	spawnVM := r.spawnVM
 	if spawnVM == nil {
 		spawnVM = SpawnVMOnHusk
+		if r.HuskConns != nil {
+			spawnVM = r.HuskConns.SpawnVMOnHusk
+		}
 	}
 
 	// MultiVMFork routing decision, computed ONCE for the whole fan-out. The
@@ -1366,6 +1380,9 @@ func (r *SandboxReconciler) finalizeHuskFork(ctx context.Context, fork *v1.Sandb
 	remove := r.removeForkSnapshot
 	if remove == nil {
 		remove = RemoveForkSnapshotOnHusk
+		if r.HuskConns != nil {
+			remove = r.HuskConns.RemoveForkSnapshotOnHusk
+		}
 	}
 
 	// Resolve the source pod to dial; if it is gone the snapshot went with it.
