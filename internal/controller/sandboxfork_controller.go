@@ -756,14 +756,34 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 			logger.Info("husk fork snapshot failed, requeueing", "source", srcPod.Name, "detail", msg)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
-		// Record the snapshot was taken BEFORE creating any child, so a crash
-		// between here and the child loop does not re-snapshot (re-pause) the
-		// source on the next pass. The children always re-read the same fork
-		// snapshot dir, so persisting the flag first is safe.
+		// Mark the snapshot taken in the IN-MEMORY status now, but DO NOT spend a
+		// standalone apiserver round-trip persisting it here: the flag is folded into
+		// the next status write this pass already makes (the first co-located child
+		// record below, or the unconditional pass-boundary write at the end of this
+		// function), so the happy-path fork does one fewer status round-trip on the
+		// hot path.
+		//
+		// This preserves the crash-recovery invariant the former standalone write
+		// guaranteed: ForkSnapshotTaken must be durable before any child is ACTIVATED
+		// from this snapshot, so a crash can never re-snapshot (re-pause) the source
+		// under a child already restored from an EARLIER snapshot (that would make the
+		// N children an incoherent fork point). It still holds on every path:
+		//   - This block only runs on the pass that FIRST takes the snapshot (guarded
+		//     by !ForkSnapshotTaken); on that pass the recorded-children map is empty,
+		//     because no child can have been recorded before the snapshot existed.
+		//   - new-pod path: the child pods are CREATED (not activated) in this pass;
+		//     activation happens only a LATER pass, after the pass-boundary write below
+		//     has persisted the flag. No child is activated before the flag is durable.
+		//   - co-location path: the flag is persisted ATOMICALLY with the FIRST
+		//     recorded child (the per-spawn status write), so every child after the
+		//     first sees a durable flag. Only the window before the first child's write
+		//     is unprotected, and there no child is yet committed, so a crash
+		//     re-snapshots with nothing to be incoherent with (at worst a benign extra
+		//     source pause, never a split fork point).
+		// The unconditional pass-boundary write below ALWAYS runs before this pass
+		// returns, so ForkSnapshotTaken (and the ForkStartedAt / ForkReconcilePasses
+		// timing anchors set above) are always persisted by the end of this pass.
 		fork.Status.ForkSnapshotTaken = true
-		if err := r.Status().Update(ctx, fork); err != nil {
-			return ctrl.Result{}, err
-		}
 	}
 
 	// Resolve the SOURCE's pool template so the fork child inherits the SAME
