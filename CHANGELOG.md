@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.32.2](https://github.com/mitos-run/mitos/compare/v1.32.1...v1.32.2) (2026-07-08)
+
+
+### Bug Fixes
+
+* **husk:** inject /dev/userfaultfd so the live-cow write-protect fork arms on prod ([#832](https://github.com/mitos-run/mitos/issues/832)) ([#840](https://github.com/mitos-run/mitos/issues/840)) ([1d9b607](https://github.com/mitos-run/mitos/commit/1d9b607b2bb23ef65e63b9ac3d3dfad98b906351))
+
 ## [1.32.1](https://github.com/mitos-run/mitos/compare/v1.32.0...v1.32.1) (2026-07-07)
 
 
