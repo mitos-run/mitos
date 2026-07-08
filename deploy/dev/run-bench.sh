@@ -12,12 +12,14 @@ if [ ! -f /var/lib/mitos/templates/python/snapshot/vmstate ]; then
 fi
 cd /src
 go build -o /tmp/bench ./cmd/bench
-echo "=== forkbench: $(git rev-parse --short HEAD) ==="
-exec /tmp/bench \
+echo "FORKBENCH_RESULT_START $(git rev-parse --short HEAD)"
+/tmp/bench \
   --mode "${MODE:-fork-exec}" \
   --data-dir /var/lib/mitos \
   --template "${TEMPLATE:-python}" \
   --firecracker /fc/firecracker \
   --iterations "${ITERS:-6}" \
   --warmup "${WARMUP:-2}" \
-  --allow-unverified-snapshots
+  --summary \
+  --allow-unverified-snapshots 2>/tmp/fc.log
+echo "FORKBENCH_RESULT_END"
