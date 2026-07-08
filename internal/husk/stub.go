@@ -17,6 +17,7 @@ import (
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
@@ -99,6 +100,29 @@ type vmInstance struct {
 	rootfsClonePath string
 	activeTap       string
 	dnsProxy        *dnsproxy.Server
+
+	// childUFFDPlan carries a co-located live-cow fork child's LAZY UFFD import
+	// intent from SpawnVM to activateInstance: the ChildMemfdImport coordinates (the
+	// source memfd + FROZEN overlay + live bitmap) and the backend socket path.
+	// activateInstance consumes it at the load step to restore through Firecracker's
+	// native Uffd backend (faulting the working set in on demand) instead of a disk
+	// mem file. Nil keeps the disk restore. Set + read under inst.mu.
+	childUFFDPlan *lazyChildUFFDPlan
+	// childUFFD is the live lazy-UFFD handler serving this instance's guest-memory
+	// faults for the life of the child, retained so teardown Closes it (which unblocks
+	// its Serve loop and munmaps the source views). Nil on the disk-restore path.
+	childUFFD fork.ChildUFFDHandle
+}
+
+// lazyChildUFFDPlan is the co-located live-cow fork child's lazy-UFFD import
+// intent. imp is the armed parent handle's ChildImport (the source shared memfd,
+// the FROZEN memfd, and the LIVE frozen bitmap memfd, each identity-verified);
+// sockPath is the backend unix socket the child Firecracker's Uffd restore backend
+// connects to. Built by SpawnVM on the armed child-import path and consumed once by
+// activateInstance.
+type lazyChildUFFDPlan struct {
+	imp      fork.ChildMemfdImport
+	sockPath string
 }
 
 // newVMInstance builds a fresh per-VM instance in StateNew. It is the
@@ -118,6 +142,16 @@ type vmm interface {
 	// (PatchDrive) while the VM is PAUSED, before the guest can write anything,
 	// then resumes explicitly via Resume.
 	LoadSnapshotWithOverrides(mem, snapshot string, resume bool, overrides []firecracker.NetworkOverride) error
+	// LoadSnapshotUFFD loads a snapshot through Firecracker's native userfaultfd
+	// memory backend: instead of a mem file it points /snapshot/load at
+	// uffdSocketPath, a unix socket an external handler is already listening on, so
+	// Firecracker creates the guest userfaultfd and hands it to the handler over the
+	// socket. Always loads PAUSED. The live-cow lazy child import uses it so a
+	// co-located fork child faults its guest RAM in on demand (composed from the
+	// source memfd + FROZEN overlay) instead of restoring a disk mem file. The
+	// vmstate-only fork writes no mem file, so this is the ONLY memory backend a
+	// child-import spawn can take.
+	LoadSnapshotUFFD(snapshot, uffdSocketPath string, overrides []firecracker.NetworkOverride) error
 	// VsockHostPath resolves a relative vsock uds_path to its host location.
 	VsockHostPath(rel string) string
 	// PatchDrive rebinds an existing baked drive (by drive id) to a host backing
@@ -141,6 +175,14 @@ type vmm interface {
 	// fork-snapshot op writes the source VM's snapshot here so child husk pods can
 	// restore independent copies of it.
 	CreateSnapshot(memPath, snapshotPath string) error
+	// CreateSnapshotVMStateOnly writes ONLY the device/CPU vmstate of the PAUSED VM
+	// to snapshotPath and does NOT copy guest memory to a mem file. It is the
+	// live-cow fork capture: the guest RAM is already resident in the source's
+	// exported MAP_SHARED memfd (m1) that a co-located child MAP_PRIVATEs, so the
+	// ~364ms mem write a Full snapshot does is redundant (issue #832). The
+	// fork-snapshot op uses it ONLY on the armed live-cow path and falls back to
+	// CreateSnapshot otherwise, so a fork never breaks.
+	CreateSnapshotVMStateOnly(snapshotPath string) error
 	// Ping reports whether the VMM still answers its API socket. It returns an
 	// error once the Firecracker process is gone or defunct, which the husk
 	// liveness monitor uses to detect a dead warm slot (issue #527).
@@ -508,6 +550,38 @@ type Options struct {
 	// snapshot restore. It is a no-op off Linux (userfaultfd write-protect is
 	// Linux-only); the path fails closed to the disk restore.
 	LiveCowFork bool
+	// LiveCowChildImport gates the VMSTATE-ONLY fork capture (issue #832): the
+	// paused-window optimization that FREEZES the armed source and writes ONLY the
+	// vmstate, SKIPPING the ~364ms guest-RAM `mem` file, on the promise that the
+	// co-located child boots its guest RAM from the source's shared memfd instead
+	// of the disk `mem`. That promise holds ONLY when a shipped child-side
+	// memfd-import Firecracker patch consumes FIRECRACKER_MITOS_CHILD_MEMFD. The
+	// currently shipped patched binary (mitos-fc-wp-on-restore) patches the SOURCE
+	// (restore) side ONLY, so a co-located child RESTORES FROM THE DISK fork
+	// snapshot; a vmstate-only snapshot has no `mem` file, so that child cannot
+	// restore and the fork hangs (the prod hang, children stuck Restoring). It
+	// therefore DEFAULTS false: forkSnapshotInstance keeps writing the disk `mem`
+	// (the Full path) even when the source is armed, so every co-located child is
+	// restorable and the fork never hangs. Turn it on ONLY once a child-side
+	// memfd-import binary is shipped and every co-located child imports the memfd.
+	// Independent of LiveCowFork so the source can be armed (freezer live) without
+	// yet skipping the disk mem.
+	LiveCowChildImport bool
+	// PrewarmChild opts into keeping ONE dormant, generic co-located child
+	// Firecracker pre-prepared (booted, and snapshot-verified when a template
+	// snapshot is configured) in a multi-VM pod, so a co-located fork that does
+	// NOT need a fork-specific launch env can ACTIVATE the pre-warmed child (rootfs
+	// clone at fork time + LoadSnapshot + resume) instead of paying the on-demand
+	// process boot on the fork hot path. SpawnVM consumes the pre-warmed slot and
+	// asynchronously re-warms a fresh one for the NEXT fork, OFF the hot path. It
+	// DEFAULTS false and is a no-op unless MultiVM is also on. It is deliberately
+	// bypassed for the live-cow child-import fork (FIRECRACKER_MITOS_CHILD_MEMFD):
+	// that child MUST be exec'd with per-fork frozen-epoch coordinates that only
+	// exist after the fork's Freeze, so it keeps the on-demand launch byte-for-byte
+	// (the disk-restore co-located fork and template spawn are what the pre-warm
+	// accelerates). At most ONE dormant child is kept, so the pre-warm never
+	// over-admits the pod's per-VM memory budget (it counts as one extra VM).
+	PrewarmChild bool
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -604,13 +678,43 @@ type Stub struct {
 	// instances is the default-off scaffold a later increment migrates that
 	// single-VM state onto (map[vmID]*vmInstance keyed per fork); it is nil unless
 	// a caller opts in, so increment 1 changes no runtime behavior.
-	multiVM   bool
+	multiVM bool
 	// liveCowFork gates the live copy-on-write co-located fork path (Options
 	// .LiveCowFork, milestone m4b). Default false keeps the co-located fork on the
 	// disk snapshot restore byte-for-byte; separate from multiVM so it canaries
 	// independently.
 	liveCowFork bool
-	instances   map[vmID]*vmInstance
+	// liveCowChildImport gates the vmstate-only fork capture (Options
+	// .LiveCowChildImport). Default false: forkSnapshotInstance keeps writing the
+	// disk `mem` file even when the source is armed, so the co-located child (which
+	// restores from the disk fork snapshot until a child-side memfd-import
+	// Firecracker patch ships) is always restorable and the fork never hangs.
+	liveCowChildImport bool
+	// prewarmChild keeps ONE dormant, generic co-located child Firecracker
+	// pre-prepared (Options.PrewarmChild) so a co-located fork that needs no
+	// fork-specific launch env activates it instead of paying the process boot on
+	// the hot path. prewarming is the single-flight guard so at most one re-warm
+	// runs at a time and the pod never keeps more than one pre-warmed child (never
+	// over-admitting the per-VM memory budget). Both guarded by mu; only meaningful
+	// on the multi-VM path.
+	prewarmChild bool
+	prewarming   bool
+	// liveCowParent is the armed parent-side live-cow WP handler for this pod's
+	// running source VM (milestone m5). When non-nil AND liveCowFork is on, a
+	// co-located fork child spawn imports its guest RAM from the parent's live
+	// shared memfd (SpawnVM sets FIRECRACKER_MITOS_CHILD_MEMFD from it) instead of
+	// the disk snapshot mem file. Nil (the default, and today's production wiring
+	// until the parent-arm + Firecracker child-restore patch land) means every
+	// co-located child restores from disk. Set via SetLiveCowParent, which the
+	// source-arm wiring (armLiveCowSource, milestone m6b) drives once the patched
+	// source Firecracker completes the write-protect handshake.
+	liveCowParent fork.ChildImportProvider
+	// liveCowHandle is the armed source-side WP handler (milestone m6b), retained so
+	// teardown can Close it (unblocking a stuck Receive and stopping the Serve fault
+	// loop). It is the SAME object as liveCowParent once the handshake completes, but
+	// typed as the closable handle. Nil unless the source was armed. Guarded by mu.
+	liveCowHandle fork.WPForkHandle
+	instances     map[vmID]*vmInstance
 	// closing is set (under mu) when closeAllInstances begins teardown, so a
 	// concurrent create can no longer add a VM that would outlive Close. Guarded
 	// by mu; only meaningful on the multi-VM path.
@@ -662,6 +766,8 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		egressBytes:        opts.EgressBytes,
 		multiVM:            opts.MultiVM,
 		liveCowFork:        opts.LiveCowFork,
+		liveCowChildImport: opts.LiveCowChildImport,
+		prewarmChild:       opts.PrewarmChild,
 	}
 	// Multi-VM scaffold (#764), default off: allocate the per-fork instance map
 	// ONLY when a caller opts in. No production caller sets MultiVM in increment
@@ -732,7 +838,9 @@ func (s *Stub) Prepare(ctx context.Context) error {
 	if s.multiVM {
 		// A plain Prepare brings up the pod's default (source) VM from the pool
 		// template, so the rootfs clone source is the template (empty override).
-		return s.prepareInstance(ctx, defaultVMID, "")
+		// A plain Prepare is a warm-pool prepay, not on the hosted-fork hot path,
+		// so it opts out of the per-stage timing map (nil stages).
+		return s.prepareInstance(ctx, defaultVMID, "", nil)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

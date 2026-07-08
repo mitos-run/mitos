@@ -23,13 +23,14 @@ import (
 type fakeVMM struct {
 	loadErr error
 
-	mu        sync.Mutex
-	loadCalls int
-	gotMem    string
-	gotState  string
-	gotResume bool
-	gotOverr  []firecracker.NetworkOverride
-	closed    bool
+	mu          sync.Mutex
+	loadCalls   int
+	gotMem      string
+	gotState    string
+	gotResume   bool
+	gotOverr    []firecracker.NetworkOverride
+	gotUFFDSock string
+	closed      bool
 
 	patchCalls []struct {
 		driveID string
@@ -52,6 +53,11 @@ type fakeVMM struct {
 	snapMem   string
 	snapState string
 	snapErr   error
+	// snapVMStateOnly records that the live-cow vmstate-only capture was taken (no
+	// mem file). snapVMStateOnlyErr scripts its failure. On the vmstate-only path
+	// snapMem stays empty, which a test asserts to prove NO mem write happened.
+	snapVMStateOnly    bool
+	snapVMStateOnlyErr error
 
 	// callOrder records the activate-time VMM call sequence ("load", "patch",
 	// "resume") so a test can assert load(resume=false) -> PatchDrive -> Resume.
@@ -88,6 +94,18 @@ func (f *fakeVMM) LoadSnapshotWithOverrides(mem, snapshot string, resume bool, o
 	f.gotResume = resume
 	f.gotOverr = overrides
 	f.callOrder = append(f.callOrder, "load")
+	return f.loadErr
+}
+
+func (f *fakeVMM) LoadSnapshotUFFD(snapshot, uffdSocketPath string, overrides []firecracker.NetworkOverride) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loadCalls++
+	f.gotState = snapshot
+	f.gotUFFDSock = uffdSocketPath
+	f.gotResume = false
+	f.gotOverr = overrides
+	f.callOrder = append(f.callOrder, "load_uffd")
 	return f.loadErr
 }
 
@@ -155,6 +173,16 @@ func (f *fakeVMM) CreateSnapshot(memPath, snapshotPath string) error {
 	f.snapState = snapshotPath
 	f.callOrder = append(f.callOrder, "snapshot")
 	return f.snapErr
+}
+
+func (f *fakeVMM) CreateSnapshotVMStateOnly(snapshotPath string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Deliberately leave f.snapMem empty: the live-cow path writes NO mem file.
+	f.snapVMStateOnly = true
+	f.snapState = snapshotPath
+	f.callOrder = append(f.callOrder, "snapshot_vmstate_only")
+	return f.snapVMStateOnlyErr
 }
 
 func TestVMMInterfaceHasForkSnapshotMethods(t *testing.T) {

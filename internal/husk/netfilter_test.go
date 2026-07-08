@@ -72,31 +72,98 @@ func TestApplyEgressFilterRendersDenyChainWithMetadataBlock(t *testing.T) {
 	if !forwardingEnabled {
 		t.Error("applyEgressFilter did not enable IPv4 forwarding")
 	}
-	// Expect: idempotent tap delete, tap add, addr add, link up, resolver addr
-	// add, shared table apply, sandbox chain apply, masquerade apply, shared input
-	// table apply, sandbox input chain apply.
-	if len(rr.calls) != 10 {
-		t.Fatalf("got %d calls, want 10: %+v", len(rr.calls), rr.calls)
+	// The fork hot path is collapsed to THREE processes: the idempotent tap
+	// pre-delete, one `ip -batch` (tap create + host IP + link up + resolver
+	// bind), and one atomic `nft -f` (shared table + chain + SNAT + input table +
+	// input chain).
+	if len(rr.calls) != 3 {
+		t.Fatalf("got %d calls, want 3 (link del, ip -batch, nft -f): %+v", len(rr.calls), rr.calls)
+	}
+	if got := strings.Join(rr.calls[0].argv, " "); got != "ip link del sbtap0" {
+		t.Errorf("first call must be the idempotent tap pre-delete, got %q", got)
+	}
+	// The ip -batch call carries the tap setup on stdin (no per-command execs).
+	batchArgv := strings.Join(rr.calls[1].argv, " ")
+	if batchArgv != "ip -batch -" {
+		t.Errorf("second call must be ip -batch -, got %q", batchArgv)
+	}
+	batchStdin := rr.calls[1].stdin
+	if !strings.Contains(batchStdin, "tuntap add sbtap0 mode tap") {
+		t.Errorf("ip batch missing tap create:\n%s", batchStdin)
+	}
+	if !strings.Contains(batchStdin, "addr add 10.200.0.1/30 dev sbtap0") {
+		t.Errorf("ip batch missing host IP assignment:\n%s", batchStdin)
+	}
+	if !strings.Contains(batchStdin, "link set sbtap0 up") {
+		t.Errorf("ip batch missing link up:\n%s", batchStdin)
 	}
 	// The resolver IP is bound to the tap as a /32 so the per-pod DNS proxy can
 	// listen on it and the guest's queries are delivered locally.
-	resolverArgv := strings.Join(rr.calls[4].argv, " ")
-	if !strings.Contains(resolverArgv, "169.254.1.1/32") || !strings.Contains(resolverArgv, "sbtap0") {
-		t.Errorf("resolver IP not bound to tap as /32: %v", rr.calls[4].argv)
+	if !strings.Contains(batchStdin, "addr add 169.254.1.1/32 dev sbtap0") {
+		t.Errorf("resolver IP not bound to tap as /32:\n%s", batchStdin)
 	}
-	chainStdin := rr.calls[6].stdin
-	if !strings.Contains(chainStdin, "ip daddr 169.254.169.254 drop") {
-		t.Errorf("chain missing metadata block:\n%s", chainStdin)
+	// The nft call carries the full ruleset (shared table + chain + SNAT + input)
+	// as one atomic document on stdin.
+	nftArgv := strings.Join(rr.calls[2].argv, " ")
+	if nftArgv != "nft -f -" {
+		t.Errorf("third call must be nft -f -, got %q", nftArgv)
 	}
-	if !strings.Contains(chainStdin, "ip daddr 10.0.0.5 tcp dport 5432 accept") {
-		t.Errorf("chain missing static allow:\n%s", chainStdin)
+	nftStdin := rr.calls[2].stdin
+	if !strings.Contains(nftStdin, "ip daddr 169.254.169.254 drop") {
+		t.Errorf("nft doc missing metadata block:\n%s", nftStdin)
 	}
-	if !strings.Contains(chainStdin, netconf.SandboxChainName("sbtap0")) {
-		t.Errorf("chain not named for tap:\n%s", chainStdin)
+	if !strings.Contains(nftStdin, "ip daddr 10.0.0.5 tcp dport 5432 accept") {
+		t.Errorf("nft doc missing static allow:\n%s", nftStdin)
 	}
-	masqStdin := rr.calls[7].stdin
-	if !strings.Contains(masqStdin, "ip saddr 10.200.0.2 masquerade") {
-		t.Errorf("missing masquerade for guest source:\n%s", masqStdin)
+	if !strings.Contains(nftStdin, netconf.SandboxChainName("sbtap0")) {
+		t.Errorf("nft doc missing chain named for tap:\n%s", nftStdin)
+	}
+	if !strings.Contains(nftStdin, "ip saddr 10.200.0.2 masquerade") {
+		t.Errorf("nft doc missing masquerade for guest source:\n%s", nftStdin)
+	}
+}
+
+// TestApplyEgressFilterBatchesExecs pins the exec-count reduction and proves the
+// batched processes carry EXACTLY the same commands the per-command builders
+// would have run: the ip batch equals RenderIPBatch and the nft document equals
+// the concatenation of the shared table, per-tap chain, SNAT, shared input
+// table, and per-tap input chain. This is the regression guard for the perf
+// change (was ~8-10 execs/VM, now 3) and its correctness (identical ruleset).
+func TestApplyEgressFilterBatchesExecs(t *testing.T) {
+	rr := &recordingRunner{}
+	cfg := NetfilterConfig{
+		Tap:        "sbtap0",
+		GuestIP:    net.ParseIP("10.200.0.2"),
+		HostIP:     net.ParseIP("10.200.0.1"),
+		Egress:     v1.EgressDeny,
+		Allow:      []string{"10.0.0.5:5432"},
+		ResolverIP: net.ParseIP("169.254.1.1"),
+	}
+	if err := applyEgressFilter(context.Background(), rr.run, func() error { return nil }, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(rr.calls) != 3 {
+		t.Fatalf("want 3 execs (link del, ip -batch, nft -f), got %d: %+v", len(rr.calls), rr.calls)
+	}
+	// The ip -batch stdin is byte-for-byte RenderIPBatch (single source of truth).
+	wantBatch := netconf.RenderIPBatch(cfg.Tap, cfg.HostIP, cfg.ResolverIP)
+	if rr.calls[1].stdin != wantBatch {
+		t.Errorf("ip batch stdin mismatch:\n got=%q\nwant=%q", rr.calls[1].stdin, wantBatch)
+	}
+	// The nft stdin is the concatenation of the same renders the unbatched path
+	// applied one at a time, so the installed ruleset is unchanged.
+	chain := netconf.RenderSandboxChainSpec(netconf.ChainSpec{
+		Tap: cfg.Tap, GuestIP: cfg.GuestIP, Egress: cfg.Egress,
+		Allow:      []netconf.HostPort{{IP: net.ParseIP("10.0.0.5"), Port: 5432}},
+		ResolverIP: cfg.ResolverIP, Counter: true,
+	})
+	inputChain := netconf.RenderSandboxInputChainSpec(netconf.InputChainSpec{
+		Tap: cfg.Tap, GuestIP: cfg.GuestIP, ResolverIP: cfg.ResolverIP,
+	})
+	wantNft := netconf.RenderSharedTable() + chain + netconf.RenderMasquerade(cfg.GuestIP) +
+		netconf.RenderSharedInputTable() + inputChain
+	if rr.calls[2].stdin != wantNft {
+		t.Errorf("nft doc mismatch:\n got=%q\nwant=%q", rr.calls[2].stdin, wantNft)
 	}
 }
 
@@ -117,20 +184,20 @@ func TestApplyEgressFilterInstallsInputGuard(t *testing.T) {
 	if err := applyEgressFilter(context.Background(), rr.run, func() error { return nil }, cfg); err != nil {
 		t.Fatal(err)
 	}
-	// The last two applies are the shared input table and this tap's input chain.
-	inputTable := rr.calls[8].stdin
-	if !strings.Contains(inputTable, "type filter hook input") {
-		t.Errorf("shared input table not applied:\n%s", inputTable)
+	// The shared input table and this tap's input chain are folded into the single
+	// atomic nft document (the third and last exec).
+	nftStdin := rr.calls[len(rr.calls)-1].stdin
+	if !strings.Contains(nftStdin, "type filter hook input") {
+		t.Errorf("shared input table not applied:\n%s", nftStdin)
 	}
-	inputChain := rr.calls[9].stdin
-	if !strings.Contains(inputChain, "ip saddr 10.200.0.2 ip daddr 169.254.1.1 udp dport 53 accept") {
-		t.Errorf("input chain missing resolver allow:\n%s", inputChain)
+	if !strings.Contains(nftStdin, "ip saddr 10.200.0.2 ip daddr 169.254.1.1 udp dport 53 accept") {
+		t.Errorf("input chain missing resolver allow:\n%s", nftStdin)
 	}
-	if !strings.Contains(inputChain, "ip saddr 10.200.0.2 drop") {
-		t.Errorf("input chain missing guest-to-pod-local drop:\n%s", inputChain)
+	if !strings.Contains(nftStdin, "ip saddr 10.200.0.2 drop") {
+		t.Errorf("input chain missing guest-to-pod-local drop:\n%s", nftStdin)
 	}
-	if !strings.Contains(inputChain, netconf.SandboxInputChainName("sbtap0")) {
-		t.Errorf("input chain not named for tap:\n%s", inputChain)
+	if !strings.Contains(nftStdin, netconf.SandboxInputChainName("sbtap0")) {
+		t.Errorf("input chain not named for tap:\n%s", nftStdin)
 	}
 }
 
@@ -178,8 +245,9 @@ func TestApplyEgressFilterRejectsMalformedAllow(t *testing.T) {
 // retry fail at tap creation with EBUSY and masks the real first-attempt error.
 func TestApplyEgressFilterTearsDownTapOnPartialFailure(t *testing.T) {
 	stepErr := errors.New("RTNETLINK answers: operation not permitted")
-	// Call index 0 is the idempotent tap delete; index 1 is the tap add; index 2
-	// is the host-IP assignment, the first step after the tap exists. Fail there.
+	// Call index 0 is the idempotent tap pre-delete; index 1 is the ip -batch that
+	// CREATES the tap; index 2 is the nft apply, the first step after the tap
+	// exists. Fail there to prove a post-create failure still tears the tap down.
 	rr := &failingRunner{failAt: 2, err: stepErr}
 	cfg := NetfilterConfig{
 		Tap:     "sbtapdeadbeef",

@@ -42,7 +42,7 @@ func TestMultiVMTwoInstancesReachActiveIndependently(t *testing.T) {
 
 	const second vmID = "vm-2"
 	for _, id := range []vmID{defaultVMID, second} {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 		res, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: "/snap"})
@@ -92,7 +92,7 @@ func TestMultiVMCloseOneLeavesOtherActive(t *testing.T) {
 
 	const second vmID = "vm-2"
 	for _, id := range []vmID{defaultVMID, second} {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 		if _, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
@@ -128,7 +128,7 @@ func TestMultiVMMeteringReportsBothVMs(t *testing.T) {
 	s := newMultiVMTestStub(t, vms)
 
 	for _, id := range []vmID{defaultVMID, "vm-2"} {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 		if _, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
@@ -172,13 +172,13 @@ func TestMultiVMSecondActivateFailClosedLeavesFirstActive(t *testing.T) {
 		MultiVM: true,
 	})
 
-	if err := s.prepareInstance(context.Background(), defaultVMID, ""); err != nil {
+	if err := s.prepareInstance(context.Background(), defaultVMID, "", nil); err != nil {
 		t.Fatalf("prepareInstance(default): %v", err)
 	}
 	if _, err := s.activateInstance(context.Background(), defaultVMID, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
 		t.Fatalf("activateInstance(default): %v", err)
 	}
-	if err := s.prepareInstance(context.Background(), "vm-2", ""); err != nil {
+	if err := s.prepareInstance(context.Background(), "vm-2", "", nil); err != nil {
 		t.Fatalf("prepareInstance(vm-2): %v", err)
 	}
 	res, err := s.activateInstance(context.Background(), "vm-2", ActivateRequest{SnapshotDir: "/snap"})
@@ -236,7 +236,7 @@ func TestMultiVMActivateRoutesByVMID(t *testing.T) {
 	s := newMultiVMTestStub(t, vms)
 
 	const second vmID = "vm-2"
-	if err := s.prepareInstance(context.Background(), second, ""); err != nil {
+	if err := s.prepareInstance(context.Background(), second, "", nil); err != nil {
 		t.Fatalf("prepareInstance(vm-2): %v", err)
 	}
 	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: "/snap", VMID: string(second)})
@@ -391,7 +391,7 @@ func TestMultiVMPrepareRunsConcurrentlyPerInstance(t *testing.T) {
 		wg.Add(1)
 		go func(i int, id vmID) {
 			defer wg.Done()
-			errs[i] = s.prepareInstance(context.Background(), id, "")
+			errs[i] = s.prepareInstance(context.Background(), id, "", nil)
 		}(i, id)
 	}
 
@@ -454,7 +454,7 @@ func TestMultiVMActivateRunsConcurrentlyPerInstance(t *testing.T) {
 
 	ids := []vmID{defaultVMID, "vm-2"}
 	for _, id := range ids {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 	}
@@ -518,7 +518,7 @@ func TestMultiVMPrepareRefusedWhileClosing(t *testing.T) {
 	if got := s.instanceFor("late", true); got != nil {
 		t.Fatalf("instanceFor create during closing = %v, want nil (refused)", got)
 	}
-	if err := s.prepareInstance(context.Background(), "late", ""); err == nil {
+	if err := s.prepareInstance(context.Background(), "late", "", nil); err == nil {
 		t.Fatal("prepareInstance during closing = nil error, want a closing error")
 	}
 	// Also refuse re-preparing an id that ALREADY has a map entry (Close leaves
@@ -531,7 +531,7 @@ func TestMultiVMPrepareRefusedWhileClosing(t *testing.T) {
 	if got := s.instanceFor("existing", true); got != nil {
 		t.Fatalf("instanceFor create for an existing entry during closing = %v, want nil (refused)", got)
 	}
-	if err := s.prepareInstance(context.Background(), "existing", ""); err == nil {
+	if err := s.prepareInstance(context.Background(), "existing", "", nil); err == nil {
 		t.Fatal("prepareInstance of an existing entry during closing = nil error, want a closing error")
 	}
 	s.mu.Lock()
@@ -564,7 +564,7 @@ func TestSpawnVMActivationFailureReturnsNotOK(t *testing.T) {
 		MultiVM: true,
 	})
 	// Bring up the primary VM so we can prove it is undisturbed by the failure.
-	if err := s.prepareInstance(context.Background(), defaultVMID, ""); err != nil {
+	if err := s.prepareInstance(context.Background(), defaultVMID, "", nil); err != nil {
 		t.Fatalf("prepareInstance(default): %v", err)
 	}
 	if _, err := s.activateInstance(context.Background(), defaultVMID, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
