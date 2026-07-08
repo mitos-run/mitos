@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.37.2](https://github.com/mitos-run/mitos/compare/v1.37.1...v1.37.2) (2026-07-08)
+
+
+### Bug Fixes
+
+* **husk:** await dormant slot in the prewarm KVM test (eager warm races it) ([#861](https://github.com/mitos-run/mitos/issues/861)) ([ffe96fe](https://github.com/mitos-run/mitos/commit/ffe96fe2345bed5845d1e9ccb185b6b9d0ab167d))
+
 ## [1.37.1](https://github.com/mitos-run/mitos/compare/v1.37.0...v1.37.1) (2026-07-08)
 
 
