@@ -196,6 +196,10 @@ type HuskPodOptions struct {
 	// memfd. REQUIRES LiveCowFork on and a child-side-import Firecracker binary;
 	// default off, fails closed to the disk restore.
 	LiveCowChildImport bool
+	// PrewarmChild starts the husk stub with --prewarm-child so a multi-vm pod keeps
+	// one dormant generic co-located child Firecracker pre-prepared and a fork adopts
+	// it (fc_boot off the hot path). DEFAULT OFF; requires MultiVM.
+	PrewarmChild bool
 	// MultiVMForkVMs is the number of ADDITIONAL fork-child VMs a multi-VM pod
 	// reserves node memory for up front (beyond the source VM), so the co-location
 	// routing has room to co-locate that many children before a fork spills to a new
@@ -555,6 +559,9 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 	}
 	if opts.LiveCowChildImport {
 		args = append(args, "--live-cow-child-import")
+	}
+	if opts.PrewarmChild {
+		args = append(args, "--prewarm-child")
 	}
 
 	// Live-cow write-protect needs a KERNEL-MODE userfaultfd over the guest RAM: the
@@ -1388,6 +1395,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 			MultiVM:            r.MultiVM,
 			LiveCowFork:        r.LiveCowFork,
 			LiveCowChildImport: r.LiveCowChildImport,
+			PrewarmChild:       r.PrewarmChild,
 			MultiVMForkVMs:     r.MultiVMForkVMs,
 			StubImage:          r.HuskStubImage,
 			DNSUpstream:        r.HuskDNSUpstream,

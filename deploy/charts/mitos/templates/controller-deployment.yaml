@@ -7,6 +7,9 @@
 {{- if and .Values.controller.liveCowChildImport (not .Values.controller.liveCowFork) }}
 {{- fail "controller.liveCowChildImport requires controller.liveCowFork: the child-side memfd import only applies to an armed live-cow fork. Set liveCowFork: true or liveCowChildImport: false." }}
 {{- end }}
+{{- if and .Values.controller.prewarmChild (not .Values.controller.multiVMFork) }}
+{{- fail "controller.prewarmChild requires controller.multiVMFork: the pre-warmed child is a co-located multi-vm slot. Set multiVMFork: true or prewarmChild: false." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,6 +56,9 @@ spec:
             {{- end }}
             {{- if .Values.controller.liveCowChildImport }}
             - --live-cow-child-import
+            {{- end }}
+            {{- if .Values.controller.prewarmChild }}
+            - --prewarm-child
             {{- end }}
             - --husk-stub-image={{ include "mitos.image" (dict "root" . "image" .Values.huskStub.image) }}
             - --husk-data-dir={{ .Values.controller.huskDataDir }}
