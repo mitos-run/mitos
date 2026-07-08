@@ -60,6 +60,7 @@ func main() {
 	var enableRawForkd bool
 	var multiVMFork bool
 	var liveCowFork bool
+	var liveCowChildImport bool
 	var huskStubImage string
 	var huskDNSUpstream string
 	var huskControlPort int
@@ -91,6 +92,7 @@ func main() {
 	flag.BoolVar(&enableRawForkd, "enable-raw-forkd", false, "Fallback run path: build the snapshot and fork per claim on a holder node (no husk pods). Off by default (the husk pod-native path runs). --mock implies this. husk-pods needs real KVM nodes; raw-forkd is the path the mock/dev overlay uses.")
 	flag.BoolVar(&multiVMFork, "multi-vm-fork", false, "EXPERIMENTAL, DEFAULT OFF: route a hosted fork child into an ADDITIONAL VM spawned INSIDE the source husk pod (the spawn-vm control op) instead of a brand-new child pod, when the source pod is multi-VM capable (its stub runs --multi-vm). OFF is byte-for-byte the current new-pod-per-fork path, so nothing changes unless you opt in AND the source pod is multi-VM capable; a non-capable source silently falls back to a new pod. This wires the routing + status (child status.pod = source pod, status.vmId = the spawned VM); the per-pod and node memory accounting that pends or spills a fork when a pod is full is a follow-up, so co-location is capped conservatively and the remainder spills to new pods. Only used with --enable-husk-pods.")
 	flag.BoolVar(&liveCowFork, "live-cow-fork", false, "EXPERIMENTAL, DEFAULT OFF: start warm husk pods with --live-cow-fork so a CO-LOCATED fork child shares the PARENT's resident guest memory (patched Firecracker memfd + userfaultfd write-protect) instead of restoring from the disk fork snapshot (milestone m4b), driving the hosted fork toward sub-100ms. SEPARATE from --multi-vm-fork so it can be deployed off and canaried independently. OFF is byte-for-byte the current disk co-location. The co-located child still falls back to the disk restore where the child-side memfd import is not yet complete, so turning it on never breaks a fork; it is a no-op off Linux (userfaultfd write-protect is Linux-only). Only meaningful with --enable-husk-pods.")
+	flag.BoolVar(&liveCowChildImport, "live-cow-child-import", false, "EXPERIMENTAL, DEFAULT OFF: with --live-cow-fork on, opt warm husk pods onto the VMSTATE-ONLY fork capture (skip the ~364ms disk mem write) so a co-located child boots its guest RAM from the source shared memfd instead of the disk fork snapshot. REQUIRES a child-side-import patched Firecracker; off keeps the armed source writing the disk mem so every child restores from disk and no fork hangs. Only meaningful with --live-cow-fork and --enable-husk-pods.")
 	flag.StringVar(&huskStubImage, "husk-stub-image", "mitos-husk-stub:latest", "Container image that runs the dormant-VMM stub in a husk pod. Only used with --enable-husk-pods.")
 	flag.StringVar(&huskDNSUpstream, "husk-dns-upstream", "", "Comma-separated DNS resolver list (host:port) the husk-stub per-pod DNS proxy forwards allowlisted name queries to, tried in failover order (recommended: 1.1.1.1:53,8.8.8.8:53). Empty leaves name-based egress off (IP:port allowlists still enforced). Use a public resolver, not cluster DNS, so untrusted sandboxes cannot resolve internal service names.")
 	flag.IntVar(&huskControlPort, "husk-control-port", controller.HuskControlPort, "TCP port the husk stub serves the mTLS network control on; the controller dials podIP:port to activate a dormant husk pod. Only used with --enable-husk-pods.")
@@ -226,6 +228,7 @@ func main() {
 		EnableHuskPods:            enableHuskPods,
 		MultiVM:                   multiVMFork,
 		LiveCowFork:               liveCowFork,
+		LiveCowChildImport:        liveCowChildImport,
 		HuskStubImage:             huskStubImage,
 		HuskDNSUpstream:           huskDNSUpstream,
 		KVMResourceName:           "mitos.run/kvm",
@@ -257,6 +260,7 @@ func main() {
 		EnableHuskPods:     enableHuskPods,
 		MultiVMFork:        multiVMFork,
 		LiveCowFork:        liveCowFork,
+		LiveCowChildImport: liveCowChildImport,
 		HuskControlPort:    huskControlPort,
 		HuskStubImage:      huskStubImage,
 		HuskDNSUpstream:    huskDNSUpstream,

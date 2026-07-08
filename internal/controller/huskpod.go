@@ -190,6 +190,12 @@ type HuskPodOptions struct {
 	// (milestone m4b). Default off and SEPARATE from MultiVM so it canaries
 	// independently; off keeps the co-located fork on the disk restore byte-for-byte.
 	LiveCowFork bool
+	// LiveCowChildImport starts the husk stub with --live-cow-child-import so an
+	// armed live-cow fork takes the VMSTATE-ONLY capture (skip the ~364ms disk mem
+	// write) and the co-located child boots its guest RAM from the source shared
+	// memfd. REQUIRES LiveCowFork on and a child-side-import Firecracker binary;
+	// default off, fails closed to the disk restore.
+	LiveCowChildImport bool
 	// MultiVMForkVMs is the number of ADDITIONAL fork-child VMs a multi-VM pod
 	// reserves node memory for up front (beyond the source VM), so the co-location
 	// routing has room to co-locate that many children before a fork spills to a new
@@ -546,6 +552,9 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 	// import is not yet complete, so it never breaks a fork.
 	if opts.LiveCowFork {
 		args = append(args, "--live-cow-fork")
+	}
+	if opts.LiveCowChildImport {
+		args = append(args, "--live-cow-child-import")
 	}
 
 	// Live-cow write-protect needs a KERNEL-MODE userfaultfd over the guest RAM: the
@@ -1376,16 +1385,17 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 			}
 		}
 		opts := HuskPodOptions{
-			MultiVM:         r.MultiVM,
-			LiveCowFork:     r.LiveCowFork,
-			MultiVMForkVMs:  r.MultiVMForkVMs,
-			StubImage:       r.HuskStubImage,
-			DNSUpstream:     r.HuskDNSUpstream,
-			KVMResourceName: r.KVMResourceName,
-			SnapshotID:      poolTemplateID(pool),
-			DataDir:         r.DataDir,
-			TLSSecretName:   r.HuskTLSSecretName,
-			CASecretName:    r.HuskCASecretName,
+			MultiVM:            r.MultiVM,
+			LiveCowFork:        r.LiveCowFork,
+			LiveCowChildImport: r.LiveCowChildImport,
+			MultiVMForkVMs:     r.MultiVMForkVMs,
+			StubImage:          r.HuskStubImage,
+			DNSUpstream:        r.HuskDNSUpstream,
+			KVMResourceName:    r.KVMResourceName,
+			SnapshotID:         poolTemplateID(pool),
+			DataDir:            r.DataDir,
+			TLSSecretName:      r.HuskTLSSecretName,
+			CASecretName:       r.HuskCASecretName,
 			// dedicatedNodes (#172): pin this pool's husk pods to the tenant's
 			// dedicated node set. Merged onto the KVM nodeSelector + snapshot-node
 			// affinity below.
