@@ -822,10 +822,13 @@ func TestPrewarmedLiveCowChildImportNoLeakKVM(t *testing.T) {
 	sentinelPlanted := false
 	plantCtx, plantCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer plantCancel()
-	if _, err := kvmExecOKCtx(plantCtx, srcAgent, "printf %s > "+sentinelPath+"; /bin/busybox sync || sync || true"); err == nil {
+	// VERIFY the write landed so sentinelPlanted reflects reality: on a runner with
+	// no /dev/shm (or #838 restore-resume vsock) the write fails and the content
+	// no-leak assertion is scoped out, exactly like the sibling child-import test.
+	if _, err := kvmExecOKCtx(plantCtx, srcAgent, "printf %s "+forkVal+" > "+sentinelPath+" && [ \"$(cat "+sentinelPath+")\" = "+forkVal+" ]"); err == nil {
 		sentinelPlanted = true
 	} else {
-		t.Logf("could not plant fork-time sentinel (#838 restore-resume vsock; content no-leak assertion scoped out): %v", err)
+		t.Logf("could not plant+verify fork-time sentinel (no /dev/shm or #838 restore-resume vsock; content no-leak assertion scoped out, still proven in the sibling child-import test): %v", err)
 	}
 
 	// EAGERLY pre-warm the dormant child BEFORE the fork, so the fork adopts it.
@@ -853,7 +856,7 @@ func TestPrewarmedLiveCowChildImportNoLeakKVM(t *testing.T) {
 	if sentinelPlanted {
 		owCtx, owCancel := context.WithTimeout(ctx, 30*time.Second)
 		defer owCancel()
-		if _, err := kvmExecOKCtx(owCtx, srcAgent, "printf %s > "+sentinelPath+"; /bin/busybox sync || sync || true"); err == nil {
+		if _, err := kvmExecOKCtx(owCtx, srcAgent, "printf %s "+leakVal+" > "+sentinelPath+" && [ \"$(cat "+sentinelPath+")\" = "+leakVal+" ]"); err == nil {
 			sourceOverwrote = true
 		} else {
 			t.Logf("resumed source could not overwrite the sentinel (#838); child must still read fork-time value: %v", err)
