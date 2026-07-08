@@ -843,8 +843,13 @@ func TestPrewarmedLiveCowChildImportNoLeakKVM(t *testing.T) {
 	var slotState State
 	warmDeadline := time.Now().Add(20 * time.Second)
 	for {
-		if inst := src.instances[prewarmSlotVMID]; inst != nil {
+		// Read the slot under the same locks the eager warm goroutine uses
+		// (s.mu for the map lookup via instanceFor, then the instance's own mu),
+		// so the poll never races prepareInstanceOpt's concurrent map/state writes.
+		if inst := src.instanceFor(prewarmSlotVMID, false); inst != nil {
+			inst.mu.Lock()
 			slotState = inst.state
+			inst.mu.Unlock()
 		}
 		if slotState == StateDormant || time.Now().After(warmDeadline) {
 			break
