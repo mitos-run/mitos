@@ -756,13 +756,31 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 			logger.Info("husk fork snapshot failed, requeueing", "source", srcPod.Name, "detail", msg)
 			return ctrl.Result{RequeueAfter: 2 * time.Second}, nil
 		}
-		// Record the snapshot was taken BEFORE creating any child, so a crash
-		// between here and the child loop does not re-snapshot (re-pause) the
-		// source on the next pass. The children always re-read the same fork
-		// snapshot dir, so persisting the flag first is safe.
+		// Mark the snapshot taken. ForkSnapshotTaken MUST be durable before any child
+		// is ACTIVATED from this snapshot, so a crash can never re-snapshot (re-pause)
+		// the source under a child already restored from an EARLIER snapshot: that
+		// would restore later children from a NEWER source memory state and split a
+		// multi-replica fork into an incoherent point.
 		fork.Status.ForkSnapshotTaken = true
-		if err := r.Status().Update(ctx, fork); err != nil {
-			return ctrl.Result{}, err
+
+		// Persist the flag NOW only when this pass will actually co-locate a child.
+		// spawnForkChildInSourcePod ACTIVATES the child (spawn-vm) inside the source
+		// pod in THIS pass, before its per-spawn status write commits, so the flag has
+		// to be durable BEFORE that first activation; otherwise a failed per-spawn
+		// write or a crash in that window leaves an active child while the flag is not
+		// durable, and a later pass re-snapshots under it (the multi-replica split
+		// above). The new-pod path never activates a child in the snapshot pass: it
+		// only CREATES the child pods here (get-or-create; brand-new, not Ready) and
+		// activates them a LATER pass, after the unconditional pass-boundary write at
+		// the end of this function has persisted the flag. So on the new-pod path the
+		// standalone write is redundant with that pass-boundary write and is folded
+		// into it, saving one apiserver round-trip. This block only runs on the pass
+		// that FIRST takes the snapshot (guarded by !ForkSnapshotTaken), where no child
+		// is recorded yet, so the condition here decides the single-writer case once.
+		if spawnInSourcePod && coLocationBudgetRemaining > 0 {
+			if err := r.Status().Update(ctx, fork); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 	}
 
