@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.38.0](https://github.com/mitos-run/mitos/compare/v1.37.2...v1.38.0) (2026-07-08)
+
+
+### Features
+
+* **cli:** shell completion for bash, zsh, and fish ([#811](https://github.com/mitos-run/mitos/issues/811)) ([68c8e55](https://github.com/mitos-run/mitos/commit/68c8e550e74f51887dcb116ad371e073c6a44e0f))
+* **controller:** reuse the husk control-plane connection across RPCs ([#865](https://github.com/mitos-run/mitos/issues/865)) ([cf0a073](https://github.com/mitos-run/mitos/commit/cf0a07303b379b216cc5fc5b808bb15f3e6a6f19))
+
 ## [1.37.2](https://github.com/mitos-run/mitos/compare/v1.37.1...v1.37.2) (2026-07-08)
 
 
