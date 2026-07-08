@@ -33,6 +33,7 @@ spec:
         - { key: mitos.run/dedicated, operator: Exists, effect: NoSchedule }
         - { key: mitos.run/dedicated, operator: Exists, effect: NoExecute }
       securityContext: { runAsNonRoot: false, seccompProfile: { type: RuntimeDefault } }
+      automountServiceAccountToken: false
       initContainers:
         - name: copy-fc
           image: ghcr.io/mitos-run/mitos-husk-stub:v1.37.1
@@ -60,7 +61,7 @@ spec:
             runAsNonRoot: false
             seccompProfile: { type: RuntimeDefault }
           volumeMounts:
-            - { name: fc, mountPath: /fc }
+            - { name: fc, mountPath: /fc, readOnly: true }
             - { name: data, mountPath: /var/lib/mitos }
             - { name: template, mountPath: /template-src, readOnly: true }
             - { name: kernel, mountPath: /var/lib/mitos/vmlinux, readOnly: true }
