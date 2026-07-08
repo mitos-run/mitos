@@ -168,12 +168,13 @@ func TestMultiVMActivateProgramsDistinctTapPerVMID(t *testing.T) {
 	// applied for each VM (one egress chain per instance).
 	var madeDefault, madeSecond, metadataBlocks int
 	for _, c := range rr.calls {
-		// ip tuntap add <tap> mode tap
-		if len(c.argv) >= 4 && c.argv[0] == "ip" && c.argv[1] == "tuntap" && c.argv[2] == "add" {
-			switch c.argv[3] {
-			case wantDefaultTap:
+		// The tap is created by an `ip -batch -` line: `tuntap add <tap> mode tap`
+		// (the per-command execs are collapsed into one batched ip process).
+		if len(c.argv) >= 2 && c.argv[0] == "ip" && c.argv[1] == "-batch" {
+			if strings.Contains(c.stdin, "tuntap add "+wantDefaultTap+" mode tap") {
 				madeDefault++
-			case wantSecondTap:
+			}
+			if strings.Contains(c.stdin, "tuntap add "+wantSecondTap+" mode tap") {
 				madeSecond++
 			}
 		}
