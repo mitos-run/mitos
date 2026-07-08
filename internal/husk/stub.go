@@ -567,6 +567,21 @@ type Options struct {
 	// Independent of LiveCowFork so the source can be armed (freezer live) without
 	// yet skipping the disk mem.
 	LiveCowChildImport bool
+	// PrewarmChild opts into keeping ONE dormant, generic co-located child
+	// Firecracker pre-prepared (booted, and snapshot-verified when a template
+	// snapshot is configured) in a multi-VM pod, so a co-located fork that does
+	// NOT need a fork-specific launch env can ACTIVATE the pre-warmed child (rootfs
+	// clone at fork time + LoadSnapshot + resume) instead of paying the on-demand
+	// process boot on the fork hot path. SpawnVM consumes the pre-warmed slot and
+	// asynchronously re-warms a fresh one for the NEXT fork, OFF the hot path. It
+	// DEFAULTS false and is a no-op unless MultiVM is also on. It is deliberately
+	// bypassed for the live-cow child-import fork (FIRECRACKER_MITOS_CHILD_MEMFD):
+	// that child MUST be exec'd with per-fork frozen-epoch coordinates that only
+	// exist after the fork's Freeze, so it keeps the on-demand launch byte-for-byte
+	// (the disk-restore co-located fork and template spawn are what the pre-warm
+	// accelerates). At most ONE dormant child is kept, so the pre-warm never
+	// over-admits the pod's per-VM memory budget (it counts as one extra VM).
+	PrewarmChild bool
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -675,6 +690,15 @@ type Stub struct {
 	// restores from the disk fork snapshot until a child-side memfd-import
 	// Firecracker patch ships) is always restorable and the fork never hangs.
 	liveCowChildImport bool
+	// prewarmChild keeps ONE dormant, generic co-located child Firecracker
+	// pre-prepared (Options.PrewarmChild) so a co-located fork that needs no
+	// fork-specific launch env activates it instead of paying the process boot on
+	// the hot path. prewarming is the single-flight guard so at most one re-warm
+	// runs at a time and the pod never keeps more than one pre-warmed child (never
+	// over-admitting the per-VM memory budget). Both guarded by mu; only meaningful
+	// on the multi-VM path.
+	prewarmChild bool
+	prewarming   bool
 	// liveCowParent is the armed parent-side live-cow WP handler for this pod's
 	// running source VM (milestone m5). When non-nil AND liveCowFork is on, a
 	// co-located fork child spawn imports its guest RAM from the parent's live
@@ -743,6 +767,7 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		multiVM:            opts.MultiVM,
 		liveCowFork:        opts.LiveCowFork,
 		liveCowChildImport: opts.LiveCowChildImport,
+		prewarmChild:       opts.PrewarmChild,
 	}
 	// Multi-VM scaffold (#764), default off: allocate the per-fork instance map
 	// ONLY when a caller opts in. No production caller sets MultiVM in increment

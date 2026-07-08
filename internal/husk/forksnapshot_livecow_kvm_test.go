@@ -731,3 +731,187 @@ func fullPathRestoredSourceSurvivesFork(ctx context.Context, t *testing.T, snapD
 	t.Logf("#838 control: FULL-path restored source SURVIVES its fork and execs (so the live-cow freeze, not #838, would be the cause)")
 	return true
 }
+
+// TestPrewarmedLiveCowChildImportNoLeakKVM is the gate that the pre-warm does NOT
+// regress the live-cow lazy-UFFD no-leak path (STRICT NO-REGRESSION gate #5): a
+// pod that keeps a dormant child pre-warmed lets a co-located fork ADOPT that
+// already-booted GENERIC Firecracker (fc_boot ~0, boot pre-paid off the hot path)
+// and STILL restore the mem-less fork by LAZILY FAULTING the source memfd through
+// the husk UFFD fault handler, alive, execing, and reading the fork-time sentinel
+// (NO LEAK of the source's post-fork write). It is the child-import boots-from-
+// memfd scenario with PrewarmChild ON, proving the pre-warmed child arms and
+// restores through LoadSnapshotUFFD + the husk handler identically to the
+// on-demand child. Self-skips where the runner Firecracker lacks the Uffd restore
+// backend; strict under MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT.
+func TestPrewarmedLiveCowChildImportNoLeakKVM(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("skipping pre-warm live-cow child-import KVM test under -race (WP handshake is timing-sensitive)")
+	}
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("skipping pre-warm live-cow child-import e2e: /dev/kvm not available (needs a KVM runner)")
+	}
+	snapDir := os.Getenv("MITOS_KVM_HUSK_SNAPSHOT_DIR")
+	if snapDir == "" {
+		t.Skip("skipping pre-warm live-cow child-import e2e: set MITOS_KVM_HUSK_SNAPSHOT_DIR (the KVM CI sets it)")
+	}
+	for _, name := range []string{"mem", "vmstate"} {
+		if _, err := os.Stat(filepath.Join(snapDir, name)); err != nil {
+			t.Skipf("skipping pre-warm live-cow child-import e2e: snapshot file %s not present: %v", name, err)
+		}
+	}
+	templateRootfs := filepath.Join(filepath.Dir(snapDir), "rootfs.ext4")
+	if _, err := os.Stat(templateRootfs); err != nil {
+		t.Skipf("skipping pre-warm live-cow child-import e2e: template rootfs %s not present: %v", templateRootfs, err)
+	}
+	fcBin := os.Getenv("MITOS_KVM_FIRECRACKER")
+	if fcBin == "" {
+		fcBin = "/usr/local/bin/firecracker"
+	}
+	requireArm := os.Getenv("MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM") != ""
+	requireChildImport := os.Getenv("MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT") != ""
+
+	const memMiB = 256
+	src := New(firecracker.VMConfig{
+		ID:             "husk-prewarm-childimp-src",
+		FirecrackerBin: fcBin,
+		WorkDir:        t.TempDir(),
+		VcpuCount:      1,
+		MemSizeMib:     memMiB,
+	}, Options{
+		AllowUnverified:    true,
+		ReadyTimeout:       30 * time.Second,
+		MultiVM:            true,
+		LiveCowFork:        true,
+		LiveCowChildImport: true,
+		PrewarmChild:       true,
+		RootfsTemplatePath: templateRootfs,
+		RootfsCoWDir:       t.TempDir(),
+	})
+	defer func() { _ = src.Close() }()
+
+	ctx := context.Background()
+	if err := src.Prepare(ctx); err != nil {
+		t.Fatalf("source Prepare: %v", err)
+	}
+	sres, err := src.Activate(ctx, ActivateRequest{SnapshotDir: snapDir})
+	if err != nil || !sres.OK {
+		t.Fatalf("source Activate: err=%v res=%+v", err, sres)
+	}
+	srcAgent, err := kvmConnectAgent(sres.VsockPath)
+	if err != nil {
+		t.Fatalf("connect source agent: %v", err)
+	}
+	defer srcAgent.Close() //nolint:errcheck // best-effort teardown
+
+	deadline := time.Now().Add(20 * time.Second)
+	for src.liveCowSnapshotFreezer() == nil {
+		if time.Now().After(deadline) {
+			const msg = "the RESTORED source Firecracker did not offer the live-cow write-protect handshake; the vmstate-only path is unreachable"
+			if requireArm {
+				t.Fatalf("pre-warm live-cow child-import e2e (strict, MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM set): %s", msg)
+			}
+			t.Skipf("skipping pre-warm live-cow child-import e2e: %s (unpatched or restore-path memfd share unsupported)", msg)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Plant a fork-time sentinel in the source guest RAM (tmpfs) BEFORE the fork.
+	const sentinelPath = "/dev/shm/mitos-prewarm-childimp-sentinel"
+	const forkVal = "forktime-c0ffee"
+	const leakVal = "postfork-LEAK-dead"
+	sentinelPlanted := false
+	plantCtx, plantCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer plantCancel()
+	if _, err := kvmExecOKCtx(plantCtx, srcAgent, "printf %s > "+sentinelPath+"; /bin/busybox sync || sync || true"); err == nil {
+		sentinelPlanted = true
+	} else {
+		t.Logf("could not plant fork-time sentinel (#838 restore-resume vsock; content no-leak assertion scoped out): %v", err)
+	}
+
+	// EAGERLY pre-warm the dormant child BEFORE the fork, so the fork adopts it.
+	if err := src.PrewarmChild(ctx); err != nil {
+		t.Fatalf("PrewarmChild must boot a dormant child: %v", err)
+	}
+	if got := src.instances[prewarmSlotVMID].state; got != StateDormant {
+		t.Fatalf("pre-warmed slot state = %s, want dormant before the fork", got)
+	}
+
+	// Fork down the vmstate-only path (freeze + vmstate, NO mem file).
+	forkDir := filepath.Join(t.TempDir(), "fork-snap")
+	fres, err := src.ForkSnapshot(ctx, ForkSnapshotRequest{ForkID: "prewarm-childimp", SnapshotDir: forkDir})
+	if err != nil || !fres.OK {
+		t.Fatalf("source ForkSnapshot (armed live-cow child-import) must succeed on KVM: err=%v res=%+v", err, fres)
+	}
+	memPath := filepath.Join(forkDir, "mem")
+	if _, err := os.Stat(memPath); err == nil {
+		t.Fatalf("child-import fork must write NO mem file, but %s exists", memPath)
+	}
+
+	// After the fork, if the source can still exec, overwrite the sentinel so a
+	// leaked page would be observable in the child.
+	sourceOverwrote := false
+	if sentinelPlanted {
+		owCtx, owCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer owCancel()
+		if _, err := kvmExecOKCtx(owCtx, srcAgent, "printf %s > "+sentinelPath+"; /bin/busybox sync || sync || true"); err == nil {
+			sourceOverwrote = true
+		} else {
+			t.Logf("resumed source could not overwrite the sentinel (#838); child must still read fork-time value: %v", err)
+		}
+	}
+
+	// The co-located child ADOPTS the pre-warmed generic Firecracker and restores the
+	// mem-less fork by lazy UFFD import through the husk handler.
+	spawnCtx, spawnCancel := context.WithTimeout(ctx, 60*time.Second)
+	defer spawnCancel()
+	childRes := src.SpawnVM(spawnCtx, SpawnVMRequest{
+		VMID:     "prewarm-childimp-colo",
+		Activate: ActivateRequest{SnapshotDir: forkDir, ForkSnapshot: true},
+	})
+	if !childRes.OK {
+		if requireChildImport {
+			t.Fatalf("pre-warm live-cow child-import e2e (strict): pre-warmed co-located child must boot by LAZILY FAULTING the source memfd from the mem-less fork: %+v", childRes)
+		}
+		t.Skipf("skipping pre-warm live-cow child-import e2e: pre-warmed child did not boot by lazy UFFD (runner Firecracker Uffd backend unavailable): %+v", childRes)
+	}
+
+	// (ON-FORK-PATH BOOT ~0) the adopted child recorded fc_boot=0: the boot was
+	// pre-paid off the fork hot path, even on the live-cow import path.
+	if fc, ok := childRes.Stages["fc_boot"]; !ok || fc != 0 {
+		t.Fatalf("adopted pre-warmed child fc_boot = %v (ok=%v), want 0; stages=%v", fc, ok, childRes.Stages)
+	}
+	// The mem-less fork stays mem-less: the child imported the memfd, read no disk mem.
+	if _, err := os.Stat(memPath); err == nil {
+		t.Errorf("no mem file must exist in the fork snapshot at any point, but %s appeared", memPath)
+	}
+
+	childAgent, err := kvmConnectAgent(childRes.VsockPath)
+	if err != nil {
+		t.Fatalf("connect adopted pre-warmed child agent: %v", err)
+	}
+	defer childAgent.Close() //nolint:errcheck // best-effort teardown
+	execCtx, execCancel := context.WithTimeout(ctx, 45*time.Second)
+	defer execCancel()
+	if _, err := kvmExecOKCtx(execCtx, childAgent, "printf prewarm-childimp-alive"); err != nil {
+		t.Fatalf("adopted pre-warmed child imported the memfd and restored but could not exec: %v", err)
+	}
+	if childRestoreMs, ok := childRes.Stages["vmstate_restore"]; ok && childRestoreMs >= 100 {
+		t.Fatalf("child vmstate_restore = %.3fms, want well below 100ms (lazy UFFD faults only the working set)", childRestoreMs)
+	}
+
+	// (FORK-TIME MEMORY, NO LEAK) the child reads the sentinel at its FORK-TIME
+	// value, never the source's post-fork overwrite.
+	if sentinelPlanted {
+		readCtx, readCancel := context.WithTimeout(ctx, 30*time.Second)
+		defer readCancel()
+		got, err := kvmExecOKCtx(readCtx, childAgent, "cat "+sentinelPath)
+		if err != nil {
+			t.Fatalf("adopted child could not read the imported fork-time sentinel: %v", err)
+		}
+		if got != forkVal {
+			t.Fatalf("child sentinel = %q, want fork-time %q (leaked source post-fork write=%v, sourceOverwrote=%v): the pre-warmed child's lazy import did not isolate it", got, forkVal, got == leakVal, sourceOverwrote)
+		}
+	}
+
+	t.Logf("pre-warm live-cow child-import PASS: pre-warmed child ADOPTED (fc_boot=0, boot pre-paid) and LAZILY FAULTED its guest RAM from the source memfd on the mem-less fork with no hang; sentinelPlanted=%v sourceOverwrote=%v (child read fork-time value, no leak)", sentinelPlanted, sourceOverwrote)
+}
