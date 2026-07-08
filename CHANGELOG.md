@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.34.0](https://github.com/mitos-run/mitos/compare/v1.33.0...v1.34.0) (2026-07-08)
+
+
+### Features
+
+* **controller:** wire --live-cow-child-import so the vmstate-only fork engages ([#845](https://github.com/mitos-run/mitos/issues/845)) ([bb59f09](https://github.com/mitos-run/mitos/commit/bb59f0927c1cd8897868e9c6430eea2b6b364bd6))
+
 ## [1.33.0](https://github.com/mitos-run/mitos/compare/v1.32.2...v1.33.0) (2026-07-08)
 
 
