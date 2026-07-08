@@ -47,6 +47,22 @@ import (
 // restore-path-unsupported binary), or the race detector all skip rather than assert,
 // so it is never a false pass. The firecracker-test job (real KVM, patched Firecracker,
 // no -race) is where it proves the wiring.
+// shortKVMWorkDir returns a short temp dir for a husk VM WorkDir. t.TempDir()
+// embeds the (long) test name, and a co-located child FC binds its API socket at
+// WorkDir/<childID>/firecracker.sock; with these long test names that path
+// overflows the unix-socket sun_path limit (SUN_LEN, 108 bytes) and the child
+// Firecracker exits with "path must be shorter than SUN_LEN". A short base keeps
+// the socket path well under the limit. Cleaned up at test end.
+func shortKVMWorkDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("", "hk")
+	if err != nil {
+		t.Fatalf("short workdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(d) })
+	return d
+}
+
 func TestForkSnapshotLiveCowSourceArmedVmstateOnlyKVM(t *testing.T) {
 	if raceDetectorEnabled {
 		t.Skip("skipping live-cow source-arm KVM test under -race (WP handshake is timing-sensitive; the firecracker-test job runs it without -race)")
@@ -309,7 +325,7 @@ func TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM(t *testing.T) {
 	src := New(firecracker.VMConfig{
 		ID:             "husk-livecow-fallback-src",
 		FirecrackerBin: fcBin,
-		WorkDir:        t.TempDir(),
+		WorkDir:        shortKVMWorkDir(t),
 		VcpuCount:      1,
 		MemSizeMib:     memMiB,
 	}, Options{
@@ -472,7 +488,7 @@ func TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM(t *testi
 	src := New(firecracker.VMConfig{
 		ID:             "husk-livecow-childimp-src",
 		FirecrackerBin: fcBin,
-		WorkDir:        t.TempDir(),
+		WorkDir:        shortKVMWorkDir(t),
 		VcpuCount:      1,
 		MemSizeMib:     memMiB,
 	}, Options{

@@ -2725,7 +2725,7 @@ jobs:
           # KVM runner it needs more than the 5s default to bind its API socket. Raise
           # the ready ceiling for this step only (prod is unaffected; a healthy launch
           # still returns immediately).
-          export MITOS_FC_READY_TIMEOUT_SECONDS=45
+          export MITOS_FC_READY_TIMEOUT_SECONDS=20
           if [ -r /dev/userfaultfd ] && [ -w /dev/userfaultfd ]; then
             export MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM=1
             export MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT=1
