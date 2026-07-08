@@ -62,7 +62,7 @@ spec:
           volumeMounts:
             - { name: fc, mountPath: /fc }
             - { name: data, mountPath: /var/lib/mitos }
-            - { name: template, mountPath: /var/lib/mitos/templates/python, readOnly: true }
+            - { name: template, mountPath: /template-src, readOnly: true }
             - { name: kernel, mountPath: /var/lib/mitos/vmlinux, readOnly: true }
             - { name: src, mountPath: /src }
       volumes:

@@ -3,6 +3,13 @@
 # Drive: kubectl -n mitos exec deploy/mitos-forkbench -- sh /src/deploy/dev/run-bench.sh
 # Override iterations/mode/template via env: ITERS=20 sh run-bench.sh
 set -e
+# Stage the read-only prod template into the writable data-dir once (Firecracker
+# opens the fork rootfs read-write; the prod template mount stays untouched).
+if [ ! -f /var/lib/mitos/templates/python/snapshot/vmstate ]; then
+  echo "staging template copy (one-time)..."
+  mkdir -p /var/lib/mitos/templates/python
+  cp -a /template-src/. /var/lib/mitos/templates/python/
+fi
 cd /src
 go build -o /tmp/bench ./cmd/bench
 echo "=== forkbench: $(git rev-parse --short HEAD) ==="
