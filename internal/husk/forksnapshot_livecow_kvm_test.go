@@ -51,11 +51,11 @@ import (
 // embeds the (long) test name, and a co-located child FC binds its API socket at
 // WorkDir/<childID>/firecracker.sock; with these long test names that path
 // overflows the unix-socket sun_path limit (SUN_LEN, 108 bytes) and the child
-// Firecracker exits with "path must be shorter than SUN_LEN". A short base keeps
-// the socket path well under the limit. Cleaned up at test end.
+// Firecracker exits with "path must be shorter than SUN_LEN". Pinned to /tmp (not os.TempDir, which honors a possibly-long $TMPDIR) so the
+// socket path stays short + deterministic. Cleaned up at test end.
 func shortKVMWorkDir(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp("", "hk")
+	d, err := os.MkdirTemp("/tmp", "hk")
 	if err != nil {
 		t.Fatalf("short workdir: %v", err)
 	}
