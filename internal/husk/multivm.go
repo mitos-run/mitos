@@ -455,8 +455,23 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	mark = time.Now()
 
 	// Load PAUSED so the rootfs drive can be rebound before the guest runs, then
-	// resume explicitly, exactly as the single-VM path does.
-	if err := inst.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
+	// resume explicitly, exactly as the single-VM path does. A co-located live-cow
+	// fork child armed with a lazy-UFFD import (childUFFDPlan) restores through
+	// Firecracker's NATIVE Uffd backend so it faults its guest RAM in ON DEMAND
+	// (composed from the source memfd + FROZEN overlay) instead of reading a disk mem
+	// file; every other VM loads the disk mem. On the lazy path there is no disk mem
+	// (the fork went vmstate-only), so a UFFD load failure is fatal for this spawn
+	// (fail-closed, never serve a half-restored guest); the plan is only set when the
+	// parent armed, so it is never taken for a plain disk fork.
+	if plan := inst.childUFFDPlan; plan != nil {
+		inst.childUFFDPlan = nil
+		handler, err := s.loadSnapshotChildUFFD(inst.vm, plan, vmStateFile, overrides)
+		if err != nil {
+			werr := fmt.Errorf("husk: lazy-uffd load snapshot from %s for vm %q: %w", req.SnapshotDir, id, err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+		inst.childUFFD = handler
+	} else if err := inst.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
 		werr := fmt.Errorf("husk: load snapshot from %s for vm %q: %w", req.SnapshotDir, id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
@@ -526,6 +541,60 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	}, nil
 }
 
+// armInstanceChildUFFD stores a co-located fork child's lazy-UFFD import plan on
+// its dormant instance so activateInstance takes the Uffd backend at its load step.
+// It takes the instance lock (SpawnVM calls it between prepareInstance and
+// activateInstance, both of which take the lock themselves); a missing instance is
+// a no-op (activate will then fail closed on the missing dormant VM).
+func (s *Stub) armInstanceChildUFFD(id vmID, plan *lazyChildUFFDPlan) {
+	inst := s.instanceFor(id, false)
+	if inst == nil {
+		return
+	}
+	inst.mu.Lock()
+	inst.childUFFDPlan = plan
+	inst.mu.Unlock()
+}
+
+// loadSnapshotChildUFFD restores a co-located fork child through Firecracker's
+// native userfaultfd backend and returns a handler already serving the child's
+// guest-memory faults from the composed source (the source memfd + FROZEN
+// overlay). It binds the backend socket handler, starts the handshake receiver,
+// points /snapshot/load at the socket (paused), waits for the handshake, then
+// starts the Serve loop so the load's own device-restore faults are filled. On any
+// error it Closes the handler and returns. The caller resumes the VM and retains
+// the handler on the instance so teardown Closes it. It mirrors the issue #167
+// UFFD restore orchestration (uffd_engine.go), minus the hot-page preload: the
+// live-cow child pays only the faults for its working set, on demand.
+func (s *Stub) loadSnapshotChildUFFD(vm vmm, plan *lazyChildUFFDPlan, vmStateFile string, overrides []firecracker.NetworkOverride) (fork.ChildUFFDHandle, error) {
+	h, err := fork.StartChildUFFDHandler(plan.sockPath, plan.imp)
+	if err != nil {
+		return nil, fmt.Errorf("start child uffd handler: %w", err)
+	}
+	// Firecracker connects to the socket during /snapshot/load and FAULTS guest
+	// memory DURING the load (device restore dereferences guest RAM), blocking in the
+	// kernel until the handler services those faults. So the receiver must be
+	// accepting before the load, and Serve must be running before the load can
+	// complete: start the receiver + the load PUT concurrently, and once the handshake
+	// delivers the uffd, start Serve so the load's faults are handled.
+	recvErr := make(chan error, 1)
+	go func() { recvErr <- h.Receive() }()
+	putErr := make(chan error, 1)
+	go func() { putErr <- vm.LoadSnapshotUFFD(vmStateFile, plan.sockPath, overrides) }()
+
+	if err := <-recvErr; err != nil {
+		_ = h.Close()
+		<-putErr // let the load unwind so the FC process is reaped by the caller
+		return nil, fmt.Errorf("child uffd handshake: %w", err)
+	}
+	go func() { _ = h.Serve() }()
+	if err := <-putErr; err != nil {
+		_ = h.Close()
+		return nil, fmt.Errorf("load snapshot (child uffd): %w", err)
+	}
+	return h, nil
+}
+
 // SpawnVM brings up an ADDITIONAL same-tenant VM (a new vmID) in a running husk
 // pod: it prepares a dormant per-VM Firecracker for req.VMID then activates it
 // from req.Activate, returning the activated guest's vsock path. It is the server
@@ -565,25 +634,27 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 	if req.Activate.ForkSnapshot && req.Activate.SnapshotDir != "" {
 		rootfsSrcOverride = filepath.Join(req.Activate.SnapshotDir, "rootfs.ext4")
 	}
-	// Milestone m5: when this pod has an armed parent-side live-cow WP handler
-	// (SetLiveCowParent) AND --live-cow-fork is on, the co-located child imports its
-	// guest RAM from the parent's LIVE shared memfd (MAP_PRIVATE + FROZEN overlay)
-	// instead of restoring the memory image from the disk fork snapshot: SpawnVM
-	// sets FIRECRACKER_MITOS_CHILD_MEMFD on the child Firecracker from the parent
-	// handle's ChildImport. The disk mem path is STILL passed to LoadSnapshot as the
-	// fallback, so a child Firecracker that does not honor the env (or a pod with no
-	// armed parent) restores from disk byte-for-byte. FAIL-CLOSED: any error
-	// assembling the import logs and falls back to the disk restore, so turning the
-	// flag on never breaks a fork.
-	var childMemfdEnv []string
+	// When this pod has an armed parent-side live-cow WP handler (SetLiveCowParent)
+	// AND --live-cow-fork is on, the co-located child imports its guest RAM from the
+	// parent's LIVE shared memfd (composed per page with the FROZEN overlay) instead
+	// of restoring the memory image from the disk fork snapshot. It does so LAZILY,
+	// through Firecracker's NATIVE Uffd restore backend: activateInstance points
+	// /snapshot/load at a husk-side handler socket, so the child faults only its
+	// working set in on demand rather than eagerly copying all 256MiB (the
+	// fork-latency fix, childuffd.go). No FIRECRACKER_MITOS_CHILD_MEMFD env and no
+	// disk mem file are needed on this path. FAIL-CLOSED: any error assembling the
+	// import logs and leaves childUFFDPlan nil, so activateInstance restores from disk
+	// (which is present unless the fork went vmstate-only); turning the flag on never
+	// breaks a fork.
+	var childPlan *lazyChildUFFDPlan
 	if s.liveCowForkApplies(req.Activate) && s.liveCowChildImport {
-		env, err := s.liveCowChildImportEnv(req.Activate)
+		plan, err := s.liveCowChildUFFDPlan(id, req.Activate)
 		switch {
 		case err != nil:
-			fmt.Fprintf(os.Stderr, "husk: live-cow child memfd import unavailable for vm %q (%v); restoring from disk fork snapshot this pass\n", req.VMID, err)
-		case env != nil:
-			childMemfdEnv = env
-			fmt.Fprintf(os.Stderr, "husk: live-cow child vm %q boots from the shared parent memfd (%s set); disk mem restore is the fallback\n", req.VMID, fork.EnvChildMemfd)
+			fmt.Fprintf(os.Stderr, "husk: live-cow child uffd import unavailable for vm %q (%v); restoring from disk fork snapshot this pass\n", req.VMID, err)
+		case plan != nil:
+			childPlan = plan
+			fmt.Fprintf(os.Stderr, "husk: live-cow child vm %q lazily faults its guest RAM from the shared parent memfd (uffd backend %s); no disk mem file needed\n", req.VMID, plan.sockPath)
 		default:
 			fmt.Fprintf(os.Stderr, "husk: live-cow fork enabled for co-located child vm %q but no armed live-cow parent; restoring from disk fork snapshot this pass\n", req.VMID)
 		}
@@ -593,7 +664,7 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 	// come from prepare, vmstate_restore / guest_ready / handshake from activate.
 	prepStart := time.Now()
 	prepStages := make(map[string]float64, 3)
-	if err := s.prepareInstance(ctx, id, rootfsSrcOverride, prepStages, childMemfdEnv...); err != nil {
+	if err := s.prepareInstance(ctx, id, rootfsSrcOverride, prepStages); err != nil {
 		return SpawnVMResult{
 			OK:    false,
 			VMID:  req.VMID,
@@ -601,6 +672,12 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 		}
 	}
 	prepStages["prepare_total"] = stageMs(prepStart)
+	// Arm the dormant instance with the lazy-UFFD import plan (if any) so
+	// activateInstance takes the Uffd backend at its load step. Set under the
+	// instance lock, before activate re-acquires it.
+	if childPlan != nil {
+		s.armInstanceChildUFFD(id, childPlan)
+	}
 	res, _ := s.activateInstance(ctx, id, req.Activate)
 	// Merge the prepare and activate stage maps into one breakdown for the spawn.
 	// prepare and activate use disjoint stage names, so neither overwrites the
@@ -667,6 +744,15 @@ func (s *Stub) closeInstanceBody(id vmID, inst *vmInstance) error {
 	if inst.vm != nil {
 		err = inst.vm.Close()
 		inst.vm = nil
+	}
+	// Tear down the lazy-UFFD child import handler AFTER the VMM is gone: closing the
+	// child Firecracker stops it faulting, so the handler's Serve loop then unblocks
+	// cleanly and its source-view munmaps race nothing. A no-op on the disk-restore
+	// path (nil handler). Also clear any unconsumed plan so a re-prepare starts clean.
+	inst.childUFFDPlan = nil
+	if inst.childUFFD != nil {
+		_ = inst.childUFFD.Close()
+		inst.childUFFD = nil
 	}
 	inst.state = StateNew
 	return err

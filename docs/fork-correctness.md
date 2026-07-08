@@ -137,6 +137,22 @@ image. The m2 mechanism closes it with userfaultfd write-protect
   bytes), an untouched page live from the shared memfd (still fork-time bytes, cheap
   CoW). Either way the child sees a consistent point-in-time-T image.
 
+Child side, PER FAULT (lazy UFFD import). The co-located child now boots its guest
+RAM LAZILY through Firecracker's native userfaultfd backend (the husk-side handler
+`internal/fork/childuffd*.go`), faulting only its working set instead of eagerly
+copying the whole guest RAM, so the vmstate-only source win is not eaten by an
+equal-and-opposite child copy. The per-page source selection above then runs PER
+FAULT with a fault-time re-check that preserves the no-leak invariant: on a page
+fault the handler reads the LIVE frozen bit; a frozen page is served from FROZEN
+(fork-time bytes, stable forever once the WP handler wrote them); a not-yet-frozen
+page is served from the live source memfd (still fork-time, since an unfrozen page is
+provably unwritten because the WP handler freezes BEFORE it lets a write land), and
+then the bit is RE-CHECKED after the live read so a page frozen concurrently is
+overridden from FROZEN. So a resumed source's post-fork overwrite is always served as
+its fork-time value, never the mutated value. Unit-tested over a real userfaultfd in
+`internal/fork` `TestChildUFFDLazyImportComposesAndNoLeak` and end to end on KVM in
+`internal/husk` `TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM`.
+
 The ordering FREEZE -> COPY -> UNPROTECT is the whole correctness argument: because
 the copy completes before the unprotect, there is no window in which the parent's
 new value is visible while the fork-time value is lost (the torn-read hazard is
