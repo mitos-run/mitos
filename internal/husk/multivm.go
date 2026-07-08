@@ -576,7 +576,7 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 	// assembling the import logs and falls back to the disk restore, so turning the
 	// flag on never breaks a fork.
 	var childMemfdEnv []string
-	if s.liveCowForkApplies(req.Activate) {
+	if s.liveCowForkApplies(req.Activate) && s.liveCowChildImport {
 		env, err := s.liveCowChildImportEnv(req.Activate)
 		switch {
 		case err != nil:
@@ -951,7 +951,19 @@ func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapsh
 	// FALLBACK (flag off, or no armed parent, or a non-live-cow pod): the Full
 	// CreateSnapshot(mem, vmstate) runs byte-for-byte as before, so a fork never
 	// breaks. This selector is the ONLY behavior change; off is the current path.
-	if freezer := s.liveCowSnapshotFreezer(); freezer != nil {
+	//
+	// CHILD-RESTORABILITY GATE (the prod hang fix): the vmstate-only capture writes
+	// NO `mem` file on the PROMISE that the co-located child boots its guest RAM
+	// from the source's shared memfd. That promise holds ONLY when a child-side
+	// memfd-import Firecracker patch is shipped (s.liveCowChildImport). The shipped
+	// patched binary patches the SOURCE (restore) side ONLY, so a co-located child
+	// RESTORES FROM THE DISK fork snapshot: skipping the `mem` file then leaves it
+	// with nothing to restore and the fork HANGS (children stuck Restoring, the
+	// v1.32.2 prod canary). So an ARMED source still takes the Full path (writes
+	// `mem`) unless child import is enabled; the freeze is only worthwhile when the
+	// child actually consumes the frozen memfd. This keeps a re-enabled live-cow
+	// source's forks fast and RESTORABLE (the proven disk path) instead of hung.
+	if freezer := s.liveCowSnapshotFreezer(); freezer != nil && s.liveCowChildImport {
 		if _, err := freezer.Freeze(); err != nil {
 			_ = s.resumeInstanceAfterFork(id, inst)
 			werr := fmt.Errorf("husk: freeze source guest for live-cow fork snapshot vm %q: %w", id, err)

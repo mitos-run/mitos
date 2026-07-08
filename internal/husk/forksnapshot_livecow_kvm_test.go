@@ -85,10 +85,17 @@ func TestForkSnapshotLiveCowSourceArmedVmstateOnlyKVM(t *testing.T) {
 		VcpuCount:      1,
 		MemSizeMib:     memMiB,
 	}, Options{
-		AllowUnverified:    true,
-		ReadyTimeout:       30 * time.Second,
-		MultiVM:            true,
-		LiveCowFork:        true,
+		AllowUnverified: true,
+		ReadyTimeout:    30 * time.Second,
+		MultiVM:         true,
+		LiveCowFork:     true,
+		// Child import ON so forkSnapshotInstance takes the vmstate-only (no-mem)
+		// capture this test asserts: the child boots its guest RAM from the source
+		// shared memfd (composed below via ChildImport + ComposeChildFromImport), so
+		// the disk mem is intentionally absent. Production keeps this OFF until a
+		// child-side memfd-import Firecracker patch ships (see
+		// TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM).
+		LiveCowChildImport: true,
 		RootfsTemplatePath: templateRootfs,
 		RootfsCoWDir:       t.TempDir(),
 	})
@@ -246,6 +253,157 @@ func TestForkSnapshotLiveCowSourceArmedVmstateOnlyKVM(t *testing.T) {
 
 	t.Logf("m6b live-cow source-arm PASS: vmstate-only fork wrote NO mem file (%dMiB guest RAM stayed in the shared memfd); create_snapshot=%.3fms freeze=%.3fms vs ~364ms Full mem write; source srcAlive=%v + %d WP faults served; child composed %d bytes from the source memfd (no disk mem)",
 		memMiB, fres.Stages["create_snapshot"], fres.Stages["freeze"], srcAlive, handle.FaultCount(), len(childMem))
+}
+
+// TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM is the real-KVM gate for
+// the v1.32.2 prod hang: with --live-cow-fork ON, co-located fork children hung in
+// phase=Restoring until the client 120s deadline (FORKERR 120.3). Root cause: the
+// source armed and forkSnapshotInstance took the vmstate-only capture (NO mem file),
+// but the shipped Firecracker patches the SOURCE (restore) side ONLY, so the
+// co-located child RESTORES FROM THE DISK fork snapshot and a vmstate-only snapshot
+// left it with no mem to restore. The fix gates the mem-skip behind
+// Options.LiveCowChildImport (default OFF), so an ARMED source still writes the disk
+// mem and its co-located child is restorable.
+//
+// This test mirrors the PROD sequence the arm-then-fork-in-one-shot vmstate-only test
+// does not: restore the source at "pod start" (Prepare), CLAIM it (Activate), let the
+// source ARM (freezer live: the write-protect handshake completed), then FORK, then
+// SPAWN A REAL CO-LOCATED CHILD from the fork snapshot and prove it RESTORES AND EXECS
+// (no hang, bounded). It asserts, end to end on KVM, with child import OFF (prod):
+//   - (ARM STILL COMPLETES) the restored+claimed source arms the write-protect
+//     handshake exactly as the vmstate-only test proves, so re-enabling --live-cow-fork
+//     is safe (freezer live) without the mem-skip;
+//   - (RESTORABLE FORK) the fork writes the disk `mem` (Full path) even though the
+//     source is armed, so the co-located child has a snapshot it can restore;
+//   - (CHILD DOES NOT HANG) a real co-located SpawnVM child restores from that fork
+//     snapshot and execs within a bounded deadline, the exact step that hung on prod.
+func TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("skipping live-cow armed full-fallback KVM test under -race (WP handshake is timing-sensitive; firecracker-test runs it without -race)")
+	}
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("skipping live-cow armed full-fallback e2e: /dev/kvm not available (needs a KVM runner)")
+	}
+	snapDir := os.Getenv("MITOS_KVM_HUSK_SNAPSHOT_DIR")
+	if snapDir == "" {
+		t.Skip("skipping live-cow armed full-fallback e2e: set MITOS_KVM_HUSK_SNAPSHOT_DIR (the KVM CI sets it)")
+	}
+	for _, name := range []string{"mem", "vmstate"} {
+		if _, err := os.Stat(filepath.Join(snapDir, name)); err != nil {
+			t.Skipf("skipping live-cow armed full-fallback e2e: snapshot file %s not present: %v", name, err)
+		}
+	}
+	templateRootfs := filepath.Join(filepath.Dir(snapDir), "rootfs.ext4")
+	if _, err := os.Stat(templateRootfs); err != nil {
+		t.Skipf("skipping live-cow armed full-fallback e2e: template rootfs %s not present: %v", templateRootfs, err)
+	}
+	fcBin := os.Getenv("MITOS_KVM_FIRECRACKER")
+	if fcBin == "" {
+		fcBin = "/usr/local/bin/firecracker"
+	}
+
+	const memMiB = 256
+	// --multi-vm --live-cow-fork source, but child import OFF: the PRODUCTION posture.
+	// The source arms (launches with the FIRECRACKER_MITOS_* env), yet forkSnapshotInstance
+	// must keep the disk mem so a co-located child restores from it.
+	src := New(firecracker.VMConfig{
+		ID:             "husk-livecow-fallback-src",
+		FirecrackerBin: fcBin,
+		WorkDir:        t.TempDir(),
+		VcpuCount:      1,
+		MemSizeMib:     memMiB,
+	}, Options{
+		AllowUnverified:    true,
+		ReadyTimeout:       30 * time.Second,
+		MultiVM:            true,
+		LiveCowFork:        true,
+		LiveCowChildImport: false, // prod posture: no child-side memfd-import binary shipped
+		RootfsTemplatePath: templateRootfs,
+		RootfsCoWDir:       t.TempDir(),
+	})
+	defer func() { _ = src.Close() }()
+
+	ctx := context.Background()
+	// "Pod start": Prepare brings the dormant source Firecracker up (armed: the WP
+	// socket is bound and the source launches with the live-cow env).
+	if err := src.Prepare(ctx); err != nil {
+		t.Fatalf("source Prepare (multi-vm live-cow, child import off): %v", err)
+	}
+	// "Claim": Activate restores the source; the patched restore path exports its
+	// memfd and offers write-protect, so the handshake completes here.
+	sres, err := src.Activate(ctx, ActivateRequest{SnapshotDir: snapDir})
+	if err != nil || !sres.OK {
+		t.Fatalf("source Activate: err=%v res=%+v", err, sres)
+	}
+	srcAgent, err := kvmConnectAgent(sres.VsockPath)
+	if err != nil {
+		t.Fatalf("connect source agent: %v", err)
+	}
+	defer srcAgent.Close() //nolint:errcheck // best-effort teardown
+
+	// (ARM STILL COMPLETES) wait bounded for the restored+claimed source to arm, the
+	// same runner-gating the vmstate-only test uses. Whether or not it arms, the
+	// Full-fallback + restorable-child assertions below hold; MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM
+	// makes the arm mandatory so the job proves an ARMED source still writes the mem.
+	requireArm := os.Getenv("MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM") != ""
+	armed := false
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if src.liveCowSnapshotFreezer() != nil {
+			armed = true
+			break
+		}
+		if time.Now().After(deadline) {
+			if requireArm {
+				t.Fatalf("live-cow armed full-fallback e2e (strict): the RESTORED source did not arm the write-protect handshake; re-enabling --live-cow-fork would not be exercising the armed path (issue #832)")
+			}
+			t.Logf("source did not arm on this runner (unpatched or uffd unavailable); asserting the Full-fallback restorable child anyway")
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// (RESTORABLE FORK) fork the source. Even armed, child import OFF must keep the
+	// Full path: a disk `mem` file MUST be written so the co-located child restores.
+	forkDir := filepath.Join(t.TempDir(), "fork-snap")
+	fres, err := src.ForkSnapshot(ctx, ForkSnapshotRequest{ForkID: "livecow-fallback-child", SnapshotDir: forkDir})
+	if err != nil || !fres.OK {
+		t.Fatalf("source ForkSnapshot (armed, child import off) must succeed on KVM: err=%v res=%+v", err, fres)
+	}
+	for _, name := range []string{"mem", "vmstate", "rootfs.ext4"} {
+		if fi, err := os.Stat(filepath.Join(forkDir, name)); err != nil || (name == "mem" && fi.Size() == 0) {
+			t.Fatalf("armed source with child import off must write a disk-restorable Full snapshot; %s missing/empty (vmstate-only would leave the co-located child unrestorable, the prod hang): stat err=%v", name, err)
+		}
+	}
+	if _, ok := fres.Stages["freeze"]; ok {
+		t.Errorf("child-import-off fork must NOT freeze the source (Full path), but a freeze stage was recorded: %v", fres.Stages)
+	}
+
+	// (CHILD DOES NOT HANG) spawn a REAL co-located child from the fork snapshot, the
+	// exact SpawnVM path the controller drives (SpawnVMOnHusk). On prod this hung in
+	// Restoring; here it must restore and exec within a bounded deadline.
+	spawnCtx, spawnCancel := context.WithTimeout(ctx, 60*time.Second)
+	defer spawnCancel()
+	childRes := src.SpawnVM(spawnCtx, SpawnVMRequest{
+		VMID:     "livecow-fallback-colo",
+		Activate: ActivateRequest{SnapshotDir: forkDir, ForkSnapshot: true},
+	})
+	if !childRes.OK {
+		t.Fatalf("co-located child must restore from the Full fork snapshot without hanging (the v1.32.2 prod hang), got: %+v", childRes)
+	}
+	childAgent, err := kvmConnectAgent(childRes.VsockPath)
+	if err != nil {
+		t.Fatalf("connect co-located child agent: %v", err)
+	}
+	defer childAgent.Close() //nolint:errcheck // best-effort teardown
+	execCtx, execCancel := context.WithTimeout(ctx, 45*time.Second)
+	defer execCancel()
+	if _, err := kvmExecOKCtx(execCtx, childAgent, "printf colo-child-alive"); err != nil {
+		t.Fatalf("co-located child restored but could not exec (a hung/broken restore): %v", err)
+	}
+
+	t.Logf("live-cow armed full-fallback PASS: source armed=%v; armed fork still wrote a Full disk mem (create_snapshot=%.3fms); co-located child restored and execed with no hang",
+		armed, fres.Stages["create_snapshot"])
 }
 
 // fullPathRestoredSourceSurvivesFork stands up a SECOND source with live-cow OFF (the
