@@ -33,8 +33,12 @@ func (p *fakeLiveCowParent) ChildImport(string) (fork.ChildMemfdImport, error) {
 
 // liveCowArmedStub builds a multi-VM stub with the live-cow flag ON, then
 // Prepare+Activate its default VM so a fork snapshot can run, and arms the given
-// parent freezer. It returns the stub and the default VM's fake handle.
-func liveCowArmedStub(t *testing.T, parent fork.ChildImportProvider) (*Stub, *fakeVMM) {
+// parent freezer. childImport sets Options.LiveCowChildImport: true opts the fork
+// onto the vmstate-only (no-mem) capture (the child boots from the shared memfd),
+// false keeps the disk-restorable Full path even for an armed source (the shipped
+// production posture, where no child-side memfd-import Firecracker patch exists).
+// It returns the stub and the default VM's fake handle.
+func liveCowArmedStub(t *testing.T, parent fork.ChildImportProvider, childImport bool) (*Stub, *fakeVMM) {
 	t.Helper()
 	vms := map[string]*fakeVMM{}
 	start := func(cfg firecracker.VMConfig) (vmm, error) {
@@ -43,12 +47,13 @@ func liveCowArmedStub(t *testing.T, parent fork.ChildImportProvider) (*Stub, *fa
 		return vm, nil
 	}
 	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
-		Start:       start,
-		Ready:       readyOK,
-		Notify:      (&fakeNotifier{}).notify,
-		Verify:      verifyOK,
-		MultiVM:     true,
-		LiveCowFork: true,
+		Start:              start,
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		MultiVM:            true,
+		LiveCowFork:        true,
+		LiveCowChildImport: childImport,
 	})
 	if parent != nil {
 		s.SetLiveCowParent(parent)
@@ -71,7 +76,7 @@ func liveCowArmedStub(t *testing.T, parent fork.ChildImportProvider) (*Stub, *fa
 // `freeze` and a `create_snapshot` stage.
 func TestForkSnapshotLiveCowCapturesVMStateOnly(t *testing.T) {
 	parent := &fakeLiveCowParent{freezeDur: 9 * time.Microsecond}
-	s, f := liveCowArmedStub(t, parent)
+	s, f := liveCowArmedStub(t, parent, true) // child import ON: vmstate-only capture
 
 	dir := t.TempDir()
 	res, err := s.ForkSnapshot(context.Background(), ForkSnapshotRequest{ForkID: "fork-1", SnapshotDir: dir})
@@ -110,7 +115,7 @@ func TestForkSnapshotLiveCowCapturesVMStateOnly(t *testing.T) {
 // a fork takes the Full CreateSnapshot(mem, vmstate) path byte-for-byte, so a fork
 // never breaks and the mem file is still written for the disk restore.
 func TestForkSnapshotFallsBackToFullWhenNoArmedParent(t *testing.T) {
-	s, f := liveCowArmedStub(t, nil) // flag on, parent NOT armed
+	s, f := liveCowArmedStub(t, nil, true) // flag on, parent NOT armed
 
 	dir := t.TempDir()
 	res, err := s.ForkSnapshot(context.Background(), ForkSnapshotRequest{ForkID: "fork-1", SnapshotDir: dir})
@@ -128,12 +133,47 @@ func TestForkSnapshotFallsBackToFullWhenNoArmedParent(t *testing.T) {
 	}
 }
 
+// TestForkSnapshotArmedSourceWritesMemWhenChildImportOff is the prod-hang gate
+// (v1.32.2 canary: co-located fork children stuck Restoring until the client 120s
+// deadline). Even with the source ARMED (a freezer available), the fork must keep
+// writing the disk `mem` file UNLESS child import is enabled, because the shipped
+// Firecracker patches the SOURCE side only: a co-located child restores from the
+// DISK fork snapshot, and a vmstate-only (no-mem) snapshot leaves it nothing to
+// restore. So arm alone must NOT skip the mem file, or the fork hangs. It asserts
+// the Full path ran (mem written), the source was NOT frozen, and no `freeze`
+// stage was recorded, so a re-enabled live-cow source's forks stay restorable.
+func TestForkSnapshotArmedSourceWritesMemWhenChildImportOff(t *testing.T) {
+	parent := &fakeLiveCowParent{freezeDur: 9 * time.Microsecond}
+	s, f := liveCowArmedStub(t, parent, false) // ARMED, but child import OFF (prod posture)
+
+	dir := t.TempDir()
+	res, err := s.ForkSnapshot(context.Background(), ForkSnapshotRequest{ForkID: "fork-1", SnapshotDir: dir})
+	if err != nil || !res.OK {
+		t.Fatalf("ForkSnapshot (armed, child-import off): err=%v res=%+v", err, res)
+	}
+	if atomic.LoadInt32(&parent.freezeCalls) != 0 {
+		t.Errorf("an armed source must NOT be frozen when child import is off (the Full path skips the freeze), freezeCalls=%d", parent.freezeCalls)
+	}
+	if f.snapVMStateOnly {
+		t.Errorf("armed source with child import off must NOT take the vmstate-only path (the co-located child restores from disk)")
+	}
+	if f.snapMem != filepath.Join(dir, "mem") {
+		t.Errorf("armed source with child import off must write the disk mem file so the co-located child is restorable, got mem=%q", f.snapMem)
+	}
+	if _, ok := res.Stages["freeze"]; ok {
+		t.Errorf("armed source with child import off must not record a freeze stage; got %v", res.Stages)
+	}
+	if !f.resumed {
+		t.Errorf("source VM must be resumed after the fork snapshot")
+	}
+}
+
 // TestForkSnapshotLiveCowResumesSourceOnFreezeError proves fail-closed: a freeze
 // failure resumes the source (never leaves a tenant's live sandbox frozen) and
 // fails the fork, without ever writing a snapshot.
 func TestForkSnapshotLiveCowResumesSourceOnFreezeError(t *testing.T) {
 	parent := &fakeLiveCowParent{freezeErr: errSnap}
-	s, f := liveCowArmedStub(t, parent)
+	s, f := liveCowArmedStub(t, parent, true) // child import ON: exercises the freeze path
 
 	dir := t.TempDir()
 	res, err := s.ForkSnapshot(context.Background(), ForkSnapshotRequest{ForkID: "fork-1", SnapshotDir: dir})
