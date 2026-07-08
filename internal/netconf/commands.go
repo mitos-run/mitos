@@ -3,6 +3,7 @@ package netconf
 import (
 	"fmt"
 	"net"
+	"strings"
 )
 
 // This file holds pure argv builders for the host networking commands. No
@@ -39,6 +40,42 @@ func ResolverAddrAddArgs(resolverIP net.IP, tap string) []string {
 // LinkDelArgs builds the argv to remove the tap: ip link del <tap>.
 func LinkDelArgs(tap string) []string {
 	return []string{"ip", "link", "del", tap}
+}
+
+// IPBatchArgs builds the argv to run several ip subcommands from stdin in ONE
+// process: ip -batch -. Each stdin line is one ip subcommand WITHOUT the
+// leading "ip" (see RenderIPBatch). Batch mode aborts on the first failing line
+// and exits non-zero, so a partially applied tap setup fails the whole call
+// (fail-closed): the caller tears the tap down on any error. This replaces the
+// ~4 separate fork+exec of ip on the fork hot path with a single one.
+func IPBatchArgs() []string {
+	return []string{"ip", "-batch", "-"}
+}
+
+// RenderIPBatch renders the newline-delimited command list fed to `ip -batch -`
+// (IPBatchArgs) that brings this VM's tap up: create the tap, assign the host
+// side of the /30, set the link up, and (single-VM DNS path) bind the in-pod
+// resolver /32. Each line is the argv of the matching single-command builder
+// (TapAddArgs, AddrAddArgs, LinkUpArgs, ResolverAddrAddArgs) with the leading
+// "ip" stripped, so the batched and unbatched forms share one source of truth
+// and cannot drift. The idempotent pre-create tap delete is intentionally NOT
+// batched here: its "not found" is the normal case and must not abort the batch.
+func RenderIPBatch(tap string, hostIP, resolverIP net.IP) string {
+	cmds := [][]string{
+		TapAddArgs(tap),
+		AddrAddArgs(hostIP, tap),
+		LinkUpArgs(tap),
+	}
+	if resolverIP != nil {
+		cmds = append(cmds, ResolverAddrAddArgs(resolverIP, tap))
+	}
+	var b strings.Builder
+	for _, c := range cmds {
+		// Drop the leading "ip": ip -batch reads bare subcommands, one per line.
+		b.WriteString(strings.Join(c[1:], " "))
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // NftApplyArgs builds the argv to apply a rendered ruleset from stdin:

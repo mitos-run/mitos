@@ -73,7 +73,7 @@ func TestMultiVMTwoRealFirecrackersKVM(t *testing.T) {
 	ids := []vmID{defaultVMID, "vm-2"}
 	vsockByID := map[vmID]string{}
 	for _, id := range ids {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 		res, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: snapDir})
@@ -420,6 +420,153 @@ func TestColocatedForkInheritsSourceStateKVM(t *testing.T) {
 	}
 }
 
+// TestPrewarmedColocatedForkSkipsBootKVM proves the pre-warm on real KVM: a
+// pod that keeps ONE dormant child pre-warmed lets a co-located fork ADOPT the
+// already-booted Firecracker (fc_boot ~0, the process boot pre-paid off the fork
+// hot path) while STILL producing a correct child, alive and inheriting the
+// source's disk AND memory, identical to the on-demand co-located fork. It also
+// proves a fresh dormant child is re-warmed for the next fork. This is the
+// no-regression gate for the pre-warm: same correctness, boot moved off the hot
+// path. It uses the disk-restore co-located fork (no m5 child-import binary
+// needed), so it runs on every KVM CI runner that has a husk snapshot.
+func TestPrewarmedColocatedForkSkipsBootKVM(t *testing.T) {
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skip("skipping pre-warm co-located-fork proof: /dev/kvm not available (needs a KVM runner)")
+	}
+	snapDir := os.Getenv("MITOS_KVM_HUSK_SNAPSHOT_DIR")
+	if snapDir == "" {
+		t.Skip("skipping pre-warm co-located-fork proof: set MITOS_KVM_HUSK_SNAPSHOT_DIR (the KVM CI sets it)")
+	}
+	for _, name := range []string{"mem", "vmstate"} {
+		if _, err := os.Stat(filepath.Join(snapDir, name)); err != nil {
+			t.Skipf("skipping pre-warm co-located-fork proof: snapshot file %s not present: %v", name, err)
+		}
+	}
+	templateRootfs := filepath.Join(filepath.Dir(snapDir), "rootfs.ext4")
+	if _, err := os.Stat(templateRootfs); err != nil {
+		t.Skipf("skipping pre-warm co-located-fork proof: template rootfs %s not present: %v", templateRootfs, err)
+	}
+	fcBin := os.Getenv("MITOS_KVM_FIRECRACKER")
+	if fcBin == "" {
+		fcBin = "/usr/local/bin/firecracker"
+	}
+
+	ctx := context.Background()
+
+	// A --multi-vm source pod with the pre-warm slot ON.
+	src := New(firecracker.VMConfig{
+		ID:             "husk-prewarm-src",
+		FirecrackerBin: fcBin,
+		WorkDir:        t.TempDir(),
+		VcpuCount:      1,
+		MemSizeMib:     256,
+	}, Options{
+		AllowUnverified:    true,
+		ReadyTimeout:       30 * time.Second,
+		MultiVM:            true,
+		PrewarmChild:       true,
+		RootfsTemplatePath: templateRootfs,
+		RootfsCoWDir:       t.TempDir(),
+	})
+	defer func() { _ = src.Close() }()
+
+	if err := src.Prepare(ctx); err != nil {
+		t.Fatalf("source Prepare: %v", err)
+	}
+	sres, err := src.Activate(ctx, ActivateRequest{SnapshotDir: snapDir})
+	if err != nil || !sres.OK {
+		t.Fatalf("source Activate: err=%v res=%+v", err, sres)
+	}
+	srcAgent, err := kvmConnectAgent(sres.VsockPath)
+	if err != nil {
+		t.Fatalf("connect source agent: %v", err)
+	}
+	defer srcAgent.Close() //nolint:errcheck // best-effort teardown
+
+	// Source writes a unique DISK marker and advances its guest clock so the fork
+	// carries a distinct disk + memory state (the same signals the on-demand
+	// co-located inheritance test uses).
+	const markerPath = "/mitos-prewarm-marker.txt"
+	marker := fmt.Sprintf("prewarm-inherit-%d", time.Now().UnixNano())
+	if _, err := kvmExecOK(srcAgent, fmt.Sprintf("printf %s > %s && /bin/busybox sync", marker, markerPath)); err != nil {
+		t.Fatalf("write+sync marker in source: %v", err)
+	}
+	time.Sleep(9 * time.Second)
+
+	// EAGERLY pre-warm the dormant child BEFORE the fork, so the fork adopts it.
+	if err := src.PrewarmChild(ctx); err != nil {
+		t.Fatalf("PrewarmChild must boot a dormant child: %v", err)
+	}
+
+	forkDir := filepath.Join(t.TempDir(), "fork-snap")
+	fres, err := src.ForkSnapshot(ctx, ForkSnapshotRequest{ForkID: "prewarm-child", SnapshotDir: forkDir})
+	if err != nil || !fres.OK {
+		t.Fatalf("source ForkSnapshot must succeed on KVM: err=%v res=%+v", err, fres)
+	}
+	for _, name := range []string{"mem", "vmstate", "rootfs.ext4"} {
+		if _, err := os.Stat(filepath.Join(forkDir, name)); err != nil {
+			t.Fatalf("fork snapshot did not write %s: %v", name, err)
+		}
+	}
+
+	// The co-located fork ADOPTS the pre-warmed child.
+	fixRes := src.SpawnVM(ctx, SpawnVMRequest{
+		VMID:     "prewarm-fix",
+		Activate: ActivateRequest{SnapshotDir: forkDir, ForkSnapshot: true},
+	})
+	if !fixRes.OK {
+		t.Fatalf("pre-warmed co-located spawn must succeed: %+v", fixRes)
+	}
+
+	// (ON-FORK-PATH BOOT ~0) the adopted child recorded fc_boot=0: the process boot
+	// was pre-paid off the fork hot path, and the template verify did not re-run.
+	if fc, ok := fixRes.Stages["fc_boot"]; !ok || fc != 0 {
+		t.Fatalf("adopted pre-warmed fork fc_boot = %v (ok=%v), want 0 (boot pre-paid off the hot path); stages=%v", fc, ok, fixRes.Stages)
+	}
+	if _, ran := fixRes.Stages["verify_prepare"]; ran {
+		t.Fatalf("adopted pre-warmed fork must not re-run the snapshot verify on the hot path; stages=%v", fixRes.Stages)
+	}
+
+	// (CHILD ALIVE + INHERIT) the adopted child boots, execs, and inherits the
+	// source's disk (marker) AND memory (uptime well past the template's baked one).
+	fixAgent, err := kvmConnectAgent(fixRes.VsockPath)
+	if err != nil {
+		t.Fatalf("connect pre-warmed child agent (adopted child booted): %v", err)
+	}
+	defer fixAgent.Close() //nolint:errcheck // best-effort teardown
+	if _, err := kvmExecOK(fixAgent, "printf prewarm-alive"); err != nil {
+		t.Fatalf("adopted pre-warmed child must exec (a broken adoption would not run a working guest): %v", err)
+	}
+	got, _ := kvmExecOK(fixAgent, fmt.Sprintf("cat %s 2>/dev/null || true", markerPath))
+	if strings.TrimSpace(got) != marker {
+		t.Fatalf("DISK inheritance FAILED via the pre-warmed child: read %q, want %q", strings.TrimSpace(got), marker)
+	}
+	if up := kvmReadUptime(t, fixAgent); up < 8 {
+		t.Fatalf("MEMORY inheritance FAILED via the pre-warmed child: uptime %.2fs must reflect the source's advanced clock (fork memory not restored)", up)
+	}
+
+	// (RE-WARMED) a fresh dormant child is warmed for the NEXT fork, off the hot path.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		src.mu.Lock()
+		inst := src.instances[prewarmSlotVMID]
+		src.mu.Unlock()
+		warm := false
+		if inst != nil {
+			inst.mu.Lock()
+			warm = inst.state == StateDormant && inst.vm != nil
+			inst.mu.Unlock()
+		}
+		if warm {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pre-warm slot was not re-warmed after the fork consumed it")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // kvmReadUptime reads the guest's /proc/uptime and returns the first field (seconds
 // since the guest booted) as a float. It fails the test on a transport or parse
 // error so a broken read is never silently treated as zero uptime.
@@ -455,7 +602,16 @@ func kvmConnectAgent(udsPath string) (*guestgrpc.Client, error) {
 // kvmExecOK runs a shell command in the guest via the gRPC Sandbox service and
 // returns stdout, failing if the transport errors or the command exits nonzero.
 func kvmExecOK(client *guestgrpc.Client, command string) (string, error) {
-	stream, err := client.Sandbox.ExecStream(context.Background(), &sandboxv1.ExecStreamRequest{
+	return kvmExecOKCtx(context.Background(), client, command)
+}
+
+// kvmExecOKCtx is kvmExecOK with a caller-supplied context, so a test can bound the
+// exec: a half-broken guest-agent vsock (e.g. a restored source whose connections
+// reset, issue #838) can leave the stream Recv blocked, which would otherwise hang the
+// test until the package-level timeout. Passing a context with a deadline makes such an
+// exec return promptly with a context error instead.
+func kvmExecOKCtx(ctx context.Context, client *guestgrpc.Client, command string) (string, error) {
+	stream, err := client.Sandbox.ExecStream(ctx, &sandboxv1.ExecStreamRequest{
 		Command:        command,
 		Cwd:            "/",
 		TimeoutSeconds: 60,

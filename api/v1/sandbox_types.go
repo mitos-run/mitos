@@ -437,6 +437,28 @@ type SandboxStatus struct {
 	// +optional
 	CheckpointTime *metav1.Time `json:"checkpointTime,omitempty"`
 
+	// ForkStartedAt is when the husk fork fan-out began its first working
+	// reconcile pass (the source pod resolved Ready and the controller started
+	// the snapshot/spawn work). A hosted co-location fork is LEVEL-TRIGGERED and
+	// reaches Ready across several ~1s requeue passes, so the wall-clock latency
+	// of the whole fork is NOT observable inside one pass; persisting the start
+	// timestamp lets the controller attribute the true end-to-end latency (from
+	// here to Ready) even though the work is split across passes. Set exactly
+	// once and never rewritten. Timing/observability only; it drives no fork
+	// behavior. NEW field.
+	// +optional
+	ForkStartedAt *metav1.Time `json:"forkStartedAt,omitempty"`
+
+	// ForkReconcilePasses counts the husk fork reconcile passes that advanced the
+	// fan-out (each pass that reached a status write). For a level-triggered
+	// controller the pass count is a first-class part of the latency breakdown:
+	// control-plane round-trips (one ~1s requeue per pass) can dominate the
+	// end-to-end fork latency, so the pass count says how much of the total is
+	// requeue wait versus real per-stage work. Timing/observability only. NEW
+	// field.
+	// +optional
+	ForkReconcilePasses int32 `json:"forkReconcilePasses,omitempty"`
+
 	// Conditions are the typed conditions with observedGeneration. Unchanged from
 	// v1alpha1.
 	// +optional
