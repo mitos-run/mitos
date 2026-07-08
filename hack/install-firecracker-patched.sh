@@ -13,14 +13,17 @@
 #     used. Installing it everywhere is safe.
 #   - Provenance: built reproducibly in mitos-run/firecracker on branch
 #     mitos/child-memfd-import-v1.15.0 via .github/workflows/build-patched-fc.yml
-#     (green run https://github.com/mitos-run/firecracker/actions/runs/28911590590)
+#     (green run https://github.com/mitos-run/firecracker/actions/runs/28915829813)
 #     and published as a GitHub release asset, pinned by sha256 below. A compromised
 #     CDN or a network substitution cannot install a different binary. This binary
 #     adds the m5 child-side memfd import (issue #832): a co-located fork child that
-#     is launched with FIRECRACKER_MITOS_CHILD_MEMFD boots its guest RAM by mapping
-#     the source guest memfd MAP_PRIVATE (copy-on-write) plus the frozen overlay and
-#     loads NO disk mem file, so the vmstate-only fork drops the create_snapshot mem
-#     write end to end. It also keeps the m4b restore-side fix: a RESTORED source VM
+#     is launched with FIRECRACKER_MITOS_CHILD_MEMFD boots its guest RAM by copying
+#     the source guest memfd's fork-time image into ANONYMOUS private RAM (divorced
+#     from the live memfd) plus the frozen overlay, and loads NO disk mem file, so the
+#     vmstate-only fork drops the create_snapshot mem write end to end. The eager copy
+#     replaces the earlier lazily file-backed MAP_PRIVATE, which let a RESUMED source's
+#     post-fork writes leak into the child and corrupt its kernel (stack-protector
+#     panic). It also keeps the m4b restore-side fix: a RESTORED source VM
 #     backs its guest RAM with a shared memfd, exports it, and offers write-protect
 #     during restore, so the live-cow fork arms on a restored source, not only a
 #     booted one.
@@ -35,8 +38,8 @@ set -euo pipefail
 
 # --- single pinned provenance constants (audit + bump only here) -------------
 PATCHED_FC_VERSION="v1.15.0"
-PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-child-memfd-import-v1.15.0/firecracker-v1.15.0-x86_64-mitos-child-memfd-import"
-PATCHED_FC_SHA256="f36bba0c663f9c38276dc1d83eda8e117d98aca7a50ac274d879556766cc2421"
+PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-child-memfd-import-v1.15.0-2/firecracker-v1.15.0-x86_64-mitos-child-memfd-import"
+PATCHED_FC_SHA256="7d02b374a5a60a59c39842733305ce719f6fa42c64f3f180a13a5d70dc515272"
 # -----------------------------------------------------------------------------
 
 arch="$(uname -m)"
