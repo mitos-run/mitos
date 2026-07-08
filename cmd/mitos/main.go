@@ -84,6 +84,13 @@ func run(args []string) int {
 		return agentcli.Run(ctx, rest, nil, os.Stdout, os.Stderr)
 	}
 
+	// Shell completion emits a static script and contacts no backend. It must
+	// work without a kubeconfig (it is sourced from shell startup files), so it
+	// is dispatched before the cluster backend is built.
+	if rest[0] == "completion" {
+		return agentcli.Run(ctx, rest, nil, os.Stdout, os.Stderr)
+	}
+
 	// The auth subcommands talk to the hosted account service, not the cluster,
 	// and must work without a kubeconfig. Wire a local account service and
 	// dispatch directly so `mitos auth login` does not require a cluster backend.
