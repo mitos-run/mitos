@@ -799,10 +799,11 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// snapshot dir, so persisting the flag first is safe.
 		fork.Status.ForkSnapshotTaken = true
 		snapWriteStart := time.Now()
-		if err := r.Status().Update(ctx, fork); err != nil {
-			return ctrl.Result{}, err
-		}
+		snapWriteErr := r.Status().Update(ctx, fork)
 		logForkOrchStage(logger, forkID, "status_write_snapshot", time.Since(snapWriteStart))
+		if snapWriteErr != nil {
+			return ctrl.Result{}, snapWriteErr
+		}
 		// Mark the moment the one-time fork-snapshot work finished on THIS pass, so
 		// the orchestration gap between the snapshot RPC returning and the fan-out
 		// loop starting the spawn/activate RPCs is attributable (only meaningful on
@@ -976,15 +977,17 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 				}
 				fork.Status.Children = persisted
 				coWriteStart := time.Now()
-				if err := r.Status().Update(ctx, fork); err != nil {
+				coWriteErr := r.Status().Update(ctx, fork)
+				// Time the per-co-located-slot status write (one k8s API write per spawned
+				// child, so a wide co-location fan-out pays this N times); logged even on
+				// error so a slow conflict/timeout is still attributable.
+				logForkOrchStage(logger, childName, "status_write_colocated", time.Since(coWriteStart))
+				if coWriteErr != nil {
 					// A conflict means a concurrent writer advanced the fork; returning the
 					// error requeues so the next pass re-reads and recounts occupancy fresh,
 					// never over-admitting.
-					return ctrl.Result{}, err
+					return ctrl.Result{}, coWriteErr
 				}
-				// Time the per-co-located-slot status write (one k8s API write per spawned
-				// child, so a wide co-location fan-out pays this N times).
-				logForkOrchStage(logger, childName, "status_write_colocated", time.Since(coWriteStart))
 			}
 			// A failed spawn is NOT wedged: the slot is left not-ready with the cause
 			// logged (issue #28), and the reconcile requeues below because
@@ -1110,11 +1113,13 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		Message:            fmt.Sprintf("%d/%d husk forks ready", fork.Status.ReadyReplicas, effectiveReplicas(fork)),
 	})
 	finalWriteStart := time.Now()
-	if err := r.Status().Update(ctx, fork); err != nil {
-		return ctrl.Result{}, err
-	}
-	// Time the end-of-pass children/readiness/condition status write.
+	finalWriteErr := r.Status().Update(ctx, fork)
+	// Time the end-of-pass children/readiness/condition status write, logged even
+	// on error so a slow conflict/timeout is still attributable.
 	logForkOrchStage(logger, forkID, "status_write_final", time.Since(finalWriteStart))
+	if finalWriteErr != nil {
+		return ctrl.Result{}, finalWriteErr
+	}
 	if fork.Status.ReadyReplicas < effectiveReplicas(fork) {
 		// Children still coming up; requeue to drive them Ready.
 		return ctrl.Result{RequeueAfter: 1 * time.Second}, nil
