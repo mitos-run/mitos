@@ -145,7 +145,7 @@ type SandboxReconciler struct {
 	// fork routing is consistent with the pod flag. DEFAULT OFF; requires LiveCowFork.
 	LiveCowChildImport bool
 	// PrewarmChild passes --prewarm-child to warm husk pods so a fork adopts a
-	// pre-warmed dormant child. DEFAULT OFF; requires MultiVM.
+	// pre-warmed dormant child. DEFAULT OFF; requires MultiVMFork.
 	PrewarmChild bool
 
 	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
