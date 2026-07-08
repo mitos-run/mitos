@@ -542,10 +542,18 @@ func TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM(t *testi
 	sentinelPlanted := false
 	plantCtx, plantCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer plantCancel()
-	if _, err := kvmExecOKCtx(plantCtx, srcAgent, "printf %s '"+forkVal+"' > "+sentinelPath+"; /bin/busybox sync || sync || true"); err == nil {
+	// Write then READ BACK in the source: a bare "printf > file; sync || true" exits 0
+	// even when the guest cannot create the file (no /dev/shm, read-only), which would
+	// falsely arm sentinelPlanted and then fail the child read on a file that never
+	// existed. The && chain exits non-zero unless the write took and reads back forkVal,
+	// so a guest that cannot host the sentinel scopes the content check out (the
+	// byte-level no-leak invariant is proven hard in TestForkSnapshotLiveCowSourceArmedVmstateOnlyKVM
+	// and internal/fork), while a guest that CAN host it keeps the child read hard.
+	plantCmd := "printf %s '" + forkVal + "' > " + sentinelPath + " && [ \"$(cat " + sentinelPath + ")\" = '" + forkVal + "' ]"
+	if _, err := kvmExecOKCtx(plantCtx, srcAgent, plantCmd); err == nil {
 		sentinelPlanted = true
 	} else {
-		t.Logf("could not plant fork-time sentinel in the source guest (issue #838 restore-resume vsock; content no-leak assertion scoped out): %v", err)
+		t.Logf("could not plant+verify the fork-time sentinel in the source guest (no /dev/shm or issue #838 restore-resume vsock); content no-leak assertion scoped out (byte-level no-leak stays proven in the sibling source-arm test): %v", err)
 	}
 
 	// Fork the source down the vmstate-only path (freeze + vmstate, NO mem file).
