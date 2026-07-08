@@ -1,0 +1,76 @@
+# Persistent KVM fork-bench pod for FAST server-side fork iteration (dev only).
+#
+# cmd/bench drives internal/fork IN-PROCESS (no forkd, no HTTP API, no controller,
+# no SDK, no k8s CR round-trips, no network) so it measures the fork data path and
+# nothing else. This pod runs it on the prod KVM node against a READ-ONLY copy of
+# the prod python template, with its OWN isolated forks/cas dirs, so it never
+# touches prod tenant state. It is additive (a separate pod); prod husk pods and
+# the proven fork path are untouched.
+#
+# Drive loop (~1-2 min/iter), through the cluster-ops kubectl passthrough:
+#   kubectl -n mitos exec deploy/mitos-forkbench -- sh -c '
+#     cd /src && git fetch -q origin <branch> && git checkout -q FETCH_HEAD &&
+#     go build -o /tmp/bench ./cmd/bench &&
+#     /tmp/bench --mode fork-exec --data-dir /var/lib/mitos --template python \
+#       --firecracker /fc/firecracker --iterations 20'
+# -> read the per-stage fork timings (create_snapshot, freeze, rootfs_clone,
+#    vmstate_restore) directly. Winners still go through the full PR/CI/security
+#    gate before prod tenants.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mitos-forkbench
+  namespace: mitos
+  labels: { mitos.run/forkbench: "true", app.kubernetes.io/component: forkbench }
+spec:
+  replicas: 1
+  selector: { matchLabels: { mitos.run/forkbench: "true" } }
+  template:
+    metadata: { labels: { mitos.run/forkbench: "true" } }
+    spec:
+      nodeSelector: { mitos.run/kvm: "true" }
+      tolerations:
+        - { key: mitos.run/dedicated, operator: Exists, effect: NoSchedule }
+        - { key: mitos.run/dedicated, operator: Exists, effect: NoExecute }
+      securityContext: { runAsNonRoot: false, seccompProfile: { type: RuntimeDefault } }
+      automountServiceAccountToken: false
+      initContainers:
+        - name: copy-fc
+          image: ghcr.io/mitos-run/mitos-husk-stub:v1.37.1
+          command: ["sh", "-c", "cp /usr/local/bin/firecracker /usr/local/bin/jailer /fc/ && ls -l /fc"]
+          volumeMounts: [{ name: fc, mountPath: /fc }]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: bench
+          image: golang:1.26
+          command: ["sh", "-c", "git clone -q https://github.com/mitos-run/mitos /src || true; sleep infinity"]
+          env:
+            - { name: PATH, value: "/fc:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
+            - { name: GOFLAGS, value: "-buildvcs=false" }
+            - { name: GOTOOLCHAIN, value: "auto" }
+          resources:
+            limits: { cpu: "2", memory: 3200Mi, mitos.run/kvm: "1" }
+            requests: { cpu: 100m, memory: 2560Mi, mitos.run/kvm: "1" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { add: ["NET_ADMIN"], drop: ["ALL"] }
+            privileged: false
+            runAsNonRoot: false
+            seccompProfile: { type: RuntimeDefault }
+          volumeMounts:
+            - { name: fc, mountPath: /fc, readOnly: true }
+            - { name: data, mountPath: /var/lib/mitos }
+            - { name: template, mountPath: /template-src, readOnly: true }
+            - { name: kernel, mountPath: /var/lib/mitos/vmlinux, readOnly: true }
+            - { name: src, mountPath: /src }
+      volumes:
+        - { name: fc, emptyDir: {} }
+        - { name: data, emptyDir: {} }
+        - { name: src, emptyDir: {} }
+        - name: template
+          hostPath: { path: /var/lib/mitos/templates/python, type: Directory }
+        - name: kernel
+          hostPath: { path: /var/lib/mitos/vmlinux, type: File }
