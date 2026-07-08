@@ -74,10 +74,13 @@ type netfilterRunner func(ctx context.Context, argv []string, stdin string) erro
 
 // applyEgressFilter brings up the VM's tap and installs its default-deny egress
 // chain (with the unconditional metadata block) in the husk pod netns. It is
-// the single-VM-per-pod analog of internal/network.setup: create the tap,
-// assign the host IP, bring it up, apply the idempotent shared table, then this
-// VM's per-tap chain. A malformed allowlist fails the whole call (fail-closed:
-// a VM never comes up with a half-applied filter).
+// the single-VM-per-pod analog of internal/network.setup. To keep the fork hot
+// path cheap it collapses the ~8 sequential fork+exec of ip/nft into just three
+// processes: one idempotent tap pre-delete, one `ip -batch` that creates the tap
+// + assigns the host IP + brings it up + binds the resolver, and one atomic
+// `nft -f` that applies the shared table, this VM's per-tap chain, the SNAT, the
+// shared input table, and this tap's input chain. A malformed allowlist fails
+// the whole call (fail-closed: a VM never comes up with a half-applied filter).
 func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwarding func() error, cfg NetfilterConfig) (err error) {
 	enforceable, _, err := netconf.SplitAllowList(cfg.Allow)
 	if err != nil {
@@ -104,16 +107,15 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 	// first so creation is idempotent; best-effort, since "not found" is the
 	// normal case on a clean activation.
 	_ = run(ctx, netconf.LinkDelArgs(cfg.Tap), "")
-	if err := run(ctx, netconf.TapAddArgs(cfg.Tap), ""); err != nil {
-		return fmt.Errorf("husk netfilter: create tap %s: %w", cfg.Tap, err)
-	}
-	// The tap now exists. Its name is deterministic per template, so if ANY step
-	// below fails we MUST remove the tap (and any partial chain state) or the next
-	// activation attempt fails right here at tap creation with EBUSY (Device or
-	// resource busy), which masks the real first-attempt error and permanently
-	// poisons the warm pod (issue #428). Tear down idempotently on every error
-	// path; the original error is preserved as the named return so the true
-	// root-cause step error is surfaced, not the EBUSY of a later retry.
+	// Arm the fail-closed teardown BEFORE the batched tap setup below. The
+	// ip -batch invocation may create the tap and then fail on a LATER line in the
+	// SAME process, which would leak the tap: its name is deterministic per
+	// template, so a leak makes the next activation fail right at tap creation
+	// with EBUSY (Device or resource busy), masking the real first-attempt error
+	// and permanently poisoning the warm pod (issue #428). Tearing down on every
+	// error path removes a partially created tap (link del of an absent tap is an
+	// ignored no-op), and the original error is preserved as the named return so
+	// the true root-cause step error is surfaced, not the EBUSY of a later retry.
 	defer func() {
 		if err != nil {
 			// Detached from ctx so cleanup still runs when the failure was a
@@ -122,23 +124,27 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 			_ = teardownEgressFilter(context.WithoutCancel(ctx), run, cfg.Tap)
 		}
 	}()
-	if err := run(ctx, netconf.AddrAddArgs(cfg.HostIP, cfg.Tap), ""); err != nil {
-		return fmt.Errorf("husk netfilter: assign host ip to tap %s: %w", cfg.Tap, err)
+	// One ip process instead of ~4: create the tap, assign the host /30, bring the
+	// link up, and (single-VM DNS path) bind the in-pod resolver /32. ip -batch
+	// aborts on the first failing line and exits non-zero, so a partial tap setup
+	// fails the whole call (fail-closed) and triggers the teardown armed above.
+	// The resolver bind lets the per-pod DNS proxy listen on the tap so the guest's
+	// queries are delivered locally instead of forwarded out (now ip_forward is on).
+	if err := run(ctx, netconf.IPBatchArgs(), netconf.RenderIPBatch(cfg.Tap, cfg.HostIP, cfg.ResolverIP)); err != nil {
+		return fmt.Errorf("husk netfilter: set up tap %s: %w", cfg.Tap, err)
 	}
-	if err := run(ctx, netconf.LinkUpArgs(cfg.Tap), ""); err != nil {
-		return fmt.Errorf("husk netfilter: bring tap %s up: %w", cfg.Tap, err)
-	}
-	// Bind the in-pod DNS resolver address to the tap so the per-pod DNS proxy can
-	// listen on it and the guest's queries (sent to it via the tap gateway) are
-	// delivered locally instead of being forwarded out (now that ip_forward is on).
-	if cfg.ResolverIP != nil {
-		if err := run(ctx, netconf.ResolverAddrAddArgs(cfg.ResolverIP, cfg.Tap), ""); err != nil {
-			return fmt.Errorf("husk netfilter: bind resolver %s to tap %s: %w", cfg.ResolverIP, cfg.Tap, err)
-		}
-	}
-	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderSharedTable()); err != nil {
-		return fmt.Errorf("husk netfilter: apply shared egress table: %w", err)
-	}
+	// One nft process instead of ~5, applied as a SINGLE atomic transaction:
+	//   - the pod-global shared forward table (idempotent skeleton),
+	//   - this VM's per-tap egress chain (metadata drop + allowlist + counter),
+	//   - the guest SNAT (masquerade) so allowed return traffic is routable,
+	//   - the shared input table, and this tap's input chain (pod-local guard).
+	// Every statement is an idempotent `add`/`flush` of a named object, so a
+	// second CO-LOCATED VM's transaction re-adds the pod-global skeleton without
+	// disturbing the first VM's per-tap chain, counter, or dispatch element: the
+	// shared table is shared, each VM keeps its OWN tap + default-deny chain +
+	// counter. nft applies the whole file atomically, so a malformed allowlist or
+	// any rejected statement installs NOTHING (fail-closed: a VM never comes up
+	// half-filtered), and the teardown above removes the tap.
 	chain := netconf.RenderSandboxChainSpec(netconf.ChainSpec{
 		Tap:          cfg.Tap,
 		GuestIP:      cfg.GuestIP,
@@ -152,24 +158,6 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 		// (#211) can read this sandbox's egress bytes. Passive: no verdict.
 		Counter: true,
 	})
-	if err := run(ctx, netconf.NftApplyArgs(), chain); err != nil {
-		return fmt.Errorf("husk netfilter: apply egress chain for tap %s: %w", cfg.Tap, err)
-	}
-	// Source-NAT the guest's allowed egress to the pod address so return traffic
-	// for an allowed connection can find its way back; without it the private /30
-	// source is unroutable beyond the tap and every allowed connection hangs.
-	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderMasquerade(cfg.GuestIP)); err != nil {
-		return fmt.Errorf("husk netfilter: apply masquerade for guest %s: %w", cfg.GuestIP, err)
-	}
-	// Input-path guard: the forward chain above governs transit traffic, but a
-	// packet the guest sends to a pod-LOCAL address (the tap gateway, the resolver,
-	// the husk-stub sandbox API and mTLS control listeners) is delivered on the
-	// input hook, which the forward chain never sees. Install the input base chain
-	// and this tap's input chain so the guest can reach ONLY the resolver on 53 and
-	// nothing else pod-local, regardless of egress policy.
-	if err := run(ctx, netconf.NftApplyArgs(), netconf.RenderSharedInputTable()); err != nil {
-		return fmt.Errorf("husk netfilter: apply shared input table: %w", err)
-	}
 	inputChain := netconf.RenderSandboxInputChainSpec(netconf.InputChainSpec{
 		Tap:          cfg.Tap,
 		GuestIP:      cfg.GuestIP,
@@ -177,8 +165,15 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 		Inbound:      cfg.Inbound,
 		InboundCIDRs: cfg.InboundCIDRs,
 	})
-	if err := run(ctx, netconf.NftApplyArgs(), inputChain); err != nil {
-		return fmt.Errorf("husk netfilter: apply input chain for tap %s: %w", cfg.Tap, err)
+	// Each Render* returns a newline-terminated block, so concatenation yields one
+	// well-formed nft ruleset file. Order matters within the transaction: the
+	// shared forward table (which defines the dispatch map) precedes the chain that
+	// adds a dispatch element into it, and the shared input table precedes this
+	// tap's input chain, so every forward reference resolves inside the transaction.
+	nftDoc := netconf.RenderSharedTable() + chain + netconf.RenderMasquerade(cfg.GuestIP) +
+		netconf.RenderSharedInputTable() + inputChain
+	if err := run(ctx, netconf.NftApplyArgs(), nftDoc); err != nil {
+		return fmt.Errorf("husk netfilter: apply egress filter for tap %s: %w", cfg.Tap, err)
 	}
 	return nil
 }

@@ -2,7 +2,7 @@ module mitos.run/mitos
 
 go 1.26.2
 
-toolchain go1.26.4
+toolchain go1.26.5
 
 require (
 	connectrpc.com/connect v1.20.0

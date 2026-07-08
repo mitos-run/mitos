@@ -1,20 +1,32 @@
 #!/usr/bin/env bash
 # Swap in the Mitos-patched Firecracker VMM (live-fork: m1 memfd/MAP_SHARED guest
-# memory + m2 UFFD write-protect) over the STOCK firecracker that
+# memory + m2 UFFD write-protect + m4b restore-side arm + m5 child memfd import +
+# m6a vmstate-only snapshot) over the STOCK firecracker that
 # hack/install-firecracker.sh installed, while leaving the stock jailer untouched.
 #
 # Why this is a safe, always-on swap (NOT the live-fork wiring, that is m4b):
 #   - The patched binary is behaviour-identical to stock Firecracker v1.15.0
-#     UNLESS FIRECRACKER_MITOS_SHARED_MEM or FIRECRACKER_MITOS_WP_UDS are set at
-#     runtime. This PR sets neither anywhere, so the image behaves byte-for-byte
-#     like stock until m4b flips those env vars on. Installing it everywhere is
-#     therefore safe.
+#     UNLESS FIRECRACKER_MITOS_SHARED_MEM, FIRECRACKER_MITOS_WP_UDS or
+#     FIRECRACKER_MITOS_CHILD_MEMFD are set at runtime, OR a PUT /snapshot/create
+#     sends snapshot_type "MitosVmstateOnly". Full and Diff snapshots are
+#     byte-for-byte unchanged, so the image behaves like stock until those gates are
+#     used. Installing it everywhere is safe.
 #   - Provenance: built reproducibly in mitos-run/firecracker on branch
-#     ci/build-patched-fc via .github/workflows/build-patched-fc.yml
-#     (built commit 531a487cf69898a05091d4c7e5f48bec3132309b, green run
-#     https://github.com/mitos-run/firecracker/actions/runs/28848683507) and
-#     published as a GitHub release asset, pinned by sha256 below. A compromised
-#     CDN or a network substitution cannot install a different binary.
+#     mitos/child-memfd-import-v1.15.0 via .github/workflows/build-patched-fc.yml
+#     (green run https://github.com/mitos-run/firecracker/actions/runs/28915829813)
+#     and published as a GitHub release asset, pinned by sha256 below. A compromised
+#     CDN or a network substitution cannot install a different binary. This binary
+#     adds the m5 child-side memfd import (issue #832): a co-located fork child that
+#     is launched with FIRECRACKER_MITOS_CHILD_MEMFD boots its guest RAM by copying
+#     the source guest memfd's fork-time image into ANONYMOUS private RAM (divorced
+#     from the live memfd) plus the frozen overlay, and loads NO disk mem file, so the
+#     vmstate-only fork drops the create_snapshot mem write end to end. The eager copy
+#     replaces the earlier lazily file-backed MAP_PRIVATE, which let a RESUMED source's
+#     post-fork writes leak into the child and corrupt its kernel (stack-protector
+#     panic). It also keeps the m4b restore-side fix: a RESTORED source VM
+#     backs its guest RAM with a shared memfd, exports it, and offers write-protect
+#     during restore, so the live-cow fork arms on a restored source, not only a
+#     booted one.
 #   - Revert = drop the COPY + RUN that invokes this script from Dockerfile.forkd
 #     and Dockerfile.husk-stub (and the smoke-test fixture); the stock firecracker
 #     from hack/install-firecracker.sh then remains in place.
@@ -26,8 +38,8 @@ set -euo pipefail
 
 # --- single pinned provenance constants (audit + bump only here) -------------
 PATCHED_FC_VERSION="v1.15.0"
-PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-uffd-wp-v1.15.0/firecracker-v1.15.0-x86_64-mitos-uffd-wp"
-PATCHED_FC_SHA256="0209700d794acb7b77a919c0aa50506b2186642d80e5c0d13220ee51003b823b"
+PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-child-memfd-import-v1.15.0-2/firecracker-v1.15.0-x86_64-mitos-child-memfd-import"
+PATCHED_FC_SHA256="7d02b374a5a60a59c39842733305ce719f6fa42c64f3f180a13a5d70dc515272"
 # -----------------------------------------------------------------------------
 
 arch="$(uname -m)"
@@ -70,4 +82,4 @@ if [ "$fc_ver" != "$jl_ver" ]; then
 fi
 # Belt and braces: confirm the on-disk binary is exactly the pinned artifact.
 echo "${PATCHED_FC_SHA256}  /usr/local/bin/firecracker" | sha256sum -c -
-echo "install-firecracker-patched: installed Mitos-patched firecracker ${fc_ver} (x86_64); jailer left stock. Behaviour-identical to stock until FIRECRACKER_MITOS_* env is set (m4b)."
+echo "install-firecracker-patched: installed Mitos-patched firecracker ${fc_ver} (x86_64); jailer left stock. Behaviour-identical to stock until FIRECRACKER_MITOS_* env is set (m1/m2/m4b source arm, m5 child memfd import) or a MitosVmstateOnly snapshot is requested (m6a)."

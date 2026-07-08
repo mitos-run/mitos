@@ -190,6 +190,16 @@ type HuskPodOptions struct {
 	// (milestone m4b). Default off and SEPARATE from MultiVM so it canaries
 	// independently; off keeps the co-located fork on the disk restore byte-for-byte.
 	LiveCowFork bool
+	// LiveCowChildImport starts the husk stub with --live-cow-child-import so an
+	// armed live-cow fork takes the VMSTATE-ONLY capture (skip the ~364ms disk mem
+	// write) and the co-located child boots its guest RAM from the source shared
+	// memfd. REQUIRES LiveCowFork on and a child-side-import Firecracker binary;
+	// default off, fails closed to the disk restore.
+	LiveCowChildImport bool
+	// PrewarmChild starts the husk stub with --prewarm-child so a multi-vm pod keeps
+	// one dormant generic co-located child Firecracker pre-prepared and a fork adopts
+	// it (fc_boot off the hot path). DEFAULT OFF; requires MultiVM.
+	PrewarmChild bool
 	// MultiVMForkVMs is the number of ADDITIONAL fork-child VMs a multi-VM pod
 	// reserves node memory for up front (beyond the source VM), so the co-location
 	// routing has room to co-locate that many children before a fork spills to a new
@@ -547,6 +557,26 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 	if opts.LiveCowFork {
 		args = append(args, "--live-cow-fork")
 	}
+	if opts.LiveCowChildImport {
+		args = append(args, "--live-cow-child-import")
+	}
+	if opts.PrewarmChild {
+		args = append(args, "--prewarm-child")
+	}
+
+	// Live-cow write-protect needs a KERNEL-MODE userfaultfd over the guest RAM: the
+	// source Firecracker registers UFFD_WP so the KVM guest's own writes fault to the
+	// copy-before-unprotect handler (issue #832). The patched restore path creates
+	// that userfaultfd via the `/dev/userfaultfd` DEVICE (open + USERFAULTFD_IOC_NEW),
+	// NOT the `userfaultfd(2)` syscall: the container RuntimeDefault seccomp profile
+	// denies `userfaultfd(2)` with EPERM even when CAP_SYS_PTRACE is present, because
+	// CAP_SYS_PTRACE satisfies only the kernel gate, not the seccomp gate. The device
+	// is injected into every KVM husk pod by the kvm device plugin (mitos.run/kvm),
+	// which also sets the device-cgroup allow a plain hostPath cannot, and the ioctl
+	// device path is permitted by the same seccomp profile. So the husk-stub keeps the
+	// minimal NET_ADMIN-only capability set: no CAP_SYS_PTRACE is needed on a live-cow
+	// pool. Documented in docs/threat-model.md.
+	huskCaps := []corev1.Capability{"NET_ADMIN"}
 
 	// Name-based egress: when the operator configured DNS upstream(s), pass them
 	// to the stub so the per-pod DNS proxy resolves and pins allowlisted names.
@@ -870,8 +900,8 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: pool.Name + "-husk-",
 			Namespace:    pool.Namespace,
-			Labels: huskPodLabels(pool.Name, opts.MultiVM),
-			Annotations: annotations,
+			Labels:       huskPodLabels(pool.Name, opts.MultiVM),
+			Annotations:  annotations,
 		},
 		Spec: corev1.PodSpec{
 			// A husk pod is long-lived: it holds its dormant (then activated) VM
@@ -1039,8 +1069,10 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 							// the load-bearing control that gives the husk guest VM
 							// CNI-independent default-deny egress + the unconditional
 							// cloud-metadata block. Documented as a PSA exception in
-							// docs/threat-model.md.
-							Add: []corev1.Capability{"NET_ADMIN"},
+							// docs/threat-model.md. SYS_PTRACE is appended only for a
+							// live-cow pool (see huskCaps above), for the kernel-mode
+							// userfaultfd the write-protect fork needs.
+							Add: huskCaps,
 						},
 						SeccompProfile: &corev1.SeccompProfile{
 							Type: corev1.SeccompProfileTypeRuntimeDefault,
@@ -1360,16 +1392,18 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 			}
 		}
 		opts := HuskPodOptions{
-			MultiVM:         r.MultiVM,
-			LiveCowFork:     r.LiveCowFork,
-			MultiVMForkVMs:  r.MultiVMForkVMs,
-			StubImage:       r.HuskStubImage,
-			DNSUpstream:     r.HuskDNSUpstream,
-			KVMResourceName: r.KVMResourceName,
-			SnapshotID:      poolTemplateID(pool),
-			DataDir:         r.DataDir,
-			TLSSecretName:   r.HuskTLSSecretName,
-			CASecretName:    r.HuskCASecretName,
+			MultiVM:            r.MultiVM,
+			LiveCowFork:        r.LiveCowFork,
+			LiveCowChildImport: r.LiveCowChildImport,
+			PrewarmChild:       r.PrewarmChild,
+			MultiVMForkVMs:     r.MultiVMForkVMs,
+			StubImage:          r.HuskStubImage,
+			DNSUpstream:        r.HuskDNSUpstream,
+			KVMResourceName:    r.KVMResourceName,
+			SnapshotID:         poolTemplateID(pool),
+			DataDir:            r.DataDir,
+			TLSSecretName:      r.HuskTLSSecretName,
+			CASecretName:       r.HuskCASecretName,
 			// dedicatedNodes (#172): pin this pool's husk pods to the tenant's
 			// dedicated node set. Merged onto the KVM nodeSelector + snapshot-node
 			// affinity below.

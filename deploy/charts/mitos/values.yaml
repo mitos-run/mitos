@@ -69,6 +69,19 @@ controller:
   # where the child-side memfd import is not yet complete, so it never breaks a
   # fork. Only meaningful with enableHuskPods.
   liveCowFork: false
+
+  # EXPERIMENTAL, default off. When true (and liveCowFork on), render
+  # --live-cow-child-import so an armed live-cow fork takes the vmstate-only capture
+  # (skip the ~364ms disk mem write) and the co-located child boots its guest RAM
+  # from the source shared memfd. Requires a child-side-import patched Firecracker;
+  # off keeps the armed source writing the disk mem so every child restores from disk.
+  liveCowChildImport: false
+
+  # EXPERIMENTAL, default off. When true (and multiVMFork on), render --prewarm-child
+  # so each multi-vm husk pod keeps one dormant generic co-located child Firecracker
+  # pre-prepared and a fork adopts it (fc_boot off the hot path) instead of booting one
+  # at fork time. A fresh slot re-warms async; a miss falls back to on-demand prepare.
+  prewarmChild: false
   # Value for --husk-data-dir: the node template snapshot root the husk pods
   # mount; must match forkd's --data-dir.
   huskDataDir: /var/lib/mitos
