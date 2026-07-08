@@ -23,13 +23,14 @@ import (
 type fakeVMM struct {
 	loadErr error
 
-	mu        sync.Mutex
-	loadCalls int
-	gotMem    string
-	gotState  string
-	gotResume bool
-	gotOverr  []firecracker.NetworkOverride
-	closed    bool
+	mu          sync.Mutex
+	loadCalls   int
+	gotMem      string
+	gotState    string
+	gotResume   bool
+	gotOverr    []firecracker.NetworkOverride
+	gotUFFDSock string
+	closed      bool
 
 	patchCalls []struct {
 		driveID string
@@ -93,6 +94,18 @@ func (f *fakeVMM) LoadSnapshotWithOverrides(mem, snapshot string, resume bool, o
 	f.gotResume = resume
 	f.gotOverr = overrides
 	f.callOrder = append(f.callOrder, "load")
+	return f.loadErr
+}
+
+func (f *fakeVMM) LoadSnapshotUFFD(snapshot, uffdSocketPath string, overrides []firecracker.NetworkOverride) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loadCalls++
+	f.gotState = snapshot
+	f.gotUFFDSock = uffdSocketPath
+	f.gotResume = false
+	f.gotOverr = overrides
+	f.callOrder = append(f.callOrder, "load_uffd")
 	return f.loadErr
 }
 

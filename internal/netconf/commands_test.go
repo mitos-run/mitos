@@ -38,6 +38,41 @@ func TestLinkDelArgs(t *testing.T) {
 	}
 }
 
+func TestIPBatchArgs(t *testing.T) {
+	got := IPBatchArgs()
+	want := []string{"ip", "-batch", "-"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("IPBatchArgs = %v, want %v", got, want)
+	}
+}
+
+// TestRenderIPBatchWithResolver proves the batch document is exactly the four
+// per-command builders (tap add, host addr, link up, resolver addr) with the
+// leading "ip" stripped, one per line, so the batched and unbatched forms cannot
+// drift. Each line must be a bare `ip -batch` subcommand (no "ip" prefix).
+func TestRenderIPBatchWithResolver(t *testing.T) {
+	got := RenderIPBatch("sbtap0", net.ParseIP("10.200.0.1"), net.ParseIP("169.254.1.1"))
+	want := "tuntap add sbtap0 mode tap\n" +
+		"addr add 10.200.0.1/30 dev sbtap0\n" +
+		"link set sbtap0 up\n" +
+		"addr add 169.254.1.1/32 dev sbtap0\n"
+	if got != want {
+		t.Errorf("RenderIPBatch =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestRenderIPBatchNoResolver proves the multi-VM path (no ResolverIP) omits the
+// resolver bind line and emits only the three setup commands.
+func TestRenderIPBatchNoResolver(t *testing.T) {
+	got := RenderIPBatch("sbtap0", net.ParseIP("10.200.0.1"), nil)
+	want := "tuntap add sbtap0 mode tap\n" +
+		"addr add 10.200.0.1/30 dev sbtap0\n" +
+		"link set sbtap0 up\n"
+	if got != want {
+		t.Errorf("RenderIPBatch (no resolver) =\n%q\nwant\n%q", got, want)
+	}
+}
+
 func TestNftApplyArgs(t *testing.T) {
 	got := NftApplyArgs()
 	want := []string{"nft", "-f", "-"}

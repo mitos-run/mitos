@@ -123,7 +123,7 @@ open, with a severity on the review rows) is preserved throughout.
 |---|---|---|---|
 | Guest workload | VM guest, untrusted | nothing | nobody |
 | Guest agent - Rust (`guest/agent-rs`) | PID 1 in guest; the SOLE production agent since Phase E (#310). Baked as `/init` by `guest/rootfs/build.sh` and `kvm-test.yaml`. Serves ONLY gRPC on vsock port 53 (AgentGRPCPort); all host callers speak gRPC (SP1.5 merged, Go agent and legacy JSON protocol removed). SECURITY-SENSITIVE: requires named human reviewer; see `docs/security-review-policy.md`. | nothing | forkd / husk stub (gRPC, port 53) |
-| husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps and add only `NET_ADMIN` (in-pod egress firewall, scoped to the pod netns), `seccomp: RuntimeDefault`, read-only snapshot mount; the long-lived husk-stub container is NOT privileged | controller (mTLS control channel) | controller |
+| husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps and add only `NET_ADMIN` (in-pod egress firewall, scoped to the pod netns), `seccomp: RuntimeDefault`, read-only snapshot mount; on a live-cow pool the kvm device plugin also injects `/dev/userfaultfd` (see below), no extra capability; the long-lived husk-stub container is NOT privileged | controller (mTLS control channel) | controller |
 | husk `enable-ip-forward` init container (name-egress pools only) | short-lived PRIVILEGED init container on the husk pod; writes `net.ipv4.ip_forward=1` in the shared pod netns and exits BEFORE the workload runs; added only when name-based egress is configured (`--husk-dns-upstream` set) | controller (it is part of the pod spec) | controller |
 | forkd (`cmd/forkd`), the snapshot BUILDER and the raw-forkd fallback | NON-privileged DaemonSet pod (uid 0, `privileged: false`, `allowPrivilegeEscalation: false`, `seccomp: RuntimeDefault`): drops ALL capabilities and adds back ONLY the explicit builder set (`SYS_ADMIN`, `CHOWN`, `SETUID`, `SETGID`, `MKNOD` for the jailer, plus `NET_ADMIN` for the build-time placeholder tap and `DAC_OVERRIDE` so the builder can reopen the template `rootfs.ext4` it wrote after the jailer chowned the shared inode to the per-VM uid, #426; `cmd/forkd/jailer.go` `forkdRequiredCapabilities`). `DAC_OVERRIDE` is negligible marginal authority next to the `CAP_SYS_ADMIN` the builder already holds. The per-VM jailer is ENABLED in the shipped DaemonSet (`deploy/daemon/daemonset.yaml`: `--jailer`/`--chroot-base`/`--uid-range`), so every build/raw-forkd VM runs under a dedicated uid/gid in a per-VM chroot. `/dev/kvm` and `/dev/net/tun` come from the device plugin (`mitos.run/kvm`), NOT a privileged hostPath. (#352) | controller | controller, nodes |
 | controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd, husk pods |
@@ -171,6 +171,33 @@ privileged process and RUN many times by unprivileged pods.
   in the shared pod netns and exits before the workload runs (surface 5); it is
   privileged but one-shot, and the long-lived husk-stub container itself stays
   unprivileged (`NET_ADMIN` only).
+- **Live-cow pools get `/dev/userfaultfd` injected by the kvm device plugin, no
+  extra capability (issue #832).** The live-cow write-protect fork needs the source
+  Firecracker to create a KERNEL-MODE userfaultfd over its guest RAM (so the KVM
+  guest's own writes fault to the copy-before-unprotect handler). The patched
+  restore path creates that userfaultfd via the `/dev/userfaultfd` DEVICE (the
+  `userfaultfd` crate's device path: `open` + `USERFAULTFD_IOC_NEW`), NOT the
+  `userfaultfd(2)` syscall. The syscall is unreachable from the husk pod: the
+  container `RuntimeDefault` seccomp profile denies `userfaultfd(2)` with `EPERM`
+  even when `CAP_SYS_PTRACE` is present (reproduced under the exact pod
+  securityContext: root + `CAP_SYS_PTRACE` + `RuntimeDefault` seccomp returns
+  `EPERM`; only `seccomp=unconfined` lets the syscall through). `CAP_SYS_PTRACE`
+  satisfies only the kernel gate (`sysctl vm.unprivileged_userfaultfd`), never the
+  seccomp gate, so the earlier scoped `CAP_SYS_PTRACE` grant never armed a real
+  prod source and is REMOVED. Instead the kvm device plugin (`mitos.run/kvm`)
+  injects `/dev/userfaultfd` alongside `/dev/kvm`, `/dev/net/tun`, and
+  `/dev/vhost-vsock` (`cmd/kvm-device-plugin`, `deploy/charts/mitos/templates/device-plugin-daemonset.yaml`);
+  the device plugin sets the device-cgroup allow a plain hostPath cannot, and the
+  ioctl device path is permitted by the same `RuntimeDefault` seccomp profile. This
+  matches what the `firecracker-test` CI has always proven (it creates the source's
+  uffd via `/dev/userfaultfd`). Blast radius: `/dev/userfaultfd` is a benign misc
+  device that only lets the holder create userfaultfds within its own address
+  space; it grants no host, node, or cross-pod authority, strictly less than the
+  removed `CAP_SYS_PTRACE`, and the husk-stub keeps the minimal `NET_ADMIN`-only
+  capability set. It is injected on every KVM husk pod (the same homogeneous-node
+  device set as `/dev/vhost-vsock`); a node whose kernel lacks `/dev/userfaultfd`
+  (pre-6.1) would fall back to the Full snapshot fork (no correctness loss, only
+  the 364ms capture returns).
 - **forkd-the-builder is the residual host privilege, but it is no longer a
   privileged container (#352).** Building a template snapshot still needs
   `/dev/kvm` and the jailer, so forkd remains the privileged BUILDER role on the
@@ -600,10 +627,84 @@ Trust and residual, stated honestly:
   process cannot make the child attach a foreign descriptor: the check fails closed and
   the child falls back to the disk restore. The disk `mem`
   path is still passed to `LoadSnapshot`, so the child falls back to the disk restore
-  when the import is unavailable (never breaks a fork). Pending: the child Firecracker
-  restore path that READS this env is the remaining smallest Firecracker patch (the
-  shipped fork patches only the parent side); until it lands the env is set and the
-  child restores from disk.
+  when the import is unavailable (never breaks a fork). The child Firecracker restore
+  path that READS this env now ships in the pinned patched binary
+  (`mitos/child-memfd-import-v1.15.0`, `guest_memory_from_file` ->
+  `memory::mitos_child_memfd_restore`): it performs the SAME identity-verified reopen
+  `fork.ComposeChildFromImport` performs, then builds the child's guest RAM as a FULLY
+  PRIVATE anonymous copy of the parent's fork-time image (map anonymous private RAM,
+  eagerly copy the parent memfd base in, then overlay the FROZEN pages from the LIVE
+  bitmap), and loads NO disk mem file. The child is DIVORCED from the parent's live
+  memfd: unlike a lazily file-backed `MAP_PRIVATE`, no child page can track a write the
+  RESUMED source lands on its shared memfd after the fork point, so a resumed source's
+  post-fork writes can never leak into the child (a lazy mapping leaked exactly the busy
+  kernel pages the source rewrites first and corrupted the child kernel; the eager copy
+  closes that channel while keeping the source-side no-mem-file win). With
+  `LiveCowChildImport` on the co-located child boots its guest RAM from the source
+  memfd end to end. It is gated by `LiveCowChildImport`
+  (default OFF): with the flag off the source still writes the disk mem and the child
+  restores from disk, so a pod running the m5 binary with the flag off is byte-for-byte
+  the disk co-location.
+- LAZY child import (the fork-latency fix). The eager child copy above skips the
+  ~364ms source mem-file write but then EAGERLY copies the whole guest RAM (e.g.
+  256MiB) into the child's anonymous RAM at restore, so the child `vmstate_restore`
+  grows from ~20ms to ~391ms and the vmstate-only fork is latency-NEUTRAL: the cost
+  just moves from the source to the child. The husk now imports the child's guest RAM
+  LAZILY instead: it restores the co-located child through Firecracker's NATIVE
+  userfaultfd memory backend (`mem_backend.backend_type=Uffd`, stock Firecracker, NO
+  child patch and NO `FIRECRACKER_MITOS_CHILD_MEMFD` env), pointing `/snapshot/load`
+  at a husk-side handler socket, and a new handler
+  (`internal/fork/childuffd*.go`, `fork.StartChildUFFDHandler`, driven by
+  `Stub.loadSnapshotChildUFFD`) fills each faulting guest page ON DEMAND. The child
+  therefore copies only the pages its working set touches (a few MiB), so its restore
+  drops back to milliseconds and the source-side win is finally realized end to end.
+  Trust and residual, stated honestly:
+  - The handler reads ONLY the parent's own m1-exported guest memfd, this pod's
+    PRIVATE FROZEN memfd, and this pod's LIVE frozen-bitmap memfd, each opened through
+    the SAME identity-verified `/proc/<pid>/fd/<fd>` reopen the eager import uses
+    (`openProcFdVerified`: the target must be a memfd of the expected name with a
+    matching `(st_ino, st_dev)`, so a recycled PID fails closed). It maps the parent
+    memfd READ-ONLY (`MAP_SHARED` `PROT_READ`), so it opens no write channel into the
+    source, and writes ONLY into the guest RAM Firecracker registered, via
+    `UFFDIO_COPY` of a private staging page it composed. It makes NO host-path write.
+  - Its only external input is the region layout Firecracker itself sends over the
+    PRIVATE per-VM backend socket plus the uffd (`SCM_RIGHTS`), the same
+    `GuestRegionUffdMapping` handshake the issue #167 UFFD restore backend already
+    uses. The socket is host-local and per-VM (a fixed-length 64-bit vmID hash under
+    the pod workdir, so two co-located children never collide on one socket), not
+    reachable by the guest; it adds NO new tenant-facing input. Because this socket IS
+    the child's memory backend, `Receive` accepts ONLY the expected peer: it checks the
+    connecting process's `SO_PEERCRED` uid against the husk's own uid (the child
+    Firecracker runs as that uid) and fails closed on a mismatch, so a hostile local
+    process that raced the real child to connect cannot supply its own uffd + regions
+    and drive `UFFDIO_COPY` into memory it controls.
+  - NO LEAK, checked PER FAULT: for each faulting page the handler consults the LIVE
+    frozen bit AT FAULT TIME. A frozen page is served from FROZEN at its fork-time
+    value; a not-yet-frozen page is served from the live source memfd (still the
+    fork-time value, because the WP handler freezes a page BEFORE it lets the source's
+    write land), then the bit is RE-CHECKED after the live read and, if it flipped, the
+    page is overridden from FROZEN. So a resumed source's post-fork overwrite is always
+    served as its fork-time value, never the mutated value, closing the leak window the
+    eager copy avoided by privatizing everything up front. The point-in-time-T
+    inheritance + no-leak is unit-tested over a real userfaultfd in
+    `TestChildUFFDLazyImportComposesAndNoLeak` and end to end on KVM in
+    `TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM` (child boots
+    from the source memfd with NO disk mem, child `vmstate_restore` well below 100ms,
+    fork-time sentinel read back after the source overwrote it).
+  - Fail-closed: the lazy path is taken ONLY when the source armed AND
+    `LiveCowChildImport` is on. On THAT path the fork went vmstate-only and wrote NO
+    disk mem, so there is NO disk fallback: any handshake, handler-start, or load
+    failure FAILS THE SPAWN (`OK=false`) rather than serving a half-restored guest, and
+    no wait hangs (the load, the handshake, and the Serve result all race so any one
+    failing unblocks the rest). The disk-mem restore is the fallback only where a mem
+    file EXISTS, i.e. when child-import is OFF: then the source wrote a Full fork
+    snapshot with a `mem` file and the child restores from it byte-for-byte (the
+    `TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM` posture). A non-Linux
+    host (`StartChildUFFDHandler` returns `ErrChildUFFDUnsupported`) or a pod with no
+    armed parent never sets the plan, so it takes that same disk restore. The handler
+    is Closed at instance teardown (`closeInstanceBody`), AFTER the child Firecracker is
+    gone, and Close WAITS for any in-flight fault (a `serveMu` write lock) before it
+    munmaps the source views, so a fault never dereferences an unmapped view.
 - Source-side arming (milestone m6b): the parent-side handler is now BOUND to the
   running source VM in production. When a source (default) VM launches under
   `--live-cow-fork` with a real workdir, `prepareInstance` calls
@@ -1613,7 +1714,7 @@ deliberate follow-ups, not this change.
 | Boundary | Status | Mechanism |
 |---|---|---|
 | Image provenance (controller, forkd, husk-stub) | mitigated for published releases | cosign keyless signing + SPDX SBOM attestation, bound to the image digest, produced by `.github/workflows/publish.yaml`; consumer verification in docs/supply-chain.md. |
-| Patched Firecracker VMM provenance (forkd, husk-stub) | mitigated | The forkd and husk-stub images ship a Mitos-patched `firecracker` (live-fork: memfd/MAP_SHARED guest memory + UFFD write-protect + vmstate-only snapshot) instead of the stock upstream binary; the stock jailer is unchanged. The patched binary is NOT a general-CDN download: it is built reproducibly in the `mitos-run/firecracker` fork on branch `mitos/vmstate-only-snapshot-v1.15.0` via `.github/workflows/build-patched-fc.yml` (built commit `229987c33e`, green run `https://github.com/mitos-run/firecracker/actions/runs/28886363577`) and published as a GitHub release asset (`mitos-fc-vmstate-only-v1.15.0`). `hack/install-firecracker-patched.sh` fetches it from a SINGLE pinned URL and verifies it against a pinned sha256 (`66b4309f4902543823c6fa9677a16008644b4279d9b6367b7321044dcf30221b`, 5,215,576 bytes) BEFORE install AND re-verifies the on-disk binary after, failing the build CLOSED on any mismatch, so a compromised release or a network substitution cannot install a different VMM. It reports `firecracker --version` = v1.15.0 (same as the stock jailer, so forkd's version-match check still passes) and is behaviour-identical to stock Firecracker v1.15.0 UNLESS `FIRECRACKER_MITOS_SHARED_MEM` or `FIRECRACKER_MITOS_WP_UDS` are set at runtime OR a `PUT /snapshot/create` sends `snapshot_type` `MitosVmstateOnly`; `Full` and `Diff` snapshots are byte-for-byte unchanged. This PR only re-pins the binary and wires no new runtime gate, so the runtime attack surface is UNCHANGED from stock until those gates are used. The new vmstate-only mode adds no new syscall or network surface: it writes a subset of what a Full snapshot already writes (the microVM state file) and skips the guest-memory dump; a client that never sends `MitosVmstateOnly` sees stock behaviour. The swap is a single COPY + RUN per image and is trivially revertable (drop it and the stock upstream firecracker from `hack/install-firecracker.sh` remains). Residual: the patched build does not yet carry cosign/SBOM attestation of its own (tracked with the image-provenance follow-up); trust rests on the pinned sha256 plus the reproducible fork build. |
+| Patched Firecracker VMM provenance (forkd, husk-stub) | mitigated | The forkd and husk-stub images ship a Mitos-patched `firecracker` (live-fork: memfd/MAP_SHARED guest memory + UFFD write-protect + vmstate-only snapshot + restore-side memfd share/export/WP-offer) instead of the stock upstream binary; the stock jailer is unchanged. The patched binary is NOT a general-CDN download: it is built reproducibly in the `mitos-run/firecracker` fork on branch `mitos/child-memfd-import-v1.15.0` (off `mitos/wp-offer-on-restore-v1.15.0`) via `.github/workflows/build-patched-fc.yml` (green run `https://github.com/mitos-run/firecracker/actions/runs/28915829813`) and published as a GitHub release asset (`mitos-fc-child-memfd-import-v1.15.0-2`). `hack/install-firecracker-patched.sh` fetches it from a SINGLE pinned URL and verifies it against a pinned sha256 (`7d02b374a5a60a59c39842733305ce719f6fa42c64f3f180a13a5d70dc515272`) BEFORE install AND re-verifies the on-disk binary after, failing the build CLOSED on any mismatch, so a compromised release or a network substitution cannot install a different VMM. It reports `firecracker --version` = v1.15.0 (same as the stock jailer, so forkd's version-match check still passes) and is behaviour-identical to stock Firecracker v1.15.0 UNLESS `FIRECRACKER_MITOS_SHARED_MEM`, `FIRECRACKER_MITOS_WP_UDS` or `FIRECRACKER_MITOS_CHILD_MEMFD` are set at runtime OR a `PUT /snapshot/create` sends `snapshot_type` `MitosVmstateOnly`; `Full` and `Diff` snapshots are byte-for-byte unchanged. This bump adds the m5 child-side memfd import (issue #832): when `FIRECRACKER_MITOS_CHILD_MEMFD` names the export file the husk wrote, the RESTORED child restore path (`guest_memory_from_file`) reopens + identity-verifies the source guest memfd, the handler FROZEN memfd and the LIVE frozen bitmap through `/proc/<pid>/fd/<fd>` (memfd link check + captured `st_ino`/`st_dev` match, PID-reuse safe, fail closed), copies the source memfd's fork-time image into ANONYMOUS private guest RAM (divorced from the live memfd, so no page can lazily track a post-fork source write) and overlays the frozen pages from FROZEN at their fork-time value (live bitmap so a page frozen between import and attach is still sourced from FROZEN, the m2 no-leak invariant), and loads NO disk mem file. The CPU + device vmstate still restores from the vmstate file. It also keeps the m4b restore-side change: when `FIRECRACKER_MITOS_SHARED_MEM` is set, the RESTORED source loads its guest RAM into a `MAP_SHARED` memfd (`memory::snapshot_file_memfd`) then runs the SAME `mitos_export_shared_memfd` + `mitos_wp_offer` the fresh-boot path already runs. Both changes are entirely BEHIND their `FIRECRACKER_MITOS_*` gates: the non-mitos restore path and `Full`/`Diff` snapshot restore stay byte-for-byte unchanged, so the runtime attack surface is UNCHANGED from stock until a gate is set. The child import reads ONLY the co-located source VM's OWN guest memfd (same pod/node trust boundary as the disk fork snapshot the child already restores its rootfs from) and the handler's private FROZEN memfd; it duplicates no descriptor out, writes nowhere on the host filesystem, and adds no new network surface beyond the memfd reach + UFFD write-protect handshake already reviewed for the boot path (surface 3b). The swap is a single COPY + RUN per image and is trivially revertable (drop it and the stock upstream firecracker from `hack/install-firecracker.sh` remains). Residual: the patched build does not yet carry cosign/SBOM attestation of its own (tracked with the image-provenance follow-up); trust rests on the pinned sha256 plus the reproducible fork build. |
 | Image CVEs | partial | Trivy scans the built images on every PR for HIGH/CRITICAL fixable findings (ADVISORY today: reported, not yet gating, pending base-image remediation); govulncheck is the BLOCKING gate for Go call-graph-reachable vulnerabilities; base-image and dependency bumps arrive via dependabot. Runtime re-scan of long-lived published tags is not yet automated. |
 | Guest kernel currency | partial | The shipped vmlinux is pinned to an exact version (docs/kernel-cve.md) and validated end to end by the KVM workflow; CVE watch is a documented manual process, not an automated feed. |
 | Guest kernel integrity at stage time | partial | The Helm kernel-stage init container downloads the guest kernel and, when `kernelProvisioner.kernelSha256` is set, verifies the staged file against that digest and FAILS CLOSED on mismatch (covering both a fresh download and an already-cached file), so a swapped upstream object or a MITMed fetch cannot boot a backdoored kernel fleet-wide. The digest is empty by default (a warning is logged); operators should pin it. The privileged forkd, kvm-device-plugin, and kernel-stage pods set `automountServiceAccountToken: false` since none call the Kubernetes API. |
