@@ -12,7 +12,7 @@
 #     cd /src && git fetch -q origin <branch> && git checkout -q FETCH_HEAD &&
 #     go build -o /tmp/bench ./cmd/bench &&
 #     /tmp/bench --mode fork-exec --data-dir /var/lib/mitos --template python \
-#       --firecracker /fc/firecracker --kernel /kernel/vmlinux --iterations 20'
+#       --firecracker /fc/firecracker --iterations 20'
 # -> read the per-stage fork timings (create_snapshot, freeze, rootfs_clone,
 #    vmstate_restore) directly. Winners still go through the full PR/CI/security
 #    gate before prod tenants.
@@ -62,7 +62,7 @@ spec:
             - { name: fc, mountPath: /fc }
             - { name: data, mountPath: /var/lib/mitos }
             - { name: template, mountPath: /var/lib/mitos/templates/python, readOnly: true }
-            - { name: kernel, mountPath: /kernel/vmlinux, readOnly: true }
+            - { name: kernel, mountPath: /var/lib/mitos/vmlinux, readOnly: true }
             - { name: src, mountPath: /src }
       volumes:
         - { name: fc, emptyDir: {} }
@@ -71,4 +71,4 @@ spec:
         - name: template
           hostPath: { path: /var/lib/mitos/templates/python, type: Directory }
         - name: kernel
-          hostPath: { path: /var/lib/mitos/kernel/vmlinux, type: File }
+          hostPath: { path: /var/lib/mitos/vmlinux, type: File }
