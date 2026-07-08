@@ -103,6 +103,11 @@ type config struct {
 	networked     bool
 	proxySentinel string
 	proxyPort     int
+	// allowUnverified disables the engine's verify-on-load refusal so a template
+	// with no recorded manifest digest can still be forked. Development only (it
+	// mirrors forkd's --allow-unverified-snapshots); used by the fork-bench pod,
+	// whose read-only template mount may carry no digest file.
+	allowUnverified bool
 }
 
 // parseConfig parses args (excluding the program name) into a validated config.
@@ -117,6 +122,7 @@ func parseConfig(args []string) (config, error) {
 	fs.StringVar(&cfg.template, "template", "", "template (snapshot) id to fork from")
 	fs.StringVar(&cfg.dataDir, "data-dir", "/var/lib/mitos", "data directory holding template snapshots")
 	fs.StringVar(&cfg.firecracker, "firecracker", "/usr/local/bin/firecracker", "Firecracker binary path")
+	fs.BoolVar(&cfg.allowUnverified, "allow-unverified-snapshots", false, "development only: fork templates that carry no verified manifest digest (mirrors forkd's flag)")
 	fs.StringVar(&cfg.kernel, "kernel", "/var/lib/mitos/vmlinux", "guest kernel path")
 	fs.StringVar(&cfg.jsonPath, "json", "", "optional path to write results JSON")
 	fs.BoolVar(&cfg.summary, "summary", false, "print the summary table to stdout")
@@ -215,7 +221,7 @@ func run(cfg config) error {
 	// how cmd/live-fork-egress-smoke constructs the engine (see that binary for
 	// the detailed topology). The proxy listener is started before engine
 	// construction so the port is bound before any Fork call.
-	engineOpts := fork.EngineOpts{}
+	engineOpts := fork.EngineOpts{AllowUnverified: cfg.allowUnverified}
 	if cfg.networked {
 		sentinelIP := net.ParseIP(cfg.proxySentinel)
 		if sentinelIP == nil {
