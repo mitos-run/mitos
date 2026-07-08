@@ -2720,6 +2720,12 @@ jobs:
           sudo chmod 666 /dev/kvm || true
           sudo chmod 666 /dev/userfaultfd 2>/dev/null || true
           sudo sysctl -w vm.unprivileged_userfaultfd=1 2>/dev/null || true
+          # The co-located child Firecracker (dormant VMM) shares the runner with the
+          # source VM (a 256MB memfd + write-protect handler), so on a contended nested
+          # KVM runner it needs more than the 5s default to bind its API socket. Raise
+          # the ready ceiling for this step only (prod is unaffected; a healthy launch
+          # still returns immediately).
+          export MITOS_FC_READY_TIMEOUT_SECONDS=45
           if [ -r /dev/userfaultfd ] && [ -w /dev/userfaultfd ]; then
             export MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM=1
             export MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT=1
