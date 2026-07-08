@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.35.0](https://github.com/mitos-run/mitos/compare/v1.34.0...v1.35.0) (2026-07-08)
+
+
+### Features
+
+* **husk:** lazy UFFD child import so the vmstate-only fork actually drops fork latency ([#848](https://github.com/mitos-run/mitos/issues/848)) ([a8946ff](https://github.com/mitos-run/mitos/commit/a8946ffeadd50e0649a880da86cd7f656cbd4a6d))
+
 ## [1.34.0](https://github.com/mitos-run/mitos/compare/v1.33.0...v1.34.0) (2026-07-08)
 
 
