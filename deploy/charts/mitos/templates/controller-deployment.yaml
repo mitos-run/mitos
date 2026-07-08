@@ -4,6 +4,9 @@
 {{- if and .Values.controller.liveCowFork (not .Values.controller.enableHuskPods) }}
 {{- fail "controller.liveCowFork requires controller.enableHuskPods: live-cow fork rides the warm husk pod spec, which only exists on the husk-pods path. Set enableHuskPods: true or liveCowFork: false." }}
 {{- end }}
+{{- if and .Values.controller.liveCowChildImport (not .Values.controller.liveCowFork) }}
+{{- fail "controller.liveCowChildImport requires controller.liveCowFork: the child-side memfd import only applies to an armed live-cow fork. Set liveCowFork: true or liveCowChildImport: false." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -47,6 +50,9 @@ spec:
             {{- end }}
             {{- if .Values.controller.liveCowFork }}
             - --live-cow-fork
+            {{- end }}
+            {{- if .Values.controller.liveCowChildImport }}
+            - --live-cow-child-import
             {{- end }}
             - --husk-stub-image={{ include "mitos.image" (dict "root" . "image" .Values.huskStub.image) }}
             - --husk-data-dir={{ .Values.controller.huskDataDir }}

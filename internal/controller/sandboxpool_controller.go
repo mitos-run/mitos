@@ -51,6 +51,10 @@ type SandboxPoolReconciler struct {
 	// --live-cow-fork operator flag; DEFAULT OFF and SEPARATE from MultiVM so it
 	// canaries independently. A normal claim is unaffected.
 	LiveCowFork bool
+	// LiveCowChildImport passes --live-cow-child-import to warm husk pods so an armed
+	// live-cow fork takes the vmstate-only capture and the child boots from the source
+	// memfd. DEFAULT OFF; requires LiveCowFork and a child-import Firecracker binary.
+	LiveCowChildImport bool
 	// MultiVMForkVMs is how many co-located fork VMs a multi-VM warm pod reserves
 	// node memory for up front (beyond the source VM), so the co-location routing
 	// has room before a fork spills to a new pod. Only consulted when MultiVM is set;

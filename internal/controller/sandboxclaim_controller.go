@@ -141,6 +141,10 @@ type SandboxReconciler struct {
 	// child-side memfd import lands, so turning it on never breaks a fork.
 	LiveCowFork bool
 
+	// LiveCowChildImport mirrors the husk-stub --live-cow-child-import capability so
+	// fork routing is consistent with the pod flag. DEFAULT OFF; requires LiveCowFork.
+	LiveCowChildImport bool
+
 	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
 	// Nil defaults to SpawnVMOnHusk; tests inject a fake.
 	spawnVM huskVMSpawner
