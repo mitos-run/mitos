@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.37.0](https://github.com/mitos-run/mitos/compare/v1.36.0...v1.37.0) (2026-07-08)
+
+
+### Features
+
+* **controller:** wire --prewarm-child so the pre-warmed fork slot engages ([#853](https://github.com/mitos-run/mitos/issues/853)) ([63eb53a](https://github.com/mitos-run/mitos/commit/63eb53a912bb88fce14b8e443a1f51eb2a38cac1))
+
 ## [1.36.0](https://github.com/mitos-run/mitos/compare/v1.35.0...v1.36.0) (2026-07-08)
 
 
