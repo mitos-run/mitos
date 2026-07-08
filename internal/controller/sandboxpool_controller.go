@@ -55,6 +55,9 @@ type SandboxPoolReconciler struct {
 	// live-cow fork takes the vmstate-only capture and the child boots from the source
 	// memfd. DEFAULT OFF; requires LiveCowFork and a child-import Firecracker binary.
 	LiveCowChildImport bool
+	// PrewarmChild passes --prewarm-child to warm husk pods so a fork adopts a
+	// pre-warmed dormant child. DEFAULT OFF; requires MultiVM.
+	PrewarmChild bool
 	// MultiVMForkVMs is how many co-located fork VMs a multi-VM warm pod reserves
 	// node memory for up front (beyond the source VM), so the co-location routing
 	// has room before a fork spills to a new pod. Only consulted when MultiVM is set;

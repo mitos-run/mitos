@@ -229,6 +229,22 @@ func TestBuildHuskPodThreadsDNSUpstream(t *testing.T) {
 // so a co-located fork child can share the parent's resident guest memory, and
 // with it OFF (the default, every deployment today) the flag is absent so the pod
 // is byte-for-byte the current disk co-location.
+func TestBuildHuskPodThreadsPrewarmChild(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true, PrewarmChild: true})
+	if !argsContain(on.Spec.Containers[0].Args, "--prewarm-child") {
+		t.Errorf("husk args missing --prewarm-child when enabled: %v", on.Spec.Containers[0].Args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true})
+	if argsContain(off.Spec.Containers[0].Args, "--prewarm-child") {
+		t.Errorf("husk args must omit --prewarm-child by default: %v", off.Spec.Containers[0].Args)
+	}
+}
+
 func TestBuildHuskPodThreadsLiveCowChildImport(t *testing.T) {
 	r := &controller.SandboxPoolReconciler{}
 	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
