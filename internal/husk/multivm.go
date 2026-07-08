@@ -602,6 +602,18 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	// names and durations only; no secret, token, or entropy value is logged.
 	fmt.Fprintf(os.Stderr, "husk: activate vm %q stage timing ms: %s total=%.2f\n", id, formatStages(stages), float64(latency.Microseconds())/1000.0)
 	inst.state = StateActive
+	// A claimed pod is now a live tenant VM whose next request may be a co-located
+	// fork. Eagerly boot the pod's ONE dormant child slot so that FIRST fork adopts
+	// it (fc_boot=0) instead of paying the boot on its hot path; without this the
+	// slot is created only AFTER a fork, so a fresh pod's first fork always misses.
+	// Gated on the SOURCE (default) VM: a fork child's own activation must not warm
+	// a slot (SpawnVM's post-fork rewarm already replenishes). Off the hot path (a
+	// goroutine) and fail-closed, so it never delays activate and never over-admits
+	// the per-VM budget (the adopted slot is the same extra VM an on-demand fork
+	// would boot). A no-op when pre-warm is off or the pod is single-VM.
+	if id == defaultVMID {
+		s.eagerPrewarmChildAsync()
+	}
 	return ActivateResult{
 		OK:        true,
 		VsockPath: vsockPath,
