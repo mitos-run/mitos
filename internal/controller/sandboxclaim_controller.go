@@ -144,6 +144,9 @@ type SandboxReconciler struct {
 	// LiveCowChildImport mirrors the husk-stub --live-cow-child-import capability so
 	// fork routing is consistent with the pod flag. DEFAULT OFF; requires LiveCowFork.
 	LiveCowChildImport bool
+	// PrewarmChild passes --prewarm-child to warm husk pods so a fork adopts a
+	// pre-warmed dormant child. DEFAULT OFF; requires MultiVM.
+	PrewarmChild bool
 
 	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
 	// Nil defaults to SpawnVMOnHusk; tests inject a fake.
