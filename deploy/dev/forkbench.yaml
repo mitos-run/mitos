@@ -44,11 +44,12 @@ spec:
             seccompProfile: { type: RuntimeDefault }
       containers:
         - name: bench
-          image: golang:1.23
+          image: golang:1.26
           command: ["sh", "-c", "git clone -q https://github.com/mitos-run/mitos /src || true; sleep infinity"]
           env:
             - { name: PATH, value: "/fc:/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" }
             - { name: GOFLAGS, value: "-buildvcs=false" }
+            - { name: GOTOOLCHAIN, value: "auto" }
           resources:
             limits: { cpu: "2", memory: 3200Mi, mitos.run/kvm: "1" }
             requests: { cpu: 100m, memory: 2560Mi, mitos.run/kvm: "1" }
