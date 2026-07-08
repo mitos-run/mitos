@@ -802,7 +802,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		snapWriteErr := r.Status().Update(ctx, fork)
 		logForkOrchStage(logger, forkID, "status_write_snapshot", time.Since(snapWriteStart))
 		if snapWriteErr != nil {
-			return ctrl.Result{}, snapWriteErr
+			return ctrl.Result{}, fmt.Errorf("persist fork snapshot-taken status: %w", snapWriteErr)
 		}
 		// Mark the moment the one-time fork-snapshot work finished on THIS pass, so
 		// the orchestration gap between the snapshot RPC returning and the fan-out
@@ -986,7 +986,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 					// A conflict means a concurrent writer advanced the fork; returning the
 					// error requeues so the next pass re-reads and recounts occupancy fresh,
 					// never over-admitting.
-					return ctrl.Result{}, coWriteErr
+					return ctrl.Result{}, fmt.Errorf("persist co-located child status: %w", coWriteErr)
 				}
 			}
 			// A failed spawn is NOT wedged: the slot is left not-ready with the cause
@@ -1118,7 +1118,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	// on error so a slow conflict/timeout is still attributable.
 	logForkOrchStage(logger, forkID, "status_write_final", time.Since(finalWriteStart))
 	if finalWriteErr != nil {
-		return ctrl.Result{}, finalWriteErr
+		return ctrl.Result{}, fmt.Errorf("persist final fork status: %w", finalWriteErr)
 	}
 	if fork.Status.ReadyReplicas < effectiveReplicas(fork) {
 		// Children still coming up; requeue to drive them Ready.
