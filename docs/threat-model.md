@@ -327,6 +327,32 @@ controller is the trust anchor here, the same anchor as in the raw-forkd model
 and the encryption key custody (section 5); this is not a regression, it is the
 same boundary.
 
+*Persistent (reused) control connection.* `serveControlConn` serves MORE than one
+request per accepted connection: the mTLS handshake and the
+`AuthorizeControllerIdentity` check run ONCE, then the connection loops read-op /
+dispatch / write-result until the peer closes it, it sits idle past
+`controlIdleTimeout` (90s), or a framing error desyncs the stream. This exists so
+the controller can REUSE one authenticated connection per husk pod across RPCs
+(`internal/controller.HuskConnPool`, behind the DEFAULT-OFF `--husk-conn-reuse`
+flag), removing a TCP+TLS handshake per op on the hot fork path (a co-located
+fork's fork-snapshot + spawn-vm go to the SAME source pod). Reuse changes only
+WHEN the verified handshake happens, never WHETHER it is verified: the peer
+identity is bound to the mTLS session at handshake and does not change under a
+persistent connection, so every request on it comes from the same verified
+`pki.ControllerName` peer; there is no per-request re-auth to weaken because the
+session is unchanged. The pool serializes RPCs to a given pod behind a per-address
+mutex, so exactly one request/response is in flight per connection and concurrent
+forks never interleave frames on one stream; a read/write error, an idle
+connection past the pool's shorter retirement window (`huskConnIdle`, 30s), or a
+husk restart drops the connection and the pool re-dials a fresh authenticated one.
+The one-shot path (dial, one request, close) stays byte-for-byte the default and
+is what runs with the flag off. No secret VALUE is logged on this surface: a
+per-connection error names only the operation and the transport error, never the
+request payload. This is a NET-NEW long-lived-socket surface (a husk pod now holds
+an authenticated controller connection open between ops), bounded by the idle
+timeout and the one-in-flight-request-per-connection invariant; it does not widen
+who may drive the channel (still the controller identity only).
+
 **Surface 3: the READ-ONLY SNAPSHOT HOSTPATH.** The node template snapshot is
 mounted READ-ONLY into the husk pod (`huskpod.go`: the snapshot hostPath and the
 kernel file are both `ReadOnly: true`). The husk stub RE-VERIFIES the snapshot ON
