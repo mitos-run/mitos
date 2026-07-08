@@ -3,9 +3,13 @@ package agentcli
 import (
 	"bytes"
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -86,6 +90,134 @@ func TestCompletionCoversFlags(t *testing.T) {
 			bare := strings.TrimLeft(f, "-")
 			if !strings.Contains(script, f) && !strings.Contains(script, "-s "+bare) {
 				t.Errorf("%s script missing short flag %q", sh, f)
+			}
+		}
+	}
+}
+
+// TestCompletionTreeMatchesDispatch is the true drift guard. It parses the
+// agentcli dispatch switches from source and asserts every verb and subcommand
+// the CLI actually dispatches is covered by completionTree. Adding a case to a
+// dispatch switch without extending the tree fails here, which the script-token
+// tests above cannot catch (they only prove the tree's own tokens reach the
+// emitted scripts). The `version` verb and the offline verbs are intercepted in
+// cmd/mitos/main.go before the backend is built; they live in the tree and are
+// exercised by the script tests, so this in-package guard focuses on the
+// dispatch switches most likely to grow new subcommands.
+func TestCompletionTreeMatchesDispatch(t *testing.T) {
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatalf("parse agentcli package: %v", err)
+	}
+	pkg := pkgs["agentcli"]
+	if pkg == nil {
+		t.Fatalf("agentcli package not found in parse result")
+	}
+
+	// firstSwitchCases returns the string-literal case tokens of the first
+	// switch statement in the named function, which is the subcommand
+	// dispatcher (this codebase dispatches first, then handles). A found guard
+	// stops collection after that switch so later flag switches are ignored.
+	firstSwitchCases := func(fnName string) []string {
+		var cases []string
+		found := false
+		for _, file := range pkg.Files {
+			for _, decl := range file.Decls {
+				fd, ok := decl.(*ast.FuncDecl)
+				if !ok || fd.Name.Name != fnName || fd.Body == nil {
+					continue
+				}
+				ast.Inspect(fd.Body, func(n ast.Node) bool {
+					if found {
+						return false
+					}
+					sw, ok := n.(*ast.SwitchStmt)
+					if !ok {
+						return true
+					}
+					found = true
+					for _, stmt := range sw.Body.List {
+						cc, ok := stmt.(*ast.CaseClause)
+						if !ok {
+							continue
+						}
+						for _, expr := range cc.List {
+							lit, ok := expr.(*ast.BasicLit)
+							if !ok || lit.Kind != token.STRING {
+								continue
+							}
+							if v, uerr := strconv.Unquote(lit.Value); uerr == nil {
+								cases = append(cases, v)
+							}
+						}
+					}
+					return false
+				})
+			}
+		}
+		return cases
+	}
+
+	inTop := func(tok string) bool {
+		for _, v := range completionTree.top {
+			if v == tok {
+				return true
+			}
+		}
+		return false
+	}
+	inSubs := func(verb, tok string) bool {
+		for _, s := range completionTree.subs[verb] {
+			if s == tok {
+				return true
+			}
+		}
+		return false
+	}
+	// skip lists tokens that are intentionally not distinct completion words:
+	// help aliases, the `list` alias of `ls`, and any flag-like token.
+	skip := func(tok string) bool {
+		return tok == "help" || tok == "list" || strings.HasPrefix(tok, "-")
+	}
+
+	topCases := firstSwitchCases("Run")
+	if len(topCases) == 0 {
+		t.Fatalf("no top-level dispatch cases found for Run; parse heuristic broke")
+	}
+	for _, tok := range topCases {
+		if skip(tok) {
+			continue
+		}
+		if !inTop(tok) {
+			t.Errorf("cli.go Run dispatches verb %q but completionTree.top omits it (stale completion)", tok)
+		}
+	}
+
+	// subDispatch maps a subcommand dispatch function to the tree verb it
+	// serves. cmdAuthKeys is a third level (auth keys ...) the two-level tree
+	// does not model, so it is deliberately not checked here.
+	subDispatch := map[string]string{
+		"cmdSandbox":  "sandbox",
+		"runWs":       "ws",
+		"cmdTemplate": "template",
+		"cmdAuth":     "auth",
+		"cmdDev":      "dev",
+	}
+	for fn, verb := range subDispatch {
+		cases := firstSwitchCases(fn)
+		if len(cases) == 0 {
+			t.Errorf("no dispatch switch cases found for %s; parse heuristic broke", fn)
+			continue
+		}
+		for _, tok := range cases {
+			if skip(tok) {
+				continue
+			}
+			if !inSubs(verb, tok) {
+				t.Errorf("%s dispatches subcommand %q but completionTree.subs[%q] omits it (stale completion)", fn, tok, verb)
 			}
 		}
 	}
