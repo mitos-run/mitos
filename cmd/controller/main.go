@@ -339,7 +339,9 @@ func main() {
 
 	if huskConnReuse && !enableHuskPods {
 		logger.Info("WARNING: --husk-conn-reuse is on but --enable-husk-pods is off; connection reuse targets husk control RPCs, which only exist on the husk-pods path, so the flag is a no-op on the raw-forkd path")
-	} else if !huskConnReuse {
+	} else if huskConnReuse {
+		logger.Info("husk control connection reuse: ENABLED; the controller reuses one authenticated mTLS connection per husk pod across control RPCs instead of dialing fresh per RPC, cutting per-RPC handshake overhead on the fork hot path")
+	} else {
 		logger.Info("husk control connection reuse: disabled (default); each husk control RPC dials a fresh mTLS connection. Pass --husk-conn-reuse to reuse one connection per husk pod and cut per-RPC handshake overhead")
 	}
 

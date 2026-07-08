@@ -26,6 +26,13 @@ import (
 // socket the server already idle-closed.
 const controlIdleTimeout = 90 * time.Second
 
+// controlOpTimeout bounds a single in-flight control op (request-body read +
+// operation + result write) so a peer that half-sends a request or stops reading
+// the reply cannot pin the serving goroutine forever. It is a finite socket
+// backstop (unlike clearing the deadline); generous enough for the slowest
+// activate/fork/workspace op the client itself would wait on.
+const controlOpTimeout = 120 * time.Second
+
 // AuthorizeControllerIdentity is the authorize hook for ServeTLS that mirrors
 // forkd's RequireControllerIdentity interceptor: a control connection is
 // accepted only when its VERIFIED mTLS peer presents the controller leaf's DNS
@@ -172,9 +179,11 @@ func serveControlConn(ctx context.Context, conn net.Conn, stub *Stub, authorize 
 			fmt.Fprintf(os.Stderr, "husk control: read control op: %v\n", err)
 			return
 		}
-		// The op arrived: clear the idle deadline so the operation itself is
-		// bounded by ctx (a slow activate/fork), not the inter-request window.
-		_ = conn.SetReadDeadline(time.Time{})
+		// The op arrived: re-arm a finite per-op deadline (both read + write) so a
+		// slow activate/fork is allowed but a peer that half-sends the request body
+		// or stops reading the reply cannot pin this goroutine forever. ctx bounds
+		// the operation logic; this bounds the raw socket I/O ctx cannot unblock.
+		_ = conn.SetDeadline(time.Now().Add(controlOpTimeout))
 		if !dispatchControlOp(ctx, conn, br, op, stub) {
 			// A request-read or result-write error left the stream in an unknown
 			// framing state; close instead of reading the next op off a desynced
