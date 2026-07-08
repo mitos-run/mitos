@@ -209,6 +209,59 @@ func TestPrewarmMissBootsOnDemandThenWarms(t *testing.T) {
 	}
 }
 
+// TestPrewarmChildOnSingleVMStubIsSafe proves a single-VM stub (nil instances
+// map) with PrewarmChild set never touches that map: PrewarmChild refuses with a
+// clear error instead of panicking, and no reserved slot is created.
+func TestPrewarmChildOnSingleVMStubIsSafe(t *testing.T) {
+	// PrewarmChild ON but MultiVM OFF: the instances map is nil, so pre-warming
+	// must be refused, not panic.
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:        func(cfg firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil },
+		Ready:        readyOK,
+		Notify:       (&fakeNotifier{}).notify,
+		Verify:       verifyOK,
+		PrewarmChild: true, // MultiVM deliberately left off
+	})
+	if err := s.PrewarmChild(context.Background()); err == nil {
+		t.Fatal("PrewarmChild on a single-VM stub must refuse with an error, not succeed")
+	}
+	if s.instances != nil {
+		t.Fatal("a single-VM stub must not allocate the instances map")
+	}
+	// The internal helpers are also safe no-ops (they never touch the nil map).
+	if vm := s.consumePrewarmedChild(); vm != nil {
+		t.Fatal("consumePrewarmedChild on a single-VM stub must return nil")
+	}
+	if err := s.warmPrewarmChild(context.Background()); err != nil {
+		t.Fatalf("warmPrewarmChild on a single-VM stub must be a safe no-op, got %v", err)
+	}
+	s.rewarmPrewarmChildAsync() // must not panic
+}
+
+// TestSpawnVMRejectsReservedPrewarmSlotID proves a caller cannot drive SpawnVM at
+// the engine-internal pre-warm slot id and collide with the pod's dormant child.
+func TestSpawnVMRejectsReservedPrewarmSlotID(t *testing.T) {
+	vms := newVMRegistry()
+	s := newPrewarmTestStub(t, vms)
+	if err := s.prepareInstance(context.Background(), defaultVMID, "", nil); err != nil {
+		t.Fatalf("prepareInstance(default): %v", err)
+	}
+	res := s.SpawnVM(context.Background(), SpawnVMRequest{
+		VMID:     string(prewarmSlotVMID),
+		Activate: ActivateRequest{SnapshotDir: "/snap"},
+	})
+	if res.OK {
+		t.Fatal("SpawnVM must refuse the reserved pre-warm slot id")
+	}
+	if res.Error == "" {
+		t.Fatal("a refused reserved-id spawn must carry an error")
+	}
+	// The reserved slot must not have been activated as a tenant VM.
+	if got := instState(s, prewarmSlotVMID); got == StateActive {
+		t.Fatalf("the reserved slot must never be driven Active by SpawnVM, got %s", got)
+	}
+}
+
 // TestPrewarmOffKeepsOnDemandBoot proves pre-warm OFF (the default) is
 // byte-for-byte the on-demand path: no reserved slot is ever created and every
 // fork boots its own Firecracker. It uses the plain-map stub (no re-warm

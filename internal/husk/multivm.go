@@ -739,6 +739,18 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 	if err := checkVMID(id); err != nil {
 		return SpawnVMResult{OK: false, VMID: req.VMID, Error: err.Error()}
 	}
+	// Refuse the RESERVED pre-warm slot id: checkVMID only enforces the character
+	// allowlist, so a caller could otherwise pass the internal slot id and collide
+	// with the pod's pre-warmed dormant child (adopting or tearing down the slot's
+	// Firecracker out from under the pool). The reserved id is engine-internal and
+	// is never a tenant fork, so it is rejected up front.
+	if id == prewarmSlotVMID {
+		return SpawnVMResult{
+			OK:    false,
+			VMID:  req.VMID,
+			Error: fmt.Sprintf("husk: spawn-vm refused: vm id %q is reserved for the pre-warm slot", req.VMID),
+		}
+	}
 	// A CO-LOCATED fork child clones its rootfs from the FROZEN source rootfs the
 	// fork snapshot carries at SnapshotDir/rootfs.ext4 (inherit the parent's DISK),
 	// NOT the pool template rootfs. Empty otherwise, so a non-fork spawn keeps the

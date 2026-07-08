@@ -51,6 +51,12 @@ const prewarmSlotVMID vmID = "huskprewarmchild0"
 // caller can log it without the fork path ever depending on it. Safe to call
 // repeatedly.
 func (s *Stub) PrewarmChild(ctx context.Context) error {
+	// FAIL CLOSED on the flag, exactly like SpawnVM: a single-VM pod owns exactly
+	// one VM and has a nil instances map, so pre-warming a second dormant child
+	// there is refused with a clear error rather than touching the nil map.
+	if !s.multiVM {
+		return fmt.Errorf("husk: pre-warm child refused: this pod is not running in multi-VM mode")
+	}
 	return s.warmPrewarmChild(ctx)
 }
 
@@ -62,7 +68,7 @@ func (s *Stub) PrewarmChild(ctx context.Context) error {
 // prepareInstanceOpt{reuseVM}; on a miss the caller boots on demand. It never
 // touches a sibling instance.
 func (s *Stub) consumePrewarmedChild() vmm {
-	if !s.prewarmChild {
+	if !s.multiVM || !s.prewarmChild {
 		return nil
 	}
 	inst := s.instanceFor(prewarmSlotVMID, false)
@@ -94,7 +100,9 @@ func (s *Stub) consumePrewarmedChild() vmm {
 // fork simply boots on demand). It never blocks a fork; SpawnVM runs it in the
 // background via rewarmPrewarmChildAsync.
 func (s *Stub) warmPrewarmChild(ctx context.Context) error {
-	if !s.prewarmChild {
+	// Guard on multiVM too: the instances map is nil on a single-VM stub, so
+	// prepareInstanceOpt (which inserts into it) must never run there.
+	if !s.multiVM || !s.prewarmChild {
 		return nil
 	}
 	// Single-flight + closing guard under s.mu: claim the re-warm, or bail if one is
@@ -134,7 +142,7 @@ func (s *Stub) warmPrewarmChild(ctx context.Context) error {
 // waits on or fails from the pool refill. single-flight in warmPrewarmChild keeps
 // concurrent calls to one dormant child.
 func (s *Stub) rewarmPrewarmChildAsync() {
-	if !s.prewarmChild {
+	if !s.multiVM || !s.prewarmChild {
 		return
 	}
 	go func() {
