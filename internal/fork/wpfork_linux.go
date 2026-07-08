@@ -292,6 +292,16 @@ func recvUffdHandshake(conn *net.UnixConn) (int, []uffdMapping, error) {
 	var rerr error
 	if cerr := raw.Read(func(fd uintptr) bool {
 		n, oobn, _, _, rerr = unix.Recvmsg(int(fd), buf, oob, 0)
+		// The socket is non-blocking (the Go runtime sets fds so). The parent
+		// Firecracker connects and then sends the userfaultfd, so an accept can win
+		// the race and recvmsg returns EAGAIN before the send lands. Returning true
+		// here would surface that EAGAIN as "handshake not received" and close the
+		// conn, which then breaks the parent's send (EPIPE): the intermittent
+		// arm-handshake failure. Return false on EAGAIN so the runtime poller waits
+		// for readability and calls back once the send has arrived.
+		if rerr == unix.EAGAIN || rerr == unix.EWOULDBLOCK {
+			return false
+		}
 		return true
 	}); cerr != nil {
 		return -1, nil, fmt.Errorf("wpfork: rawconn read: %w", cerr)
