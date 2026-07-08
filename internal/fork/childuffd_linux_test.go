@@ -196,17 +196,36 @@ func TestChildUFFDLazyImportComposesAndNoLeak(t *testing.T) {
 		t.Fatal("handler Receive timed out")
 	}
 
-	go func() { _ = h.Serve() }()
+	// Capture the Serve error: if Serve exits (e.g. a compose bug returns an error) a
+	// page read would fault forever with no one to fill it, hanging the test to the
+	// global timeout. readByte therefore RACES the page load against the Serve error
+	// and a short deadline, so a Serve failure or a stuck fill fails fast.
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- h.Serve() }()
 
-	// Fault the frozen page and the live page. Reading the first byte of each page
-	// triggers a MISSING fault the handler fills from the composed source.
+	// Fault a page and return its first byte. Reading it triggers a MISSING fault the
+	// handler fills from the composed source; the read runs in its own goroutine so the
+	// select can bail if Serve died or the fill wedges.
 	readByte := func(page int) byte {
+		t.Helper()
 		off := page * pageSize
-		// A volatile-ish read: copy out through a slice so the compiler cannot elide
-		// the load that triggers the fault.
-		var out [1]byte
-		copy(out[:], guest[off:off+1])
-		return out[0]
+		got := make(chan byte, 1)
+		go func() {
+			// A volatile-ish read: copy out through a slice so the compiler cannot elide
+			// the load that triggers the fault.
+			var out [1]byte
+			copy(out[:], guest[off:off+1])
+			got <- out[0]
+		}()
+		select {
+		case b := <-got:
+			return b
+		case err := <-serveErr:
+			t.Fatalf("handler Serve exited before page %d was filled: %v", page, err)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("page %d fault was not served within the deadline (Serve wedged)", page)
+		}
+		return 0 // unreachable (t.Fatalf exits)
 	}
 
 	if got := readByte(frozenPage); got != forkTimeTag {

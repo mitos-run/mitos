@@ -146,19 +146,33 @@ func (s *Stub) liveCowChildUFFDPlan(id vmID, req ActivateRequest) (*lazyChildUFF
 	return &lazyChildUFFDPlan{imp: imp, sockPath: sockPath}, nil
 }
 
+// sunPathMax is the AF_UNIX sun_path capacity (sizeof(sockaddr_un.sun_path)) on
+// Linux: a bind/connect to a longer absolute path is truncated/rejected, so the
+// child UFFD backend socket path MUST fit. 108 bytes INCLUDING the NUL terminator,
+// so the usable path is at most 107 bytes.
+const sunPathMax = 108
+
 // childUFFDSockPath returns the backend unix socket path a co-located fork child's
 // lazy UFFD restore connects to. It lives in the POD workdir (not the child's
-// nested per-VM workdir) under a SHORT hashed name so the absolute path stays under
-// the ~108-byte AF_UNIX sun_path limit even for a long vmID and a long pod workdir.
-// An empty pod workdir (the unit path) has no place to bind, so it errors and the
-// child falls back to the disk restore.
+// nested per-VM workdir) under a FIXED-LENGTH hashed name so the absolute path stays
+// as short as possible for a long vmID. The name uses a 64-bit vmID hash (16 hex
+// digits) so two co-located children in one pod do not collide on the same socket
+// (a 32-bit hash could, and a collision would let one child unlink or misroute a
+// sibling child's memory backend). It FAILS CLOSED when the pod workdir is empty (no
+// place to bind, the unit path) or when the resulting absolute path would exceed the
+// AF_UNIX sun_path limit, so a too-long workdir never silently binds a truncated
+// path the child cannot reach.
 func (s *Stub) childUFFDSockPath(id vmID) (string, error) {
 	if s.cfg.WorkDir == "" {
 		return "", fmt.Errorf("no pod workdir to bind the child uffd socket")
 	}
-	h := fnv.New32a()
+	h := fnv.New64a()
 	_, _ = h.Write([]byte(id))
-	return filepath.Join(s.cfg.WorkDir, fmt.Sprintf("cu-%08x.sock", h.Sum32())), nil
+	sock := filepath.Join(s.cfg.WorkDir, fmt.Sprintf("cu-%016x.sock", h.Sum64()))
+	if len(sock) >= sunPathMax {
+		return "", fmt.Errorf("child uffd socket path %d bytes exceeds the AF_UNIX sun_path limit %d (pod workdir too long)", len(sock), sunPathMax)
+	}
+	return sock, nil
 }
 
 // LiveCowForkEnabled reports whether this pod was started with the live-cow fork

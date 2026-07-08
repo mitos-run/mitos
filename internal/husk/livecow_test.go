@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"mitos.run/mitos/internal/firecracker"
@@ -248,7 +249,14 @@ func TestLiveCowChildUFFDPlanNoParent(t *testing.T) {
 // the ChildImport coordinates and a backend socket path under the pod workdir whose
 // absolute length stays under the AF_UNIX sun_path limit even for a long vmID.
 func TestLiveCowChildUFFDPlanArmed(t *testing.T) {
-	workDir := t.TempDir()
+	// A SHORT pod workdir under /tmp: the child uffd socket path must fit the AF_UNIX
+	// sun_path limit, and t.TempDir() on some hosts is already too long on its own.
+	// The production pod workdir is short (e.g. /run/husk).
+	workDir, err := os.MkdirTemp("/tmp", "cu")
+	if err != nil {
+		t.Fatalf("mkdtemp: %v", err)
+	}
+	defer os.RemoveAll(workDir) //nolint:errcheck // test teardown
 	prov := &fakeChildImportProvider{imp: fork.ChildMemfdImport{
 		ParentPID: 4242, ParentFD: 5, ParentIno: 111, ParentDev: 42, Bytes: 256 << 20,
 		FrozenPID: 4243, FrozenFD: 6, FrozenIno: 222, FrozenDev: 42,
@@ -280,7 +288,7 @@ func TestLiveCowChildUFFDPlanArmed(t *testing.T) {
 	// nested per-VM workdir). The absolute length then depends only on the pod
 	// workdir, which is short in production (e.g. /run/husk).
 	base := filepath.Base(plan.sockPath)
-	if len(base) > 20 {
+	if len(base) > 28 {
 		t.Errorf("socket basename %q is %d bytes, want a short fixed-length hashed name", base, len(base))
 	}
 	longer, err := s.liveCowChildUFFDPlan("this-is-a-much-much-longer-vm-identifier-than-before", ActivateRequest{SnapshotDir: dir})
@@ -314,5 +322,17 @@ func TestLiveCowChildUFFDPlanFailClosed(t *testing.T) {
 	}})
 	if _, err := noWD.liveCowChildUFFDPlan("child", ActivateRequest{SnapshotDir: t.TempDir()}); err == nil {
 		t.Fatal("empty pod workdir must be an error (no place to bind the child uffd socket)")
+	}
+
+	// A pod workdir so long the absolute socket path would exceed the AF_UNIX
+	// sun_path limit must fail closed rather than bind a truncated, unreachable path.
+	longWD := New(firecracker.VMConfig{WorkDir: "/" + strings.Repeat("d", 200)}, Options{MultiVM: true, LiveCowFork: true})
+	longWD.SetLiveCowParent(&fakeChildImportProvider{imp: fork.ChildMemfdImport{
+		ParentPID: 1, ParentFD: 2, ParentIno: 3, ParentDev: 4, Bytes: 4096,
+		FrozenPID: 1, FrozenFD: 3, FrozenIno: 5, FrozenDev: 4,
+		BitmapPID: 1, BitmapFD: 4, BitmapIno: 6, BitmapDev: 4, PageSize: 4096,
+	}})
+	if _, err := longWD.liveCowChildUFFDPlan("child", ActivateRequest{SnapshotDir: t.TempDir()}); err == nil {
+		t.Fatal("a too-long pod workdir must be an error (socket path over the sun_path limit)")
 	}
 }

@@ -59,6 +59,17 @@ type childUFFDHandler struct {
 	regions []uffdMapping
 	closed  bool
 
+	// serveMu guards the source views + the child uffd against Close while a fault is
+	// in flight. serveFault holds it RLocked across the WHOLE compose + UFFDIO_COPY, so
+	// the mmap'd source slices (h.live/h.frozen/h.bm/h.stage) it dereferences and the
+	// uffd it copies into stay mapped for the duration of the copy. Close takes it
+	// LOCKED before it closes the uffd + munmaps, so it waits for any in-flight fault
+	// to finish and no serveFault ever touches a munmapped view or a closed uffd (a
+	// use-after-unmap would segfault; a UFFDIO_COPY with a freed Src is worse). It is a
+	// separate lock from mu (which is only ever held briefly) so a slow fault copy
+	// never blocks a lifecycle read.
+	serveMu sync.RWMutex
+
 	// uffdFile wraps the child uffd so Serve's read is driven by the Go runtime
 	// poller: a blocking read(2) on the raw uffd is not interrupted when Close closes
 	// it, but uffdFile.Close() unblocks a poller-driven Read cleanly. The raw uffd is
@@ -173,9 +184,18 @@ func (h *childUFFDHandler) Receive() error {
 	}
 	defer conn.Close()
 
+	// Only accept the expected peer: this socket is the child's MEMORY BACKEND, so a
+	// hostile local process that raced the real child Firecracker to connect could
+	// hand us its own uffd + region layout and drive UFFDIO_COPY into memory it
+	// controls. The child Firecracker the husk launched runs as THIS process's uid, so
+	// require the connecting peer's SO_PEERCRED uid to match; a mismatch fails closed.
+	if err := verifyPeerUID(conn, os.Getuid()); err != nil {
+		return fmt.Errorf("childuffd: reject connector: %w", err)
+	}
+
 	uffdFD, regions, err := recvUffdHandshake(conn)
 	if err != nil {
-		return err
+		return fmt.Errorf("childuffd: receive handshake: %w", err)
 	}
 
 	// Wrap the uffd in an *os.File so Serve's read runs on the Go runtime poller
@@ -229,15 +249,49 @@ func (h *childUFFDHandler) Serve() error {
 	}
 }
 
+// verifyPeerUID checks the connected peer's SO_PEERCRED uid equals wantUID, so only
+// the child Firecracker the husk launched (same uid) can supply this backend's uffd
+// + region layout. A hostile local connector with a different uid fails closed.
+func verifyPeerUID(conn *net.UnixConn, wantUID int) error {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return fmt.Errorf("syscallconn: %w", err)
+	}
+	var ucred *unix.Ucred
+	var cerr error
+	if e := raw.Control(func(fd uintptr) {
+		ucred, cerr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	}); e != nil {
+		return fmt.Errorf("rawconn control: %w", e)
+	}
+	if cerr != nil {
+		return fmt.Errorf("getsockopt SO_PEERCRED: %w", cerr)
+	}
+	if ucred == nil || int(ucred.Uid) != wantUID {
+		return fmt.Errorf("peer uid mismatch (got %v, want %d): not the expected child Firecracker", ucred, wantUID)
+	}
+	return nil
+}
+
 // serveFault fills one faulting guest page at host address addr: it composes the
 // page's fork-time bytes into the stage page (FROZEN for a frozen page, the live
 // source memfd otherwise, with a fault-time re-check that closes the leak window)
-// and UFFDIO_COPYs the stage page into the guest.
+// and UFFDIO_COPYs the stage page into the guest. It holds serveMu RLocked across
+// the whole compose + copy so Close cannot munmap the source views or close the
+// uffd under it (no use-after-unmap).
 func (h *childUFFDHandler) serveFault(addr uint64) error {
+	h.serveMu.RLock()
+	defer h.serveMu.RUnlock()
 	h.mu.Lock()
 	regions := h.regions
 	uffd := h.uffd
+	closed := h.closed
 	h.mu.Unlock()
+	if closed {
+		// Close has begun (it is blocked on serveMu.Lock waiting for this RLock): do not
+		// touch the views it is about to munmap; let Serve unwind on the next read.
+		return nil
+	}
 	if uffd < 0 {
 		return fmt.Errorf("childuffd: serveFault before handshake")
 	}
@@ -303,44 +357,60 @@ func (h *childUFFDHandler) copyPage(dst, pageSize uint64) error {
 // working set). Safe to call concurrently.
 func (h *childUFFDHandler) FaultCount() int64 { return atomic.LoadInt64(&h.served) }
 
-// Close tears the handler down: it closes the child uffd (unblocking Serve's
-// poller-driven read), the socket, removes the socket path, and munmaps the source
-// views and the stage page. Idempotent.
+// Close tears the handler down: it stops new accepts, WAITS for any in-flight fault
+// to finish, then closes the child uffd (unblocking Serve's poller-driven read) and
+// munmaps the source views and the stage page. Idempotent. The ordering closes the
+// Close-vs-serveFault race: serveMu.Lock waits for the active serveFault's RLock, so
+// the uffd is not closed and the views are not munmapped while a fault dereferences
+// them (no use-after-unmap, no UFFDIO_COPY with a freed Src).
 func (h *childUFFDHandler) Close() error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	if h.closed {
+		h.mu.Unlock()
 		return nil
 	}
 	h.closed = true
-	if h.ln != nil {
-		_ = h.ln.Close()
+	ln := h.ln
+	h.mu.Unlock()
+
+	// Stop new accepts first so no fresh handshake races the teardown.
+	if ln != nil {
+		_ = ln.Close()
 	}
+
+	// Wait for any in-flight fault to drain (it holds serveMu RLocked across its whole
+	// compose + copy), then tear down the views + uffd under the write lock so no fault
+	// can start touching them again.
+	h.serveMu.Lock()
+	defer h.serveMu.Unlock()
+
+	h.mu.Lock()
+	uffdFile := h.uffdFile
+	uffd := h.uffd
+	h.uffdFile = nil
+	h.uffd = -1
+	live, frozen, bm, stage := h.live, h.frozen, h.bm, h.stage
+	h.live, h.frozen, h.bm, h.stage = nil, nil, nil, nil
+	h.mu.Unlock()
+
 	// Closing the file unblocks Serve's poller-driven Read and closes the uffd fd it
 	// owns. Clear the raw alias without a second unix.Close (double close).
-	if h.uffdFile != nil {
-		_ = h.uffdFile.Close()
-		h.uffdFile = nil
-		h.uffd = -1
-	} else if h.uffd >= 0 {
-		_ = unix.Close(h.uffd)
-		h.uffd = -1
+	if uffdFile != nil {
+		_ = uffdFile.Close()
+	} else if uffd >= 0 {
+		_ = unix.Close(uffd)
 	}
-	if h.live != nil {
-		_ = unix.Munmap(h.live)
-		h.live = nil
+	if live != nil {
+		_ = unix.Munmap(live)
 	}
-	if h.frozen != nil {
-		_ = unix.Munmap(h.frozen)
-		h.frozen = nil
+	if frozen != nil {
+		_ = unix.Munmap(frozen)
 	}
-	if h.bm != nil {
-		_ = unix.Munmap(h.bm)
-		h.bm = nil
+	if bm != nil {
+		_ = unix.Munmap(bm)
 	}
-	if h.stage != nil {
-		_ = unix.Munmap(h.stage)
-		h.stage = nil
+	if stage != nil {
+		_ = unix.Munmap(stage)
 	}
 	_ = os.Remove(h.sockPath)
 	return nil

@@ -545,14 +545,21 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 // its dormant instance so activateInstance takes the Uffd backend at its load step.
 // It takes the instance lock (SpawnVM calls it between prepareInstance and
 // activateInstance, both of which take the lock themselves); a missing instance is
-// a no-op (activate will then fail closed on the missing dormant VM).
+// a no-op (activate will then fail closed on the missing dormant VM). It arms ONLY
+// while the instance is STILL DORMANT: a concurrent Close between prepareInstance
+// and here resets it to StateNew (clearing any plan), so arming unconditionally
+// could leave a stale plan that a LATER prepare of the same vmID would wrongly
+// consume; a state mismatch skips the arm and the spawn takes the disk path (or
+// fails closed on a missing dormant VM at activate).
 func (s *Stub) armInstanceChildUFFD(id vmID, plan *lazyChildUFFDPlan) {
 	inst := s.instanceFor(id, false)
 	if inst == nil {
 		return
 	}
 	inst.mu.Lock()
-	inst.childUFFDPlan = plan
+	if inst.state == StateDormant {
+		inst.childUFFDPlan = plan
+	}
 	inst.mu.Unlock()
 }
 
@@ -577,22 +584,60 @@ func (s *Stub) loadSnapshotChildUFFD(vm vmm, plan *lazyChildUFFDPlan, vmStateFil
 	// accepting before the load, and Serve must be running before the load can
 	// complete: start the receiver + the load PUT concurrently, and once the handshake
 	// delivers the uffd, start Serve so the load's faults are handled.
+	//
+	// FAIL-CLOSED, NO HANG: every wait races the OTHER outcomes so no failure mode
+	// blocks forever. If the load fails BEFORE Firecracker connects, Receive's Accept
+	// would block indefinitely, so a load result that arrives before the handshake
+	// tears the handler down (which unblocks Accept). If Serve exits while the load is
+	// still faulting, the load is stuck on a page no one will fill, so a Serve result
+	// during the load also fails closed. All channels are buffered so a goroutine never
+	// blocks on send after we stop reading.
 	recvErr := make(chan error, 1)
 	go func() { recvErr <- h.Receive() }()
 	putErr := make(chan error, 1)
 	go func() { putErr <- vm.LoadSnapshotUFFD(vmStateFile, plan.sockPath, overrides) }()
 
-	if err := <-recvErr; err != nil {
+	select {
+	case err := <-recvErr:
+		if err != nil {
+			_ = h.Close()
+			<-putErr // let the load unwind so the FC process is reaped by the caller
+			return nil, fmt.Errorf("child uffd handshake: %w", err)
+		}
+	case err := <-putErr:
+		// The load returned before the handshake. A SUCCESSFUL load blocks until Serve
+		// fills its restore faults, so reaching here means the load failed (or exited
+		// early); tear down so Receive's Accept unblocks, then fail closed.
 		_ = h.Close()
-		<-putErr // let the load unwind so the FC process is reaped by the caller
-		return nil, fmt.Errorf("child uffd handshake: %w", err)
+		<-recvErr
+		if err != nil {
+			return nil, fmt.Errorf("load snapshot (child uffd): %w", err)
+		}
+		return nil, fmt.Errorf("load snapshot (child uffd) returned before the uffd handshake")
 	}
-	go func() { _ = h.Serve() }()
-	if err := <-putErr; err != nil {
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- h.Serve() }()
+	select {
+	case err := <-putErr:
+		if err != nil {
+			_ = h.Close()
+			<-serveErr
+			return nil, fmt.Errorf("load snapshot (child uffd): %w", err)
+		}
+		// Load complete; Serve keeps running for the life of the child (its final error
+		// is drained via the buffered channel at teardown, never blocking).
+		return h, nil
+	case err := <-serveErr:
+		// Serve ended while the load was still faulting: the restore is wedged on a page
+		// the handler can no longer fill. Fail closed rather than hang.
 		_ = h.Close()
-		return nil, fmt.Errorf("load snapshot (child uffd): %w", err)
+		<-putErr
+		if err != nil {
+			return nil, fmt.Errorf("child uffd serve ended during restore: %w", err)
+		}
+		return nil, fmt.Errorf("child uffd serve ended before the restore completed")
 	}
-	return h, nil
 }
 
 // SpawnVM brings up an ADDITIONAL same-tenant VM (a new vmID) in a running husk
