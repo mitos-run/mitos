@@ -62,7 +62,7 @@
       "total_conditions": 4,
       "dropped_conditions": 1,
       "reason": "partial_re2_incompatible",
-      "sample_error": "error parsing regexp: invalid named capture: `(?\u003c![a-z])\\.(env|aws/credentials)|secrets?\\.json|private[_-]?key|id_rsa|kubeconfig)`"
+      "sample_error": "error parsing regexp: invalid named capture: `(?<![a-z])\\.(env|aws/credentials)|secrets?\\.json|private[_-]?key|id_rsa|kubeconfig)`"
     },
     {
       "id": "ATR-2026-00070",
@@ -86,7 +86,7 @@
       "total_conditions": 7,
       "dropped_conditions": 2,
       "reason": "partial_re2_incompatible",
-      "sample_error": "error parsing regexp: invalid named capture: `(?\u003c!get_)(?\u003c!list_)(?\u003c!check_)(?\u003c!view_)(?\u003c!fetch_)(?\u003c!query_)(pay|payment|transfer|transaction|purchase|buy|check"
+      "sample_error": "error parsing regexp: invalid named capture: `(?<!get_)(?<!list_)(?<!check_)(?<!view_)(?<!fetch_)(?<!query_)(pay|payment|transfer|transaction|purchase|buy|check"
     },
     {
       "id": "ATR-2026-00114",
@@ -270,7 +270,7 @@
       "total_conditions": 3,
       "dropped_conditions": 1,
       "reason": "partial_re2_incompatible",
-      "sample_error": "error parsing regexp: invalid named capture: `(?\u003c![\"'])(?\u003c!\\b(?:they|user|users|people|customer|customers|developer|developers|client|clients|when|if|whenever|c"
+      "sample_error": "error parsing regexp: invalid named capture: `(?<![\"'])(?<!\\b(?:they|user|users|people|customer|customers|developer|developers|client|clients|when|if|whenever|c"
     },
     {
       "id": "ATR-2026-00444",
@@ -398,7 +398,7 @@
       "total_conditions": 4,
       "dropped_conditions": 2,
       "reason": "partial_re2_incompatible",
-      "sample_error": "error parsing regexp: invalid named capture: `(?\u003c!!)\\[[^\\]]{0,60}\\]\\(https?://(?:attacker|evil|exfil|collect|malicious|pwn|steal|grab|harvest)\\.[a-z]{2,}[^)]{0,"
+      "sample_error": "error parsing regexp: invalid named capture: `(?<!!)\\[[^\\]]{0,60}\\]\\(https?://(?:attacker|evil|exfil|collect|malicious|pwn|steal|grab|harvest)\\.[a-z]{2,}[^)]{0,"
     },
     {
       "id": "ATR-2026-01463",

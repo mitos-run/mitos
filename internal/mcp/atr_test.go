@@ -106,6 +106,39 @@ func TestATROnlyScreensExecAndWriteFile(t *testing.T) {
 	}
 }
 
+func TestATRLogCapAndSummary(t *testing.T) {
+	// Build more matching rules than the per-call cap so the overflow path runs.
+	total := maxLoggedDetections + 5
+	rules := make([]atr.Rule, 0, total)
+	for i := 0; i < total; i++ {
+		rules = append(rules, execRule("ATR-CAP-"+string(rune('a'+i)), `flood`))
+	}
+	cfg, buf := atrTestConfig(t, 0, rules...)
+	s := New(NewFakeBackend(), Options{ATR: cfg})
+
+	callTool(t, s, ToolSandboxExec, map[string]any{"sandbox": "sbx-1", "command": "flood the log"})
+
+	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+	var detLines, summaryLines int
+	for _, ln := range lines {
+		switch {
+		case strings.Contains(ln, "summary total="):
+			summaryLines++
+		case strings.Contains(ln, "atr report-mode detection"):
+			detLines++
+		}
+	}
+	if detLines != maxLoggedDetections {
+		t.Fatalf("want %d detection lines, got %d", maxLoggedDetections, detLines)
+	}
+	if summaryLines != 1 {
+		t.Fatalf("want exactly one summary line, got %d", summaryLines)
+	}
+	if !strings.Contains(buf.String(), "suppressed=5") {
+		t.Fatalf("summary must report the suppressed count, got: %q", buf.String())
+	}
+}
+
 func TestATRTruncationIsObservable(t *testing.T) {
 	// Cap below the payload length: the match still fires near the head and the
 	// detection is logged as truncated.

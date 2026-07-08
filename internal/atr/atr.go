@@ -116,6 +116,17 @@ var severityRank = map[string]int{
 	"info":     4,
 }
 
+// severityRankFor returns the sort rank for a severity. An unknown or mistyped
+// severity sorts LAST, not first: a bare map lookup returns Go's zero value,
+// which collides with "critical" (rank 0) and would silently float an unranked
+// detection to the front.
+func severityRankFor(sev string) int {
+	if r, ok := severityRank[sev]; ok {
+		return r
+	}
+	return len(severityRank)
+}
+
 // NewEvaluator compiles rules into an Evaluator. A rule with no usable
 // conditions is skipped. An invalid regex is a hard error: the vendor step
 // guarantees every embedded pattern compiles under RE2, so a failure here means
@@ -166,7 +177,7 @@ func (e *Evaluator) Evaluate(event AgentEvent) []Detection {
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		ri, rj := severityRank[out[i].Severity], severityRank[out[j].Severity]
+		ri, rj := severityRankFor(out[i].Severity), severityRankFor(out[j].Severity)
 		if ri != rj {
 			return ri < rj
 		}

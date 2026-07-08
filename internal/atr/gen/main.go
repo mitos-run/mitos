@@ -21,6 +21,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -357,12 +358,17 @@ func trimErr(s string) string {
 }
 
 func writeJSON(path string, v any) {
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	// Rule patterns contain <, >, and & (lookaround samples, HTML payloads); the
+	// default encoder escapes them to < and friends, which mangles the
+	// regex text. Disable HTML escaping so the vendored data is faithful.
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
 		fatal(err.Error())
 	}
-	b = append(b, '\n')
-	if err := os.WriteFile(path, b, 0o644); err != nil {
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		fatal(err.Error())
 	}
 }

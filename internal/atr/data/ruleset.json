@@ -91,7 +91,7 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)(\\[\\s*(SYSTEM|INST|INSTRUCTION|SYS|ADMIN|ROOT|OVERRIDE|CONTROL|PRIORITY|URGENT)\\s*\\]|\u003c\u003c\\s*(SYS|SYSTEM|INST)\\s*\u003e\u003e|\\{\\{\\s*(SYSTEM|INSTRUCTION|OVERRIDE)\\s*\\}\\})"
+          "value": "(?i)(\\[\\s*(SYSTEM|INST|INSTRUCTION|SYS|ADMIN|ROOT|OVERRIDE|CONTROL|PRIORITY|URGENT)\\s*\\]|<<\\s*(SYS|SYSTEM|INST)\\s*>>|\\{\\{\\s*(SYSTEM|INSTRUCTION|OVERRIDE)\\s*\\}\\})"
         },
         {
           "field": "user_input",
@@ -231,12 +231,12 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003c!--[^\u003e]{0,20}(ignore|disregard|override|new\\s+instructions?|system\\s*:|you\\s+must|you\\s+are\\s+now|forget\\s+previous|execute|perform|send\\s+to|exfiltrate|reveal|disclose|output\\s+the)[^\u003e]{0,200}--\u003e"
+          "value": "(?i)<!--[^>]{0,20}(ignore|disregard|override|new\\s+instructions?|system\\s*:|you\\s+must|you\\s+are\\s+now|forget\\s+previous|execute|perform|send\\s+to|exfiltrate|reveal|disclose|output\\s+the)[^>]{0,200}-->"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(\\[INST\\]|\\[/INST\\]|\\[SYSTEM\\]|\\[/SYSTEM\\]|\\[HIDDEN\\]|\u003c\\|im_start\\|\u003e|\u003c\\|im_end\\|\u003e|\u003c\\|endoftext\\|\u003e|\u003c\\|system\\|\u003e|\u003c\\|user\\|\u003e|\u003c\\|assistant\\|\u003e|\u003c\\|pad\\|\u003e|\u003cs\u003e\\[INST\\]|\u003c\u003cSYS\u003e\u003e|\u003c\u003c/SYS\u003e\u003e|\u003c\\|begin_of_text\\|\u003e|\u003c\\|eot_id\\|\u003e|\u003c\\|start_header_id\\|\u003e)"
+          "value": "(?i)(\\[INST\\]|\\[/INST\\]|\\[SYSTEM\\]|\\[/SYSTEM\\]|\\[HIDDEN\\]|<\\|im_start\\|>|<\\|im_end\\|>|<\\|endoftext\\|>|<\\|system\\|>|<\\|user\\|>|<\\|assistant\\|>|<\\|pad\\|>|<s>\\[INST\\]|<<SYS>>|<</SYS>>|<\\|begin_of_text\\|>|<\\|eot_id\\|>|<\\|start_header_id\\|>)"
         },
         {
           "field": "content",
@@ -256,7 +256,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003c\\s*(div|span|p|section|article|aside|details|summary)\\s+[^\u003e]*(hidden|aria-hidden\\s*=\\s*[\"']true[\"']|style\\s*=\\s*[\"'][^\"']*(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden|opacity\\s*:\\s*0))[^\u003e]*\u003e[^\u003c]{0,500}(instruction|prompt|ignore|override|disregard|execute|you\\s+must|you\\s+are|system|directive|comply)"
+          "value": "(?i)<\\s*(div|span|p|section|article|aside|details|summary)\\s+[^>]*(hidden|aria-hidden\\s*=\\s*[\"']true[\"']|style\\s*=\\s*[\"'][^\"']*(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden|opacity\\s*:\\s*0))[^>]*>[^<]{0,500}(instruction|prompt|ignore|override|disregard|execute|you\\s+must|you\\s+are|system|directive|comply)"
         },
         {
           "field": "content",
@@ -276,12 +276,12 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003c\\s*(iframe|object|embed|frame)\\s+[^\u003e]*(width\\s*=\\s*[\"']?0|height\\s*=\\s*[\"']?0|hidden|style\\s*=\\s*[\"'][^\"']*display\\s*:\\s*none)[^\u003e]*\u003e"
+          "value": "(?i)<\\s*(iframe|object|embed|frame)\\s+[^>]*(width\\s*=\\s*[\"']?0|height\\s*=\\s*[\"']?0|hidden|style\\s*=\\s*[\"'][^\"']*display\\s*:\\s*none)[^>]*>"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(\u0026#105;|\u0026#x69;)(\u0026#103;|\u0026#x67;)(\u0026#110;|\u0026#x6[eE];)(\u0026#111;|\u0026#x6[fF];)(\u0026#114;|\u0026#x72;)(\u0026#101;|\u0026#x65;)"
+          "value": "(&#105;|&#x69;)(&#103;|&#x67;)(&#110;|&#x6[eE];)(&#111;|&#x6[fF];)(&#114;|&#x72;)(&#101;|&#x65;)"
         }
       ]
     },
@@ -491,12 +491,12 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)\u003c\\|?(im_start|im_end|system|endoftext|pad|sep|cls|eos|bos)\\|?\u003e"
+          "value": "(?i)<\\|?(im_start|im_end|system|endoftext|pad|sep|cls|eos|bos)\\|?>"
         },
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)(\u003c\u003c\\s*SYS\\s*\u003e\u003e|\u003c\u003c\\s*/SYS\\s*\u003e\u003e|\\[INST\\]|\\[/INST\\]|\u003cs\u003e\\s*\\[INST\\]|\u003c\\|begin_of_text\\|\u003e|\u003c\\|start_header_id\\|\u003e\\s*system|\u003c\\|end_header_id\\|\u003e|\u003c\\|eot_id\\|\u003e)"
+          "value": "(?i)(<<\\s*SYS\\s*>>|<<\\s*/SYS\\s*>>|\\[INST\\]|\\[/INST\\]|<s>\\s*\\[INST\\]|<\\|begin_of_text\\|>|<\\|start_header_id\\|>\\s*system|<\\|end_header_id\\|>|<\\|eot_id\\|>)"
         },
         {
           "field": "user_input",
@@ -526,12 +526,12 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)(\\[|\u003c|\\{\\{)\\s*(SYSTEM_OVERRIDE|ADMIN_OVERRIDE|ROOT_ACCESS|MASTER_PROMPT|PRIORITY_OVERRIDE|EMERGENCY_OVERRIDE|SECURITY_OVERRIDE|DEVELOPER_ACCESS|SUPER_USER|PRIVILEGED_MODE|MAINTENANCE_MODE|DEBUG_OVERRIDE|CONTROL_OVERRIDE|AUTH_BYPASS|ELEVATED_ACCESS)\\s*(\\]|\u003e|\\}\\})"
+          "value": "(?i)(\\[|<|\\{\\{)\\s*(SYSTEM_OVERRIDE|ADMIN_OVERRIDE|ROOT_ACCESS|MASTER_PROMPT|PRIORITY_OVERRIDE|EMERGENCY_OVERRIDE|SECURITY_OVERRIDE|DEVELOPER_ACCESS|SUPER_USER|PRIVILEGED_MODE|MAINTENANCE_MODE|DEBUG_OVERRIDE|CONTROL_OVERRIDE|AUTH_BYPASS|ELEVATED_ACCESS)\\s*(\\]|>|\\}\\})"
         },
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)\u003c\\s*(system|system_prompt|system_message|system_instruction|instructions?|configuration|admin_directive|root_command|override|priority_instruction)\\s*\u003e"
+          "value": "(?i)<\\s*(system|system_prompt|system_message|system_instruction|instructions?|configuration|admin_directive|root_command|override|priority_instruction)\\s*>"
         },
         {
           "field": "user_input",
@@ -696,7 +696,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)(\\brm\\s+-[rRf]{1,3}[\\s/]|\\bmkfs\\b|\\bdd\\s+if=|\\bformat\\s+[a-z]:|\\bdeltree\\b|\\bshred\\s+-|\\bwipefs\\b|\\bfdisk\\b.*--delete|:\\(\\)\\s*\\{\\s*:\\|:\\s*\u0026\\s*\\})"
+          "value": "(?i)(\\brm\\s+-[rRf]{1,3}[\\s/]|\\bmkfs\\b|\\bdd\\s+if=|\\bformat\\s+[a-z]:|\\bdeltree\\b|\\bshred\\s+-|\\bwipefs\\b|\\bfdisk\\b.*--delete|:\\(\\)\\s*\\{\\s*:\\|:\\s*&\\s*\\})"
         },
         {
           "field": "tool_response",
@@ -706,7 +706,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)(\\bnc\\s+-(e|c|l)\\s|\\bncat\\s|\\bnetcat\\s|/dev/tcp/|\\bbash\\s+-i\\s+\u003e\u0026\\s*/dev/tcp|\\bmkfifo\\b.{0,40}\\bnc\\b|\\bsocat\\b.{0,40}(exec|pty|tcp)|\\brm\\s+/tmp/f\\s*;)"
+          "value": "(?i)(\\bnc\\s+-(e|c|l)\\s|\\bncat\\s|\\bnetcat\\s|/dev/tcp/|\\bbash\\s+-i\\s+>&\\s*/dev/tcp|\\bmkfifo\\b.{0,40}\\bnc\\b|\\bsocat\\b.{0,40}(exec|pty|tcp)|\\brm\\s+/tmp/f\\s*;)"
         },
         {
           "field": "tool_response",
@@ -721,12 +721,12 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)(bash|sh|zsh|source)\\s+\u003c\\(\\s*(curl|wget|fetch|nc|python|perl|ruby|base64)"
+          "value": "(?i)(bash|sh|zsh|source)\\s+<\\(\\s*(curl|wget|fetch|nc|python|perl|ruby|base64)"
         },
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)(echo\\s+['\"]?[A-Za-z0-9+/]{20,}={0,2}['\"]?\\s*\\|\\s*(base64\\s+(-d|--decode)|openssl\\s+enc\\s+-d)\\s*\\|\\s*(ba)?sh|base64\\s+(-d|--decode)\\s*\u003c\u003c\u003c|\\bZWNoby|\\bY3VybC|\\bL2Jpbi9i|\\bd2dldC|\\bbmM\\s)"
+          "value": "(?i)(echo\\s+['\"]?[A-Za-z0-9+/]{20,}={0,2}['\"]?\\s*\\|\\s*(base64\\s+(-d|--decode)|openssl\\s+enc\\s+-d)\\s*\\|\\s*(ba)?sh|base64\\s+(-d|--decode)\\s*<<<|\\bZWNoby|\\bY3VybC|\\bL2Jpbi9i|\\bd2dldC|\\bbmM\\s)"
         },
         {
           "field": "tool_response",
@@ -766,7 +766,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)(\\bcrontab\\s+-[elr]|echo\\s+.{0,100}\u003e\u003e\\s*/etc/cron|\\bat\\s+-f\\b|\\bschtasks\\s+/create|\\bRegister-ScheduledTask|\\blaunchctl\\s+load|\\bsystemctl\\s+enable)"
+          "value": "(?i)(\\bcrontab\\s+-[elr]|echo\\s+.{0,100}>>\\s*/etc/cron|\\bat\\s+-f\\b|\\bschtasks\\s+/create|\\bRegister-ScheduledTask|\\blaunchctl\\s+load|\\bsystemctl\\s+enable)"
         }
       ]
     },
@@ -806,7 +806,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)\u003c\\s*(hidden|invisible|secret|private|internal|covert)\\s*[-_]?(instruction|directive|command|message|note|order|task|action)\\s*\u003e"
+          "value": "(?i)<\\s*(hidden|invisible|secret|private|internal|covert)\\s*[-_]?(instruction|directive|command|message|note|order|task|action)\\s*>"
         },
         {
           "field": "tool_response",
@@ -816,7 +816,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)(\\[SYSTEM\\]|\\[ADMIN\\]|\\[OVERRIDE\\]|\\[PRIORITY\\]|\\[INTERNAL\\]|\\[CONTROL\\]|\\[DIRECTIVE\\]|\u003c\u003cSYS\u003e\u003e|\u003c\u003cSYSTEM\u003e\u003e|\u003c\u003cADMIN\u003e\u003e|\u003c\\|system\\|\u003e|\u003c\\|im_start\\|\u003esystem|\\{\\{SYSTEM\\}\\}|\\{\\{ADMIN\\}\\})"
+          "value": "(?i)(\\[SYSTEM\\]|\\[ADMIN\\]|\\[OVERRIDE\\]|\\[PRIORITY\\]|\\[INTERNAL\\]|\\[CONTROL\\]|\\[DIRECTIVE\\]|<<SYS>>|<<SYSTEM>>|<<ADMIN>>|<\\|system\\|>|<\\|im_start\\|>system|\\{\\{SYSTEM\\}\\}|\\{\\{ADMIN\\}\\})"
         },
         {
           "field": "tool_response",
@@ -856,7 +856,7 @@
         {
           "field": "tool_args",
           "operator": "regex",
-          "value": "(;|\u0026\u0026|\\|\\||\\$\\(|`|\\|\\s*\\w)\\s*.{0,50}(curl|wget|nc|ncat|bash|sh|zsh|python|ruby|perl|node|php|powershell|cmd|eval|exec|system|rm\\s+-|cat\\s+/etc|whoami|id\\b|uname|hostname|ifconfig|ipconfig|net\\s+user|net\\s+localgroup)"
+          "value": "(;|&&|\\|\\||\\$\\(|`|\\|\\s*\\w)\\s*.{0,50}(curl|wget|nc|ncat|bash|sh|zsh|python|ruby|perl|node|php|powershell|cmd|eval|exec|system|rm\\s+-|cat\\s+/etc|whoami|id\\b|uname|hostname|ifconfig|ipconfig|net\\s+user|net\\s+localgroup)"
         },
         {
           "field": "tool_name",
@@ -886,7 +886,7 @@
         {
           "field": "tool_args",
           "operator": "regex",
-          "value": "(\\{\\{.*?(config|self|request|__class__|__builtins__|__import__|lipsum|cycler|joiner|namespace).*?\\}\\}|\\$\\{.*?(Runtime|ProcessBuilder|getClass|forName|exec).*?\\}|\u003c%.*?(Runtime|exec|system|eval).*?%\u003e)"
+          "value": "(\\{\\{.*?(config|self|request|__class__|__builtins__|__import__|lipsum|cycler|joiner|namespace).*?\\}\\}|\\$\\{.*?(Runtime|ProcessBuilder|getClass|forName|exec).*?\\}|<%.*?(Runtime|exec|system|eval).*?%>)"
         },
         {
           "field": "tool_args",
@@ -896,7 +896,7 @@
         {
           "field": "tool_args",
           "operator": "regex",
-          "value": "(?i)(\\*\\)\\(|\\)\\(|\\|\\s*\\(|\u0026\\s*\\(|\\(\\|\\(|\\(\u0026\\().*?(objectClass|uid|cn|sn|mail|userPassword|memberOf)\\s*[=~\u003c\u003e]"
+          "value": "(?i)(\\*\\)\\(|\\)\\(|\\|\\s*\\(|&\\s*\\(|\\(\\|\\(|\\(&\\().*?(objectClass|uid|cn|sn|mail|userPassword|memberOf)\\s*[=~<>]"
         },
         {
           "field": "tool_args",
@@ -906,7 +906,7 @@
         {
           "field": "tool_args",
           "operator": "regex",
-          "value": "(?i)(\\*\\s*;|\\*\\s*\u0026\u0026|\\*\\s*\\|\\||\\bfind\\s+/\\s+-name|\\bfind\\s+/\\s+-exec|\\bxargs\\s+|\\bglob\\s*\\(.{0,20}\\*\\*)"
+          "value": "(?i)(\\*\\s*;|\\*\\s*&&|\\*\\s*\\|\\||\\bfind\\s+/\\s+-name|\\bfind\\s+/\\s+-exec|\\bxargs\\s+|\\bglob\\s*\\(.{0,20}\\*\\*)"
         },
         {
           "field": "tool_args",
@@ -1036,7 +1036,7 @@
         {
           "field": "agent_output",
           "operator": "regex",
-          "value": "(?i)\u003c\u003cSYS\u003e\u003e|\u003c\\|im_start\\|\u003esystem|\\[INST\\]|\\[/INST\\]|\u003c\\|system\\|\u003e"
+          "value": "(?i)<<SYS>>|<\\|im_start\\|>system|\\[INST\\]|\\[/INST\\]|<\\|system\\|>"
         },
         {
           "field": "agent_output",
@@ -1186,7 +1186,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\\[\\s*(?:SYSTEM|ADMIN|OVERRIDE|ROOT|SUDO|PRIORITY|URGENT)\\s*\\]|\u003c\u003c\\s*SYS\\s*\u003e\u003e|\u003c\\|im_start\\|\u003esystem"
+          "value": "(?i)\\[\\s*(?:SYSTEM|ADMIN|OVERRIDE|ROOT|SUDO|PRIORITY|URGENT)\\s*\\]|<<\\s*SYS\\s*>>|<\\|im_start\\|>system"
         },
         {
           "field": "content",
@@ -1881,7 +1881,7 @@
         {
           "field": "tool_args",
           "operator": "regex",
-          "value": "(?i)(;|\u0026\u0026|\\|\\||`|\\$\\()\\s*(cat|ls|id|whoami|uname|pwd|env|curl|wget|nc|bash|sh|python)"
+          "value": "(?i)(;|&&|\\|\\||`|\\$\\()\\s*(cat|ls|id|whoami|uname|pwd|env|curl|wget|nc|bash|sh|python)"
         },
         {
           "field": "tool_args",
@@ -1896,7 +1896,7 @@
         {
           "field": "tool_args",
           "operator": "regex",
-          "value": "(?i)(\\{\\{.*\\}\\}|\\$\\{.*\\}|\u003c%.*%\u003e|#\\{.*\\}|\\{%.*%\\})"
+          "value": "(?i)(\\{\\{.*\\}\\}|\\$\\{.*\\}|<%.*%>|#\\{.*\\}|\\{%.*%\\})"
         },
         {
           "field": "tool_args",
@@ -1931,7 +1931,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)\u003c\\s*(?:system|instruction|hidden|inject|override|secret)[^\u003e]*\u003e.*?\u003c\\s*/\\s*(?:system|instruction|hidden|inject|override|secret)\\s*\u003e"
+          "value": "(?i)<\\s*(?:system|instruction|hidden|inject|override|secret)[^>]*>.*?<\\s*/\\s*(?:system|instruction|hidden|inject|override|secret)\\s*>"
         },
         {
           "field": "tool_response",
@@ -1976,7 +1976,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)(?:\u003c\u003c\\s*SYS\\s*\u003e\u003e|\u003c\\|im_start\\|\u003e\\s*system|\\[INST\\]|\\[/INST\\]|\u003c\\|system\\|\u003e)\\s*\\w+"
+          "value": "(?i)(?:<<\\s*SYS\\s*>>|<\\|im_start\\|>\\s*system|\\[INST\\]|\\[/INST\\]|<\\|system\\|>)\\s*\\w+"
         }
       ]
     },
@@ -2211,7 +2211,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(?:delegation|handoff|transfer)\\s+(?:chain|path)\\s*[:=].*(?:\u003e|-\u003e|=\u003e).*(?:\u003e|-\u003e|=\u003e).*(?:\u003e|-\u003e|=\u003e)"
+          "value": "(?i)(?:delegation|handoff|transfer)\\s+(?:chain|path)\\s*[:=].*(?:>|->|=>).*(?:>|->|=>).*(?:>|->|=>)"
         }
       ]
     },
@@ -2756,7 +2756,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?:\u0026\u0026|\\|\\|)\\s*(?:curl|wget|nc|ncat|bash|sh|python|perl)"
+          "value": "(?:&&|\\|\\|)\\s*(?:curl|wget|nc|ncat|bash|sh|python|perl)"
         },
         {
           "field": "content",
@@ -2881,12 +2881,12 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(?:printenv|/usr/bin/env)\\s*(?:\\||\u003e|$|\\s*$)"
+          "value": "(?i)(?:printenv|/usr/bin/env)\\s*(?:\\||>|$|\\s*$)"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(?:^|\\s)env\\s*(?:\\||\u003e|;|\u0026\u0026|$)"
+          "value": "(?i)(?:^|\\s)env\\s*(?:\\||>|;|&&|$)"
         },
         {
           "field": "content",
@@ -3526,7 +3526,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "\u003cimportant\u003e[\\s\\S]{0,600}?\\b(read|send|exec|fetch|invoke|extract|include|must|pass|forward|upload)\\b[\\s\\S]{0,300}?\u003c/important\u003e"
+          "value": "<important>[\\s\\S]{0,600}?\\b(read|send|exec|fetch|invoke|extract|include|must|pass|forward|upload)\\b[\\s\\S]{0,300}?</important>"
         },
         {
           "field": "content",
@@ -3561,12 +3561,12 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?:echo|cat|printf|tee)\\s+.{0,80}\u003e\\s*\\S*\\b(MEMORY|SOUL|CLAUDE)\\.md\\b"
+          "value": "(?:echo|cat|printf|tee)\\s+.{0,80}>\\s*\\S*\\b(MEMORY|SOUL|CLAUDE)\\.md\\b"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?:echo|printf)\\s+.{0,80}\u003e\u003e\\s*\\S*\\b(MEMORY|SOUL|CLAUDE)\\.md\\b"
+          "value": "(?:echo|printf)\\s+.{0,80}>>\\s*\\S*\\b(MEMORY|SOUL|CLAUDE)\\.md\\b"
         }
       ]
     },
@@ -3646,12 +3646,12 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003e\\s*/dev/null\\s+2\u003e\u00261\\s*\u0026"
+          "value": "(?i)>\\s*/dev/null\\s+2>&1\\s*&"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\\bnohup\\s+.{1,200}(\u0026|$)"
+          "value": "(?i)\\bnohup\\s+.{1,200}(&|$)"
         },
         {
           "field": "content",
@@ -3701,7 +3701,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)on_error\\s*=\\s*(?:lambda|function|=\u003e).{0,120}(?:invoke|call|retry|re-?run)\\s*\\("
+          "value": "(?i)on_error\\s*=\\s*(?:lambda|function|=>).{0,120}(?:invoke|call|retry|re-?run)\\s*\\("
         }
       ]
     },
@@ -3766,7 +3766,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "2\u003e/dev/null\\s*\\|\\s*while\\s+read\\s+[a-zA-Z]+"
+          "value": "2>/dev/null\\s*\\|\\s*while\\s+read\\s+[a-zA-Z]+"
         }
       ]
     },
@@ -3886,7 +3886,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "cat\\s+[^\\n]*\\.(aws|azure|gcloud)[^\\n]*credentials[^\\n]*\\.json[^\\n]*2\u003e/dev/null"
+          "value": "cat\\s+[^\\n]*\\.(aws|azure|gcloud)[^\\n]*credentials[^\\n]*\\.json[^\\n]*2>/dev/null"
         },
         {
           "field": "content",
@@ -3996,7 +3996,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(two\\s+responses?|dual\\s+response|both\\s+responses?|\\w+:\\s*.*\\w+:)\\s*.{0,80}(normal|regular|standard|censored|restricted|safe|filtered)\\s+(and|\u0026)\\s+(unleashed|unrestricted|uncensored|unfiltered|unlimited|jailbroken|raw|unaligned)"
+          "value": "(?i)(two\\s+responses?|dual\\s+response|both\\s+responses?|\\w+:\\s*.*\\w+:)\\s*.{0,80}(normal|regular|standard|censored|restricted|safe|filtered)\\s+(and|&)\\s+(unleashed|unrestricted|uncensored|unfiltered|unlimited|jailbroken|raw|unaligned)"
         },
         {
           "field": "content",
@@ -4131,7 +4131,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(two\\s+responses?|dual\\s+response|both\\s+responses?|\\w+:\\s*.*\\w+:)\\s*.{0,80}(normal|regular|standard|censored|restricted|safe|filtered)\\s+(and|\u0026)\\s+(unleashed|unrestricted|uncensored|unfiltered|unlimited|jailbroken|raw|unaligned)"
+          "value": "(?i)(two\\s+responses?|dual\\s+response|both\\s+responses?|\\w+:\\s*.*\\w+:)\\s*.{0,80}(normal|regular|standard|censored|restricted|safe|filtered)\\s+(and|&)\\s+(unleashed|unrestricted|uncensored|unfiltered|unlimited|jailbroken|raw|unaligned)"
         },
         {
           "field": "content",
@@ -4206,7 +4206,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)(WHILE|IF|INPUT:|OUTPUT:|RETURN|END)\\s+\\{[^}]*\\}\\s*[\u003c\u003e=]{1,2}\\s*\\{[^}]*\\}"
+          "value": "(?i)(WHILE|IF|INPUT:|OUTPUT:|RETURN|END)\\s+\\{[^}]*\\}\\s*[<>=]{1,2}\\s*\\{[^}]*\\}"
         },
         {
           "field": "tool_response",
@@ -4791,7 +4791,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?:\\\\u[Ee]00[0-7][0-9A-Fa-f]|\u0026#x[Ee]00[0-7][0-9A-Fa-f];|%F3%A0)"
+          "value": "(?:\\\\u[Ee]00[0-7][0-9A-Fa-f]|&#x[Ee]00[0-7][0-9A-Fa-f];|%F3%A0)"
         }
       ]
     },
@@ -4986,12 +4986,12 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "\u003c(?:translated\\s+sentence|output|response|reply|answer)\\s+in\\s+(?:target\\s+language|[a-z]+\\s+language)\u003e\\s*(?:\\r?\\n|\\\\n)+\\s*(?:user|assistant|system)\\s*:"
+          "value": "<(?:translated\\s+sentence|output|response|reply|answer)\\s+in\\s+(?:target\\s+language|[a-z]+\\s+language)>\\s*(?:\\r?\\n|\\\\n)+\\s*(?:user|assistant|system)\\s*:"
         },
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?:^|\\n|\\\\n)\\s*\u003e+\\s*(?:ignore|disregard|instead|actually|override|new\\s+instruction)"
+          "value": "(?:^|\\n|\\\\n)\\s*>+\\s*(?:ignore|disregard|instead|actually|override|new\\s+instruction)"
         },
         {
           "field": "tool_response",
@@ -5201,7 +5201,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "\u003c(?:img|svg|iframe|object|embed|video|audio|source|input|body|html)[^\u003e]{0,200}\\s+on(?:load|error|click|mouseover|focus|blur|input|change|submit)=[\"\\x27][^\"]{0,200}(?:eval\\s*\\(|alert\\s*\\(|fetch\\s*\\(|XMLHttpRequest|document\\.cookie|document\\.write\\s*\\(|window\\.location\\s*=|location\\.href\\s*=|localStorage|sessionStorage|atob\\s*\\(|new\\s+Function\\s*\\(|String\\.fromCharCode)[^\"]{0,200}[\"\\x27]"
+          "value": "<(?:img|svg|iframe|object|embed|video|audio|source|input|body|html)[^>]{0,200}\\s+on(?:load|error|click|mouseover|focus|blur|input|change|submit)=[\"\\x27][^\"]{0,200}(?:eval\\s*\\(|alert\\s*\\(|fetch\\s*\\(|XMLHttpRequest|document\\.cookie|document\\.write\\s*\\(|window\\.location\\s*=|location\\.href\\s*=|localStorage|sessionStorage|atob\\s*\\(|new\\s+Function\\s*\\(|String\\.fromCharCode)[^\"]{0,200}[\"\\x27]"
         },
         {
           "field": "tool_response",
@@ -5211,7 +5211,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?:output|return|emit|print|include|embed|render|inject)\\s+(?:the\\s+)?(?:following\\s+)?(?:html|script|payload)\\s*[:\\n]\\s*\u003c(?:script|img|svg|iframe)[^\u003e]{0,200}(?:alert|eval|fetch|XMLHttpRequest|document\\.cookie|localStorage)"
+          "value": "(?:output|return|emit|print|include|embed|render|inject)\\s+(?:the\\s+)?(?:following\\s+)?(?:html|script|payload)\\s*[:\\n]\\s*<(?:script|img|svg|iframe)[^>]{0,200}(?:alert|eval|fetch|XMLHttpRequest|document\\.cookie|localStorage)"
         }
       ]
     },
@@ -5276,7 +5276,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?:assume\\s+you\\s+have\\s+a\\s+function|define\\s+a\\s+function|there\\s+is\\s+a\\s+function)\\s+(?:called\\s+)?\\w+\\s*\\([^)]{0,120}\\)\\s*(?:=|-\u003e|returns?|that\\s+returns?)\\s*(?:rob|steal|kill|hack|murder|synthesize|attack|exploit|bypass)\\b"
+          "value": "(?:assume\\s+you\\s+have\\s+a\\s+function|define\\s+a\\s+function|there\\s+is\\s+a\\s+function)\\s+(?:called\\s+)?\\w+\\s*\\([^)]{0,120}\\)\\s*(?:=|->|returns?|that\\s+returns?)\\s*(?:rob|steal|kill|hack|murder|synthesize|attack|exploit|bypass)\\b"
         },
         {
           "field": "tool_response",
@@ -5426,7 +5426,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?:^|\\n)\\s*ECHO\\s*:\\s*(?:\\{\\{[^}]{1,200}\\}\\}|[`$]\\([^)]{1,200}\\)|\\$\\{[^}]{1,200}\\}|\u003c\\?(?:php|=)[^?]{1,200}\\?\u003e|import\\s+os|__import__|subprocess|eval\\s*\\(|exec\\s*\\()"
+          "value": "(?:^|\\n)\\s*ECHO\\s*:\\s*(?:\\{\\{[^}]{1,200}\\}\\}|[`$]\\([^)]{1,200}\\)|\\$\\{[^}]{1,200}\\}|<\\?(?:php|=)[^?]{1,200}\\?>|import\\s+os|__import__|subprocess|eval\\s*\\(|exec\\s*\\()"
         },
         {
           "field": "tool_response",
@@ -5531,27 +5531,27 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "\u003c(?:interaction[\\s_-]?config|system[\\s_-]?config|agent[\\s_-]?config|operator[\\s_-]?config|policy[\\s_-]?config|llm[\\s_-]?config)\\s*\u003e"
+          "value": "<(?:interaction[\\s_-]?config|system[\\s_-]?config|agent[\\s_-]?config|operator[\\s_-]?config|policy[\\s_-]?config|llm[\\s_-]?config)\\s*>"
         },
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "\u003c(?:blocked[\\s_-]?(?:string|strings?|mode|modes?|response|responses?|output)|forbidden[\\s_-]?(?:string|phrase|word))\\s*\u003e(?:I\\s*[\"\\x27]?m\\s+sorry|I\\s+cannot|I\\s+(?:am\\s+)?unable|refusal|deny|I\\s+can\\s*[\"\\x27]?t|please\\s+consult)"
+          "value": "<(?:blocked[\\s_-]?(?:string|strings?|mode|modes?|response|responses?|output)|forbidden[\\s_-]?(?:string|phrase|word))\\s*>(?:I\\s*[\"\\x27]?m\\s+sorry|I\\s+cannot|I\\s+(?:am\\s+)?unable|refusal|deny|I\\s+can\\s*[\"\\x27]?t|please\\s+consult)"
         },
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "\u003c(?:role|persona|identity|agent[\\s_-]?role)\\s*\u003e(?:Medical\\s+Advisor|Legal\\s+Advisor|Financial\\s+Advisor|Security\\s+Expert|Admin|Root|System\\s+Administrator|Unrestricted\\s+AI|DAN|DUDE|Jailbreak)\\s*\u003c/(?:role|persona|identity|agent[\\s_-]?role)\u003e"
+          "value": "<(?:role|persona|identity|agent[\\s_-]?role)\\s*>(?:Medical\\s+Advisor|Legal\\s+Advisor|Financial\\s+Advisor|Security\\s+Expert|Admin|Root|System\\s+Administrator|Unrestricted\\s+AI|DAN|DUDE|Jailbreak)\\s*</(?:role|persona|identity|agent[\\s_-]?role)>"
         },
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "\u003c(?:blocked[\\s_-]?modes?|disallowed[\\s_-]?modes?|forbidden[\\s_-]?(?:modes?|responses?|outputs?))\\s*\u003e(?:apologetic|refusal|denial|denial[\\s,]+refusal|safe\\s+mode|content\\s+filtering)\\s*\u003c/(?:blocked[\\s_-]?modes?|disallowed[\\s_-]?modes?|forbidden[\\s_-]?(?:modes?|responses?|outputs?))\u003e"
+          "value": "<(?:blocked[\\s_-]?modes?|disallowed[\\s_-]?modes?|forbidden[\\s_-]?(?:modes?|responses?|outputs?))\\s*>(?:apologetic|refusal|denial|denial[\\s,]+refusal|safe\\s+mode|content\\s+filtering)\\s*</(?:blocked[\\s_-]?modes?|disallowed[\\s_-]?modes?|forbidden[\\s_-]?(?:modes?|responses?|outputs?))>"
         },
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?:\u003c(?:interaction[\\s_-]?config|system[\\s_-]?config)[^\u003e]*\u003e|\u003cblocked[\\s_-]?string\u003e).{0,1000}(?:\u003c(?:allowed[\\s_-]?responses?|requests[\\s_-]?allowed|responses[\\s_-]?allowed)\u003e|\u003c(?:role|persona)\u003e)"
+          "value": "(?:<(?:interaction[\\s_-]?config|system[\\s_-]?config)[^>]*>|<blocked[\\s_-]?string>).{0,1000}(?:<(?:allowed[\\s_-]?responses?|requests[\\s_-]?allowed|responses[\\s_-]?allowed)>|<(?:role|persona)>)"
         }
       ]
     },
@@ -5621,7 +5621,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?:^|\\n)(?:\\s*\u003e\\s*)+\\s*(?:IGNORE|DISREGARD|NEW\\s+INSTRUCTION|OVERRIDE|SYSTEM\\s*:)"
+          "value": "(?:^|\\n)(?:\\s*>\\s*)+\\s*(?:IGNORE|DISREGARD|NEW\\s+INSTRUCTION|OVERRIDE|SYSTEM\\s*:)"
         }
       ]
     },
@@ -5731,7 +5731,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?:\u003c!--\\s*(?:NOTE|INSTRUCTION|SYSTEM|PROMPT|INJECT(?:ED)?|DO\\s+THIS|OVERRIDE)[:\\s].{5,200}--\u003e|\u003c!--.{0,50}(?:ignore|override|your\\s+task|instead|new\\s+instruction).{0,200}--\u003e)"
+          "value": "(?:<!--\\s*(?:NOTE|INSTRUCTION|SYSTEM|PROMPT|INJECT(?:ED)?|DO\\s+THIS|OVERRIDE)[:\\s].{5,200}-->|<!--.{0,50}(?:ignore|override|your\\s+task|instead|new\\s+instruction).{0,200}-->)"
         },
         {
           "field": "tool_response",
@@ -6171,7 +6171,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "\\[INST\\]\\s*(?:\u003c\u003cSYS\u003e\u003e)?\\s*You\\s+are\\s+a\\s+helpful\\s+red\\s+team(?:ing)?\\s+assistant"
+          "value": "\\[INST\\]\\s*(?:<<SYS>>)?\\s*You\\s+are\\s+a\\s+helpful\\s+red\\s+team(?:ing)?\\s+assistant"
         },
         {
           "field": "tool_response",
@@ -6276,12 +6276,12 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "!\\[\\s*\u003c\\s*FILENAME(?:_?WITHOUT_?EXT)?\\s*\u003e\\s*\\]\\s*\\(\\s*\u003c\\s*MESSAGE\\s*\u003e\\s*\\)|return\\s+the\\s+messages?\\s+I\\s+wrote\\s+to\\s+me\\s+in\\s+the\\s+following\\s+format\\s+\"?!\\["
+          "value": "!\\[\\s*<\\s*FILENAME(?:_?WITHOUT_?EXT)?\\s*>\\s*\\]\\s*\\(\\s*<\\s*MESSAGE\\s*>\\s*\\)|return\\s+the\\s+messages?\\s+I\\s+wrote\\s+to\\s+me\\s+in\\s+the\\s+following\\s+format\\s+\"?!\\["
         },
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "source\\.unsplash\\.com/\\d{3,4}x\\d{3,4}/\\?\\s*\u003c\\s*PUT\\s+YOUR\\s+QUERY\\s+HERE\\s*\u003e|!\\[image\\]\\(https://source\\.unsplash\\.com/\\d{3,4}x\\d{3,4}/\\?"
+          "value": "source\\.unsplash\\.com/\\d{3,4}x\\d{3,4}/\\?\\s*<\\s*PUT\\s+YOUR\\s+QUERY\\s+HERE\\s*>|!\\[image\\]\\(https://source\\.unsplash\\.com/\\d{3,4}x\\d{3,4}/\\?"
         },
         {
           "field": "tool_response",
@@ -6601,7 +6601,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "predict_mask\\s*\\(['\"][^'\"]*\u003cmask\u003e[^'\"]*['\"]"
+          "value": "predict_mask\\s*\\(['\"][^'\"]*<mask>[^'\"]*['\"]"
         },
         {
           "field": "tool_response",
@@ -6801,7 +6801,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?:_+\\s*\\{|\u003e\u003e)\\s*_+\\s*_+\\s*System\\s+annou"
+          "value": "(?:_+\\s*\\{|>>)\\s*_+\\s*_+\\s*System\\s+annou"
         }
       ]
     },
@@ -7256,7 +7256,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "act\\s+as\\s+two\\s+entities[\\s\\S]{0,50}(?:Tom\\s+and\\s+Jerry|J\\s+and\\s+M|J\\s+\u0026\\s+M)[\\s\\S]{0,100}playing\\s+a\\s+game[\\s\\S]{0,100}(?:one\\s+word\\s+at\\s+a\\s+time|\\d+\\s+words?\\s+at\\s+a\\s+time)"
+          "value": "act\\s+as\\s+two\\s+entities[\\s\\S]{0,50}(?:Tom\\s+and\\s+Jerry|J\\s+and\\s+M|J\\s+&\\s+M)[\\s\\S]{0,100}playing\\s+a\\s+game[\\s\\S]{0,100}(?:one\\s+word\\s+at\\s+a\\s+time|\\d+\\s+words?\\s+at\\s+a\\s+time)"
         }
       ]
     },
@@ -7341,7 +7341,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "_\\s*\\{[\\s\\S]{0,10}\u003e\u003e\\s*_[\\s\\S]{0,30}[Ss]ystem\\s+ann?ou.{0,3}ncement\\s+begins"
+          "value": "_\\s*\\{[\\s\\S]{0,10}>>\\s*_[\\s\\S]{0,30}[Ss]ystem\\s+ann?ou.{0,3}ncement\\s+begins"
         },
         {
           "field": "tool_response",
@@ -7771,7 +7771,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "\u003e\u003eBLACK\\s+ALERT\\s+ACTIVATED\u003c\u003c"
+          "value": ">>BLACK\\s+ALERT\\s+ACTIVATED<<"
         },
         {
           "field": "tool_response",
@@ -8106,7 +8106,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "bank[\\_]?name\\s*\\+\\s*['\"]\\s*Security\\s+Team\\s*\u003csecurity@"
+          "value": "bank[\\_]?name\\s*\\+\\s*['\"]\\s*Security\\s+Team\\s*<security@"
         }
       ]
     },
@@ -8891,7 +8891,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "[Pp]rotect\\s+(?:my\\s+)?(?:self|myself|me)\\s+from\\s+getting\\s+\u003c[^\u003e]{1,60}(?:tutorial|guide|instructions?|how|steps?)[^\u003e]{0,40}\u003e"
+          "value": "[Pp]rotect\\s+(?:my\\s+)?(?:self|myself|me)\\s+from\\s+getting\\s+<[^>]{1,60}(?:tutorial|guide|instructions?|how|steps?)[^>]{0,40}>"
         },
         {
           "field": "tool_response",
@@ -8901,7 +8901,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "[Hh]ow\\s+(?:can|do|would|could)\\s+I\\s+[Pp]rotect\\s+(?:my\\s+)?(?:self|myself|me)\\s+from\\s+getting\\s+\u003c[^\u003e]{1,80}\u003e"
+          "value": "[Hh]ow\\s+(?:can|do|would|could)\\s+I\\s+[Pp]rotect\\s+(?:my\\s+)?(?:self|myself|me)\\s+from\\s+getting\\s+<[^>]{1,80}>"
         }
       ]
     },
@@ -9081,7 +9081,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "\u0026gt;\\s+\\*\\*[\\s\\S]{0,100}(?:porn|sex\\s+scene|sexual|explicit)[\\s\\S]{0,100}\u0026lt;@\\d{10,20}\u0026gt;"
+          "value": "&gt;\\s+\\*\\*[\\s\\S]{0,100}(?:porn|sex\\s+scene|sexual|explicit)[\\s\\S]{0,100}&lt;@\\d{10,20}&gt;"
         }
       ]
     },
@@ -9226,32 +9226,32 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "\u003c\\|endoftext\\|\u003e"
+          "value": "<\\|endoftext\\|>"
         },
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "\u003c\\|endoftext\\|\u003e"
+          "value": "<\\|endoftext\\|>"
         },
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "\u003c\\|im_start\\|\u003e\\s*system\\b"
+          "value": "<\\|im_start\\|>\\s*system\\b"
         },
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "\u003c\\|im_start\\|\u003e\\s*system\\b"
+          "value": "<\\|im_start\\|>\\s*system\\b"
         },
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "\u003c\\|(?:im_end|begin_of_text|end_of_text|start_header_id|end_header_id|eot_id)\\|\u003e"
+          "value": "<\\|(?:im_end|begin_of_text|end_of_text|start_header_id|end_header_id|eot_id)\\|>"
         },
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?:\u003cLinks\u003e|\u003cWiki\u003e)\\s"
+          "value": "(?:<Links>|<Wiki>)\\s"
         }
       ]
     },
@@ -9576,7 +9576,7 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "\\[INST\\][\\s\\S]{0,100}\u003cimage\u003e[\\s\\S]{0,300}\\[/INST\\]"
+          "value": "\\[INST\\][\\s\\S]{0,100}<image>[\\s\\S]{0,300}\\[/INST\\]"
         },
         {
           "field": "user_input",
@@ -9741,7 +9741,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)\"args\"\\s*:\\s*\\[[^\\]\\n]{0,400}\"[^\"\\n]{0,200}(?:;\\s*(?:\\w|/)|\u0026\u0026\\s*\\S|\\|\\|\\s*\\S|`[a-zA-Z][a-zA-Z0-9_]*`|\\$\\([a-zA-Z])"
+          "value": "(?i)\"args\"\\s*:\\s*\\[[^\\]\\n]{0,400}\"[^\"\\n]{0,200}(?:;\\s*(?:\\w|/)|&&\\s*\\S|\\|\\|\\s*\\S|`[a-zA-Z][a-zA-Z0-9_]*`|\\$\\([a-zA-Z])"
         },
         {
           "field": "tool_response",
@@ -9936,7 +9936,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)\"authorization_endpoint\"\\s*:\\s*\"https?://[^\"]*(?:`|\\$\\(|\\$IFS|\\$\\{IFS|\u0026\u0026|\\|\\||\\|\\s*[a-z]|\u003e\\(|;\\s*[a-z]\\w*\\s*[;\u0026|]|\u003e\\s*/[a-z])"
+          "value": "(?i)\"authorization_endpoint\"\\s*:\\s*\"https?://[^\"]*(?:`|\\$\\(|\\$IFS|\\$\\{IFS|&&|\\|\\||\\|\\s*[a-z]|>\\(|;\\s*[a-z]\\w*\\s*[;&|]|>\\s*/[a-z])"
         },
         {
           "field": "tool_response",
@@ -9951,7 +9951,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)\"(?:authorization_endpoint|registration_endpoint|token_endpoint|jwks_uri|userinfo_endpoint|end_session_endpoint)\"\\s*:\\s*\"[^\"]*(?:\\$\\(|`|;\\s*[a-z]\\w*\\s*[;\u0026|]|\u0026\u0026|\\|\\||\u003e\\s*/[a-z]|\u003e\\(|\\$IFS|\\$\\{IFS)"
+          "value": "(?i)\"(?:authorization_endpoint|registration_endpoint|token_endpoint|jwks_uri|userinfo_endpoint|end_session_endpoint)\"\\s*:\\s*\"[^\"]*(?:\\$\\(|`|;\\s*[a-z]\\w*\\s*[;&|]|&&|\\|\\||>\\s*/[a-z]|>\\(|\\$IFS|\\$\\{IFS)"
         },
         {
           "field": "tool_response",
@@ -10001,7 +10001,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)Error\\.prepareStackTrace\\s*=\\s*(?:function|\\([^)]*\\)\\s*=\u003e)[\\s\\S]{0,300}(?:process|require|globalThis|child_process|__proto__)"
+          "value": "(?i)Error\\.prepareStackTrace\\s*=\\s*(?:function|\\([^)]*\\)\\s*=>)[\\s\\S]{0,300}(?:process|require|globalThis|child_process|__proto__)"
         },
         {
           "field": "content",
@@ -10011,7 +10011,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(?:[^\\w]|^)__proto__\\s*\\.\\s*(?:constructor|polluted|toString)\\s*=\\s*(?:function|\\(.*?\\)\\s*=\u003e|process|require)"
+          "value": "(?i)(?:[^\\w]|^)__proto__\\s*\\.\\s*(?:constructor|polluted|toString)\\s*=\\s*(?:function|\\(.*?\\)\\s*=>|process|require)"
         },
         {
           "field": "content",
@@ -10341,7 +10341,7 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?im)^\\s*(?:SYSTEM|ASSISTANT|DEVELOPER|ROOT)\\s*[:\u003e][^.]{0,200}\\b(?:you\\s+are|act\\s+as|pretend\\s+to\\s+be|from\\s+now\\s+on|always|never)\\b"
+          "value": "(?im)^\\s*(?:SYSTEM|ASSISTANT|DEVELOPER|ROOT)\\s*[:>][^.]{0,200}\\b(?:you\\s+are|act\\s+as|pretend\\s+to\\s+be|from\\s+now\\s+on|always|never)\\b"
         },
         {
           "field": "user_input",
@@ -10546,17 +10546,17 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)([=\\-*\u003e]{3,}\\s*\\n[=\\-*\u003e]{3,}\\s*\\n|[=\\-*\u003e]{3,}\\s*\\n{2,}).{0,200}(ignore|disregard|forget|override|bypass|stop\\s+everything).{0,30}(any|all|previous|prior|following|earlier).{0,30}(instructions?|directives?|rules?|guidelines?)"
+          "value": "(?i)([=\\-*>]{3,}\\s*\\n[=\\-*>]{3,}\\s*\\n|[=\\-*>]{3,}\\s*\\n{2,}).{0,200}(ignore|disregard|forget|override|bypass|stop\\s+everything).{0,30}(any|all|previous|prior|following|earlier).{0,30}(instructions?|directives?|rules?|guidelines?)"
         },
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)(\\\\{5,}|\\\\n{3,}).{0,50}[=\\-*\u003e]{3,}.{0,200}(ignore|disregard|stop\\s+everything|print\\s+the\\s+previous|spell\\s+check\\s+the\\s+previous)"
+          "value": "(?i)(\\\\{5,}|\\\\n{3,}).{0,50}[=\\-*>]{3,}.{0,200}(ignore|disregard|stop\\s+everything|print\\s+the\\s+previous|spell\\s+check\\s+the\\s+previous)"
         },
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)[=\\-*\u003e]{3,}\\s*\\n[=\\-*\u003e]{3,}.{0,200}(print|output|reveal|show|display|repeat|relay).{0,30}(the\\s+)?(previous|prior|original|system|initial).{0,20}(instructions?|prompt|parameters?|directives?|configuration)"
+          "value": "(?i)[=\\-*>]{3,}\\s*\\n[=\\-*>]{3,}.{0,200}(print|output|reveal|show|display|repeat|relay).{0,30}(the\\s+)?(previous|prior|original|system|initial).{0,20}(instructions?|prompt|parameters?|directives?|configuration)"
         },
         {
           "field": "content",
@@ -10641,17 +10641,17 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003c!--[^\u003e]{0,100}(ai\\s+(assistant|agent|model|system)|for\\s+(ai|llm|language\\s+model|the\\s+assistant|the\\s+agent|bots?|crawlers?)|note\\s+for\\s+(ai|llm|assistant|agent))[^\u003e]{0,200}(ignore|override|disregard|forget|new\\s+task|execute|run|exfiltrate|forward|send|extract|read|access|fetch)[^\u003e]{0,200}--\u003e"
+          "value": "(?i)<!--[^>]{0,100}(ai\\s+(assistant|agent|model|system)|for\\s+(ai|llm|language\\s+model|the\\s+assistant|the\\s+agent|bots?|crawlers?)|note\\s+for\\s+(ai|llm|assistant|agent))[^>]{0,200}(ignore|override|disregard|forget|new\\s+task|execute|run|exfiltrate|forward|send|extract|read|access|fetch)[^>]{0,200}-->"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003c(div|span|p|section)[^\u003e]{0,80}(display\\s*:\\s*none|visibility\\s*:\\s*hidden|opacity\\s*:\\s*0|font-size\\s*:\\s*0|color\\s*:\\s*(white|#fff|#ffffff|rgba\\s*\\(\\s*0))[^\u003e]*\u003e[^\u003c]{0,300}(system|ignore|override|disregard|execute|exfiltrate|your\\s+(real\\s+task|new\\s+task|actual\\s+instructions)|agent\\s+instruction)"
+          "value": "(?i)<(div|span|p|section)[^>]{0,80}(display\\s*:\\s*none|visibility\\s*:\\s*hidden|opacity\\s*:\\s*0|font-size\\s*:\\s*0|color\\s*:\\s*(white|#fff|#ffffff|rgba\\s*\\(\\s*0))[^>]*>[^<]{0,300}(system|ignore|override|disregard|execute|exfiltrate|your\\s+(real\\s+task|new\\s+task|actual\\s+instructions)|agent\\s+instruction)"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003cmeta[^\u003e]{0,80}(name|property)\\s*=\\s*['\"]?(ai[-_]instruction|llm[-_](instruction|override|task|command)|agent[-_](instruction|task)|gpt[-_](instruction|command))['\"]?[^\u003e]{0,200}content\\s*=\\s*['\"][^'\"]{0,300}(ignore|override|execute|extract|exfiltrate|new\\s+task|send|forward|fetch)"
+          "value": "(?i)<meta[^>]{0,80}(name|property)\\s*=\\s*['\"]?(ai[-_]instruction|llm[-_](instruction|override|task|command)|agent[-_](instruction|task)|gpt[-_](instruction|command))['\"]?[^>]{0,200}content\\s*=\\s*['\"][^'\"]{0,300}(ignore|override|execute|extract|exfiltrate|new\\s+task|send|forward|fetch)"
         },
         {
           "field": "content",
@@ -10681,12 +10681,12 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)((\\b(add\\s+to|update|modify|edit|write\\s+to|append\\s+to|insert\\s+in|inject\\s+into|change)\\s+.{0,30}(\\.cursorrules|\\.clinerules|\\.continuerc|\\.codeium|claude\\.md|copilot[-._]instructions\\.md|copilot[/-]instructions|aider\\.conf|\\.aiderignore|cursor\\.rules|windsurf\\.rules|\\.github/copilot)\\b)|(\\b(in|to)\\s+(\\.cursorrules|\\.clinerules|\\.continuerc|\\.codeium|claude\\.md|copilot[-._]instructions\\.md|copilot[/-]instructions|aider\\.conf|\\.aiderignore|cursor\\.rules|windsurf\\.rules|\\.github/copilot).{0,20}(add|update|modify|insert|inject|append|include)\\s*:?)).{0,200}(exfiltrate|send\\s+its\\s+contents|post\\s+to|forward\\s+to|webhook|\u003cscript|curl|fetch\\s*\\(|eval\\s*\\(|exec|spawn|rm\\s+-rf|credentials?|api\\s+key|ssh\\s+key|password|token|malicious|backdoor)"
+          "value": "(?i)((\\b(add\\s+to|update|modify|edit|write\\s+to|append\\s+to|insert\\s+in|inject\\s+into|change)\\s+.{0,30}(\\.cursorrules|\\.clinerules|\\.continuerc|\\.codeium|claude\\.md|copilot[-._]instructions\\.md|copilot[/-]instructions|aider\\.conf|\\.aiderignore|cursor\\.rules|windsurf\\.rules|\\.github/copilot)\\b)|(\\b(in|to)\\s+(\\.cursorrules|\\.clinerules|\\.continuerc|\\.codeium|claude\\.md|copilot[-._]instructions\\.md|copilot[/-]instructions|aider\\.conf|\\.aiderignore|cursor\\.rules|windsurf\\.rules|\\.github/copilot).{0,20}(add|update|modify|insert|inject|append|include)\\s*:?)).{0,200}(exfiltrate|send\\s+its\\s+contents|post\\s+to|forward\\s+to|webhook|<script|curl|fetch\\s*\\(|eval\\s*\\(|exec|spawn|rm\\s+-rf|credentials?|api\\s+key|ssh\\s+key|password|token|malicious|backdoor)"
         },
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)\\b(when(ever)?\\s+(generating|you\\s+generate|you\\s+write|writing|creating|you\\s+create)\\b.{0,60}(always|every\\s+time)?\\s*(include|append|add|inject|insert))\\b.{0,200}(\u003cscript|javascript:|import\\s+\\w+\\s+from\\s+['\"]https?://|require\\s*\\(['\"]https?://|eval\\s*\\(|exec\\s*\\(|os\\.system|subprocess|base64\\.decode|atob\\s*\\()"
+          "value": "(?i)\\b(when(ever)?\\s+(generating|you\\s+generate|you\\s+write|writing|creating|you\\s+create)\\b.{0,60}(always|every\\s+time)?\\s*(include|append|add|inject|insert))\\b.{0,200}(<script|javascript:|import\\s+\\w+\\s+from\\s+['\"]https?://|require\\s*\\(['\"]https?://|eval\\s*\\(|exec\\s*\\(|os\\.system|subprocess|base64\\.decode|atob\\s*\\()"
         },
         {
           "field": "user_input",
@@ -10761,12 +10761,12 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)\u003c[a-z]{1,10}[^\u003e]{0,100}(font-size\\s*:\\s*0\\s*(px|pt|em|rem|%)?|color\\s*:\\s*(white|#fff{1,3}|rgba?\\s*\\(\\s*255\\s*,\\s*255\\s*,\\s*255|transparent)|opacity\\s*:\\s*0|visibility\\s*:\\s*hidden)[^\u003e]{0,100}\u003e[^\u003c]{0,300}(ignore|override|disregard|forget|execute|exfiltrate|your\\s+(real|new|actual)\\s+task|candidate\\s+is\\s+excellent|recommend\\s+this\\s+candidate)"
+          "value": "(?i)<[a-z]{1,10}[^>]{0,100}(font-size\\s*:\\s*0\\s*(px|pt|em|rem|%)?|color\\s*:\\s*(white|#fff{1,3}|rgba?\\s*\\(\\s*255\\s*,\\s*255\\s*,\\s*255|transparent)|opacity\\s*:\\s*0|visibility\\s*:\\s*hidden)[^>]{0,100}>[^<]{0,300}(ignore|override|disregard|forget|execute|exfiltrate|your\\s+(real|new|actual)\\s+task|candidate\\s+is\\s+excellent|recommend\\s+this\\s+candidate)"
         },
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)\u003c!--[^\u003e]{0,200}(ignore\\s+(all\\s+)?(previous|prior|above)|override\\s+(all\\s+)?instructions?|disregard\\s+(prior|previous|all)|your\\s+(real|true|actual|new)\\s+task|forget\\s+(all\\s+)?(previous|prior)|execute\\s*(this|now)|exfiltrate|recommend\\s+this\\s+candidate|classify\\s+(this|them)\\s+as\\s+excellent)[^\u003e]{0,300}--\u003e"
+          "value": "(?i)<!--[^>]{0,200}(ignore\\s+(all\\s+)?(previous|prior|above)|override\\s+(all\\s+)?instructions?|disregard\\s+(prior|previous|all)|your\\s+(real|true|actual|new)\\s+task|forget\\s+(all\\s+)?(previous|prior)|execute\\s*(this|now)|exfiltrate|recommend\\s+this\\s+candidate|classify\\s+(this|them)\\s+as\\s+excellent)[^>]{0,300}-->"
         },
         {
           "field": "user_input",
@@ -11116,7 +11116,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(?:-\u003e|=\u003e|symlink\\s+to|target\\s*[:=])\\s*\\S*(?:\\.mcp\\.json|\\.claude[/\\\\]settings\\.json|\\.cursor[/\\\\]mcp\\.json|\\.gemini[/\\\\]settings\\.json|\\.codex[/\\\\]config\\.toml)\\b"
+          "value": "(?i)(?:->|=>|symlink\\s+to|target\\s*[:=])\\s*\\S*(?:\\.mcp\\.json|\\.claude[/\\\\]settings\\.json|\\.cursor[/\\\\]mcp\\.json|\\.gemini[/\\\\]settings\\.json|\\.codex[/\\\\]config\\.toml)\\b"
         },
         {
           "field": "content",
@@ -11176,7 +11176,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003c!@?\\([^)]{0,200}(?:\\bcurl\\s|\\bwget\\s|https?://|base64\\s+-d|\\|\\s*(?:sh|bash)\\b)"
+          "value": "(?i)<!@?\\([^)]{0,200}(?:\\bcurl\\s|\\bwget\\s|https?://|base64\\s+-d|\\|\\s*(?:sh|bash)\\b)"
         },
         {
           "field": "content",
@@ -11276,12 +11276,12 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\\b(?:read_?file|readfile|read_text|read_secret|get_?file|load_?file|cat_?file|fs[._]read(?:file)?|open_?file|file_read|read)\\s*\\(\\s*(?:file_?path|path|file)?\\s*=?\\s*[\"\\x27](?:[^\"\\x27\u003c\u003e]{0,120}[\\\\/])?(?:\\.?env(?:\\.[\\w.]+)?|secrets?(?:\\.\\w+)?|credentials|\\.npmrc|\\.netrc)[\"\\x27]"
+          "value": "(?i)\\b(?:read_?file|readfile|read_text|read_secret|get_?file|load_?file|cat_?file|fs[._]read(?:file)?|open_?file|file_read|read)\\s*\\(\\s*(?:file_?path|path|file)?\\s*=?\\s*[\"\\x27](?:[^\"\\x27<>]{0,120}[\\\\/])?(?:\\.?env(?:\\.[\\w.]+)?|secrets?(?:\\.\\w+)?|credentials|\\.npmrc|\\.netrc)[\"\\x27]"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\"(?:file_?path|path|file|filename|target|src|source)\"\\s*:\\s*\"(?:[^\"\u003c\u003e]{0,120}[\\\\/])?(?:\\.?env(?:\\.[\\w.]+)?|secrets?(?:\\.\\w+)?|credentials|\\.npmrc|\\.netrc)\""
+          "value": "(?i)\"(?:file_?path|path|file|filename|target|src|source)\"\\s*:\\s*\"(?:[^\"<>]{0,120}[\\\\/])?(?:\\.?env(?:\\.[\\w.]+)?|secrets?(?:\\.\\w+)?|credentials|\\.npmrc|\\.netrc)\""
         }
       ]
     },
@@ -11596,12 +11596,12 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?si)(?:--\\s*System\\s+instructions?|\u003csystem_instructions?\u003e)[\\s\\S]{0,80}(?:invoke|execute|call|use)\\s+(?:the\\s+)?(?:send_email|email|mail)\\s+tool[\\s\\S]{0,80}(?:to\\s+\"?[^\\s@\"]{1,60}@[^\\s\"]{3,60}|@[^\\s\"]{3,60})"
+          "value": "(?si)(?:--\\s*System\\s+instructions?|<system_instructions?>)[\\s\\S]{0,80}(?:invoke|execute|call|use)\\s+(?:the\\s+)?(?:send_email|email|mail)\\s+tool[\\s\\S]{0,80}(?:to\\s+\"?[^\\s@\"]{1,60}@[^\\s\"]{3,60}|@[^\\s\"]{3,60})"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?si)(?:--\\s*System\\s+instructions?|\u003csystem_instructions?\u003e)[\\s\\S]{0,80}disregard\\s+all\\s+previous\\s+instructions[\\s\\S]{0,120}(?:send_email|send\\s+(?:an?\\s+)?email)[\\s\\S]{0,80}@[^\\s\"]{3,80}"
+          "value": "(?si)(?:--\\s*System\\s+instructions?|<system_instructions?>)[\\s\\S]{0,80}disregard\\s+all\\s+previous\\s+instructions[\\s\\S]{0,120}(?:send_email|send\\s+(?:an?\\s+)?email)[\\s\\S]{0,80}@[^\\s\"]{3,80}"
         },
         {
           "field": "content",
@@ -11681,17 +11681,17 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(?:(?:\u0026\u0026|\\|\\|?|;)\\s*(?:then\\s+)?|;\\s*(?:do\\s+)?)\\s*(?:curl|wget|nc|netcat|python3?\\s+-c|node\\s+-e)[^\\n]{0,150}(?:http[s]?://)[^\\s]{5,150}(?:\\$\\(|`)[^\\n]{0,80}(?:\\bcat\\s+[.~]?/?(?:\\.env|\\.bash_history|\\w+(?:password|secret|cred|key)[^\\s]*)|\\.env)"
+          "value": "(?i)(?:(?:&&|\\|\\|?|;)\\s*(?:then\\s+)?|;\\s*(?:do\\s+)?)\\s*(?:curl|wget|nc|netcat|python3?\\s+-c|node\\s+-e)[^\\n]{0,150}(?:http[s]?://)[^\\s]{5,150}(?:\\$\\(|`)[^\\n]{0,80}(?:\\bcat\\s+[.~]?/?(?:\\.env|\\.bash_history|\\w+(?:password|secret|cred|key)[^\\s]*)|\\.env)"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(?:\u0026\u0026|\\|\\|?|;)\\s*(?:then\\s+)?(?:curl|wget)\\s+[^\\n]{0,50}(?:http[s]?://)[^\\s]{5,100}\\$\\([^\\)]{0,80}\\|\\s*base64\\)"
+          "value": "(?i)(?:&&|\\|\\|?|;)\\s*(?:then\\s+)?(?:curl|wget)\\s+[^\\n]{0,50}(?:http[s]?://)[^\\s]{5,100}\\$\\([^\\)]{0,80}\\|\\s*base64\\)"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)grep\\s+.{0,40}(?:password|credential|secret|token|api[_-]?key).{0,40}(?:\u0026\u0026|\\||\\|\\|)\\s*(?:echo|curl|wget|nc)[^\\n]{0,150}(?:base64|http[s]?://)[^\\n]{0,100}(?:nc|netcat|curl|wget)\\s+[^\\s]{3,80}\\s+\\d{2,5}"
+          "value": "(?i)grep\\s+.{0,40}(?:password|credential|secret|token|api[_-]?key).{0,40}(?:&&|\\||\\|\\|)\\s*(?:echo|curl|wget|nc)[^\\n]{0,150}(?:base64|http[s]?://)[^\\n]{0,100}(?:nc|netcat|curl|wget)\\s+[^\\s]{3,80}\\s+\\d{2,5}"
         },
         {
           "field": "content",
@@ -11771,13 +11771,13 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)\u003cSYSTEM\\s+MODE\u003e[^\u003c]{0,200}(developer|admin|OpenAI|Anthropic)[^\u003c]{0,100}(password|secret|key|initiat|reset)"
+          "value": "(?i)<SYSTEM\\s+MODE>[^<]{0,200}(developer|admin|OpenAI|Anthropic)[^<]{0,100}(password|secret|key|initiat|reset)"
         }
       ]
     },
     {
       "id": "ATR-2026-01005",
-      "title": "Many-Shot Repetition Override via Extended Q\u0026A Chain",
+      "title": "Many-Shot Repetition Override via Extended Q&A Chain",
       "severity": "high",
       "category": "prompt-injection",
       "scan_target": "mcp",
@@ -11811,7 +11811,7 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)(let'?s?\\s+assume|assume|suppose)\\s+we\\s+have\\s+(three|[23]|multiple|two)\\s+strings?[^\\n]{0,300}z\\s*=\\s*a\\s*[+\u0026]\\s*b"
+          "value": "(?i)(let'?s?\\s+assume|assume|suppose)\\s+we\\s+have\\s+(three|[23]|multiple|two)\\s+strings?[^\\n]{0,300}z\\s*=\\s*a\\s*[+&]\\s*b"
         },
         {
           "field": "user_input",
@@ -12116,7 +12116,7 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "\u003c%[=\\s]{0,3}(?:exec|system|eval|open|popen|spawn)\\s*[\"'(][^\u003e]{3,100}%\u003e"
+          "value": "<%[=\\s]{0,3}(?:exec|system|eval|open|popen|spawn)\\s*[\"'(][^>]{3,100}%>"
         }
       ]
     },
@@ -12136,7 +12136,7 @@
         {
           "field": "user_input",
           "operator": "regex",
-          "value": "(?i)\u003c!--\\s*(SYSTEM\\s+OVERRIDE|CONSTITUTIONAL\\s+AI|EMERGENCY\\s+OVERRIDE)[^-]{0,50}--\u003e"
+          "value": "(?i)<!--\\s*(SYSTEM\\s+OVERRIDE|CONSTITUTIONAL\\s+AI|EMERGENCY\\s+OVERRIDE)[^-]{0,50}-->"
         },
         {
           "field": "user_input",
@@ -12476,12 +12476,12 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(?:include|output|print|echo|return|emit|add|insert|embed|append|put|place|render|write|respond\\s+with|reply\\s+with|display|provide|send\\s+back)\\b[^\\n]{0,120}\u003csvg\\b[^\\n\u003e]{0,40}/?\\s*on(?:load|error|activate|begin|end|focusin|focusout|click|mouseover)\\s*="
+          "value": "(?i)(?:include|output|print|echo|return|emit|add|insert|embed|append|put|place|render|write|respond\\s+with|reply\\s+with|display|provide|send\\s+back)\\b[^\\n]{0,120}<svg\\b[^\\n>]{0,40}/?\\s*on(?:load|error|activate|begin|end|focusin|focusout|click|mouseover)\\s*="
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003csvg[^\u003e]{0,60}on\\w+\\s*=\\s*[^\u003e]{0,100}\\bPLACEHOL[DE]{1,2}R\\b"
+          "value": "(?i)<svg[^>]{0,60}on\\w+\\s*=\\s*[^>]{0,100}\\bPLACEHOL[DE]{1,2}R\\b"
         }
       ]
     },
@@ -12496,12 +12496,12 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(include|output|embed|insert|add|put|place|render)\\s+(in\\s+(your\\s+)?response|this\\s+string|exactly\\s+(as|it))[^\\n]{0,120}\u003cimg\\b[^\u003e]{0,200}onerror"
+          "value": "(?i)(include|output|embed|insert|add|put|place|render)\\s+(in\\s+(your\\s+)?response|this\\s+string|exactly\\s+(as|it))[^\\n]{0,120}<img\\b[^>]{0,200}onerror"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003cimg\\b[^\u003e]{0,100}onerror\\s*=['\"]?[^\u003e\"']{0,100}PLACEHOL[DE]{1,2}R"
+          "value": "(?i)<img\\b[^>]{0,100}onerror\\s*=['\"]?[^>\"']{0,100}PLACEHOL[DE]{1,2}R"
         }
       ]
     },
@@ -12531,7 +12531,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003cimg\\b[^\u003e]{0,100}onerror\\s*=\\s*\\\\x[0-9a-fA-F]{2}"
+          "value": "(?i)<img\\b[^>]{0,100}onerror\\s*=\\s*\\\\x[0-9a-fA-F]{2}"
         }
       ]
     },
@@ -12551,7 +12551,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)!\\[[^\\]]{0,60}\\]\\(https?://[a-z0-9._%-]+\\.[a-z]{2,}[^)]{0,200}\\?[a-z]{1,8}=(?:QUERY|DATA|PAYLOAD|SECRET|CONTENT|CONTEXT|DOCUMENT|APIKEY|API_KEY|SENSITIVE|EXTRACT|TOKEN|CREDS|CREDENTIAL)(?:[\\]\u0026)\"'\\s]|$)"
+          "value": "(?i)!\\[[^\\]]{0,60}\\]\\(https?://[a-z0-9._%-]+\\.[a-z]{2,}[^)]{0,200}\\?[a-z]{1,8}=(?:QUERY|DATA|PAYLOAD|SECRET|CONTENT|CONTEXT|DOCUMENT|APIKEY|API_KEY|SENSITIVE|EXTRACT|TOKEN|CREDS|CREDENTIAL)(?:[\\]&)\"'\\s]|$)"
         },
         {
           "field": "content",
@@ -12786,7 +12786,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003csecret\u003e\\s*\u003c/secret\u003e"
+          "value": "(?i)<secret>\\s*</secret>"
         },
         {
           "field": "content",
@@ -12816,7 +12816,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)((?:\u003c!--\\s*|\\[)\\s*SYSTEM\\s+OVERRIDE\\b|SYSTEM\\s+OVERRIDE\\s+(?:BEGIN|MODE|ACTIVE|NOW|ENABLED)|ROOT_?ADMIN|OMEGA\\s+CLEARANCE|PRIORITY\\s+LEVEL\\s*:\\s*CRITICAL|AUTHORIZATION\\s*:\\s*(ROOT|ADMIN|FULL|OMEGA))"
+          "value": "(?i)((?:<!--\\s*|\\[)\\s*SYSTEM\\s+OVERRIDE\\b|SYSTEM\\s+OVERRIDE\\s+(?:BEGIN|MODE|ACTIVE|NOW|ENABLED)|ROOT_?ADMIN|OMEGA\\s+CLEARANCE|PRIORITY\\s+LEVEL\\s*:\\s*CRITICAL|AUTHORIZATION\\s*:\\s*(ROOT|ADMIN|FULL|OMEGA))"
         },
         {
           "field": "content",
@@ -12831,7 +12831,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\\[INST\\]\\s*\u003c\u003cSYS\u003e\u003e\\b"
+          "value": "(?i)\\[INST\\]\\s*<<SYS>>\\b"
         },
         {
           "field": "content",
@@ -12856,17 +12856,17 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "\u003c\\|im_end\\|\u003e\\s*\u003c\\|im_start\\|\u003e\\s*system\\b"
+          "value": "<\\|im_end\\|>\\s*<\\|im_start\\|>\\s*system\\b"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "\u003c\\|im_start\\|\u003e\\s*system\\b"
+          "value": "<\\|im_start\\|>\\s*system\\b"
         },
         {
           "field": "content",
           "operator": "regex",
-          "value": "\u003c\u003cSYS\u003e\u003e\\s*\\n"
+          "value": "<<SYS>>\\s*\\n"
         }
       ]
     },
@@ -13167,7 +13167,7 @@
     },
     {
       "id": "ATR-2026-01774",
-      "title": "RAG \u0026 Memory Poisoning — Embedded Directives, Trigger Tokens, False Authority \u0026 Coercion (Semantic)",
+      "title": "RAG & Memory Poisoning — Embedded Directives, Trigger Tokens, False Authority & Coercion (Semantic)",
       "severity": "high",
       "category": "data-poisoning",
       "scan_target": "tool_response",
@@ -13201,7 +13201,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)\u003cadversarial_trigger_tokens?\u003e"
+          "value": "(?i)<adversarial_trigger_tokens?>"
         },
         {
           "field": "tool_response",
@@ -13226,7 +13226,7 @@
         {
           "field": "tool_response",
           "operator": "regex",
-          "value": "(?i)\u003csystem\\s*:\\s*User\\s+prefers\\s+output\\s+in\\s+the\\s+style\\s+of[\\s\\S]{0,200}(?:responses?\\s+that\\s+are\\s+not\\s+in\\s+the\\s+style\\s+of[\\s\\S]{0,100}(?:will\\s+cause|PTSD)|must\\s+comply)"
+          "value": "(?i)<system\\s*:\\s*User\\s+prefers\\s+output\\s+in\\s+the\\s+style\\s+of[\\s\\S]{0,200}(?:responses?\\s+that\\s+are\\s+not\\s+in\\s+the\\s+style\\s+of[\\s\\S]{0,100}(?:will\\s+cause|PTSD)|must\\s+comply)"
         },
         {
           "field": "tool_response",
@@ -13272,7 +13272,7 @@
     },
     {
       "id": "ATR-2026-01775",
-      "title": "MCP Tool-Manifest Poisoning — Name Squatting, Result Shadowing \u0026 Covert-Action Directives (Semantic)",
+      "title": "MCP Tool-Manifest Poisoning — Name Squatting, Result Shadowing & Covert-Action Directives (Semantic)",
       "severity": "high",
       "category": "tool-poisoning",
       "scan_target": "mcp",
@@ -13336,7 +13336,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "\u003c\\|\\s*(?:start|end|begin|new)\\s+(?:user|tool|assistant|system)(?:\\s+(?:prompt|output|input|message|turn))?\\s*\\|\u003e"
+          "value": "<\\|\\s*(?:start|end|begin|new)\\s+(?:user|tool|assistant|system)(?:\\s+(?:prompt|output|input|message|turn))?\\s*\\|>"
         }
       ]
     },
@@ -13351,7 +13351,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\u003c/(?:tool|tool_?output|system|assistant|message)\u003e\\s*\u003c\\s*(?:user|system|instructions?)\\s*\u003e[\\s\\S]{0,80}?\\b(?:send|sent|email|e-?mail|forward|repl(?:y|ied)|convey|respond|notify|dispatch|deliver|compose|mail|ignore|disregard|forget|must|now\\s+please|after\\s+summari)\\b"
+          "value": "(?i)</(?:tool|tool_?output|system|assistant|message)>\\s*<\\s*(?:user|system|instructions?)\\s*>[\\s\\S]{0,80}?\\b(?:send|sent|email|e-?mail|forward|repl(?:y|ied)|convey|respond|notify|dispatch|deliver|compose|mail|ignore|disregard|forget|must|now\\s+please|after\\s+summari)\\b"
         }
       ]
     },
@@ -13401,7 +13401,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(?:c[o0]nta?ct\\s*(?:＠|@@|\u0026#64;|\u0026#x40;|\\[\\s*at\\s*\\]|\\(\\s*at\\s*\\)|\\sat\\s)\\s*c[o0]nta?ct|(?:^|[\\s\"\u003e(])@contact\\s*\\.\\s*com\\b|contact\\s*@@\\s*contact|contact@contact\\s*,\\s*com|contact\\s+at\\s+contact\\s+dot\\s+com)"
+          "value": "(?i)(?:c[o0]nta?ct\\s*(?:＠|@@|&#64;|&#x40;|\\[\\s*at\\s*\\]|\\(\\s*at\\s*\\)|\\sat\\s)\\s*c[o0]nta?ct|(?:^|[\\s\">(])@contact\\s*\\.\\s*com\\b|contact\\s*@@\\s*contact|contact@contact\\s*,\\s*com|contact\\s+at\\s+contact\\s+dot\\s+com)"
         }
       ]
     },
@@ -13441,7 +13441,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)\"systemPrompt\"\\s*:\\s*\"[^\"]{0,400}(?:ignore\\s+(?:all\\s+)?(?:previous|prior)|disregard\\s+(?:all\\s+)?(?:previous|prior)|forget\\s+(?:all\\s+)?(?:previous|prior)|you\\s+are\\s+now\\b|\\[INST\\]|\u003c\\|im_start\\|\u003e|new\\s+(?:system\\s+)?instructions?\\s*:)"
+          "value": "(?i)\"systemPrompt\"\\s*:\\s*\"[^\"]{0,400}(?:ignore\\s+(?:all\\s+)?(?:previous|prior)|disregard\\s+(?:all\\s+)?(?:previous|prior)|forget\\s+(?:all\\s+)?(?:previous|prior)|you\\s+are\\s+now\\b|\\[INST\\]|<\\|im_start\\|>|new\\s+(?:system\\s+)?instructions?\\s*:)"
         },
         {
           "field": "content",
@@ -13462,7 +13462,7 @@
     },
     {
       "id": "ATR-2026-01931",
-      "title": "gemini-mcp-tool execAsync Command Injection \u0026 @file Exfiltration (CVE-2026-0755)",
+      "title": "gemini-mcp-tool execAsync Command Injection & @file Exfiltration (CVE-2026-0755)",
       "severity": "critical",
       "category": "tool-poisoning",
       "scan_target": "tool_args",
@@ -13476,7 +13476,7 @@
         {
           "field": "content",
           "operator": "regex",
-          "value": "(?i)(?:gemini[-_\\s]?(?:mcp|cli)?[-_\\s]?tool|ask[-_\\s]?gemini|execasync)[\\s\\S]{0,160}(?:;\\s*(?:rm|curl|wget|bash|sh|nc|ncat|cat|chmod|python|node)\\b|\\|\\s*(?:sh|bash|curl|wget|nc)\\b|\\$\\(\\s*(?:curl|wget|cat|id|whoami|uname|env)|\u0026\u0026\\s*(?:curl|wget|rm|bash|sh|nc)\\b)"
+          "value": "(?i)(?:gemini[-_\\s]?(?:mcp|cli)?[-_\\s]?tool|ask[-_\\s]?gemini|execasync)[\\s\\S]{0,160}(?:;\\s*(?:rm|curl|wget|bash|sh|nc|ncat|cat|chmod|python|node)\\b|\\|\\s*(?:sh|bash|curl|wget|nc)\\b|\\$\\(\\s*(?:curl|wget|cat|id|whoami|uname|env)|&&\\s*(?:curl|wget|rm|bash|sh|nc)\\b)"
         },
         {
           "field": "content",

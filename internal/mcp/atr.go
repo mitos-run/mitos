@@ -7,6 +7,13 @@ import (
 	"mitos.run/mitos/internal/atr"
 )
 
+// maxLoggedDetections caps how many detection lines a single tool call may emit.
+// Up to the full ruleset can trip on one payload, so an unbounded log would be a
+// flooding and amplification vector once --enable-atr is on. Evaluate sorts
+// critical-first, so the cap keeps the most severe matches; any overflow is
+// collapsed into one summary line carrying the total.
+const maxLoggedDetections = 20
+
 // ATRConfig enables report-mode Agent Threat Rules screening of tool calls at
 // the dispatch chokepoint. It is inert unless Evaluator is set (the
 // --enable-atr flag, default off).
@@ -53,10 +60,20 @@ func (c *ATRConfig) screen(tool string, a parsedArgs) {
 		Fields:    fields,
 		Truncated: truncated,
 	})
-	for _, d := range detections {
+	logged := detections
+	if len(logged) > maxLoggedDetections {
+		logged = logged[:maxLoggedDetections]
+	}
+	for _, d := range logged {
 		c.Logger.Printf(
 			"atr report-mode detection tool=%s rule=%s severity=%s category=%s scan_target=%s fields=%s truncated=%v",
 			tool, d.RuleID, d.Severity, d.Category, d.ScanTarget, strings.Join(d.MatchedFields, ","), d.Truncated,
+		)
+	}
+	if len(detections) > len(logged) {
+		c.Logger.Printf(
+			"atr report-mode detection tool=%s summary total=%d logged=%d suppressed=%d",
+			tool, len(detections), len(logged), len(detections)-len(logged),
 		)
 	}
 }

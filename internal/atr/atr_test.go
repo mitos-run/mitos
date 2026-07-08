@@ -109,6 +109,22 @@ func TestSeveritySort(t *testing.T) {
 	}
 }
 
+func TestUnknownSeveritySortsLast(t *testing.T) {
+	// A mistyped or absent severity must not collide with critical (rank 0) and
+	// float to the front. It sorts after every known severity.
+	unknown := Rule{ID: "UNKNOWN", Severity: "bogus", Category: "t", Condition: "any", Conditions: []Condition{{"content", OpContains, "x"}}}
+	low := Rule{ID: "LOW", Severity: "low", Category: "t", Condition: "any", Conditions: []Condition{{"content", OpContains, "x"}}}
+	crit := Rule{ID: "CRIT", Severity: "critical", Category: "t", Condition: "any", Conditions: []Condition{{"content", OpContains, "x"}}}
+	e := mustEval(t, unknown, crit, low)
+	det := e.Evaluate(event("content", "x"))
+	if len(det) != 3 {
+		t.Fatalf("want 3 detections, got %d", len(det))
+	}
+	if det[0].RuleID != "CRIT" || det[len(det)-1].RuleID != "UNKNOWN" {
+		t.Fatalf("order wrong: got %s ... %s, want CRIT first and UNKNOWN last", det[0].RuleID, det[len(det)-1].RuleID)
+	}
+}
+
 func TestInvalidRegexIsError(t *testing.T) {
 	_, err := NewEvaluator([]Rule{rule("BAD", "any", Condition{"content", OpRegex, `(?=lookahead)`})})
 	if err == nil {
