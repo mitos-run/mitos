@@ -517,6 +517,23 @@ type Options struct {
 	// snapshot restore. It is a no-op off Linux (userfaultfd write-protect is
 	// Linux-only); the path fails closed to the disk restore.
 	LiveCowFork bool
+	// LiveCowChildImport gates the VMSTATE-ONLY fork capture (issue #832): the
+	// paused-window optimization that FREEZES the armed source and writes ONLY the
+	// vmstate, SKIPPING the ~364ms guest-RAM `mem` file, on the promise that the
+	// co-located child boots its guest RAM from the source's shared memfd instead
+	// of the disk `mem`. That promise holds ONLY when a shipped child-side
+	// memfd-import Firecracker patch consumes FIRECRACKER_MITOS_CHILD_MEMFD. The
+	// currently shipped patched binary (mitos-fc-wp-on-restore) patches the SOURCE
+	// (restore) side ONLY, so a co-located child RESTORES FROM THE DISK fork
+	// snapshot; a vmstate-only snapshot has no `mem` file, so that child cannot
+	// restore and the fork hangs (the prod hang, children stuck Restoring). It
+	// therefore DEFAULTS false: forkSnapshotInstance keeps writing the disk `mem`
+	// (the Full path) even when the source is armed, so every co-located child is
+	// restorable and the fork never hangs. Turn it on ONLY once a child-side
+	// memfd-import binary is shipped and every co-located child imports the memfd.
+	// Independent of LiveCowFork so the source can be armed (freezer live) without
+	// yet skipping the disk mem.
+	LiveCowChildImport bool
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -619,6 +636,12 @@ type Stub struct {
 	// disk snapshot restore byte-for-byte; separate from multiVM so it canaries
 	// independently.
 	liveCowFork bool
+	// liveCowChildImport gates the vmstate-only fork capture (Options
+	// .LiveCowChildImport). Default false: forkSnapshotInstance keeps writing the
+	// disk `mem` file even when the source is armed, so the co-located child (which
+	// restores from the disk fork snapshot until a child-side memfd-import
+	// Firecracker patch ships) is always restorable and the fork never hangs.
+	liveCowChildImport bool
 	// liveCowParent is the armed parent-side live-cow WP handler for this pod's
 	// running source VM (milestone m5). When non-nil AND liveCowFork is on, a
 	// co-located fork child spawn imports its guest RAM from the parent's live
@@ -686,6 +709,7 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		egressBytes:        opts.EgressBytes,
 		multiVM:            opts.MultiVM,
 		liveCowFork:        opts.LiveCowFork,
+		liveCowChildImport: opts.LiveCowChildImport,
 	}
 	// Multi-VM scaffold (#764), default off: allocate the per-fork instance map
 	// ONLY when a caller opts in. No production caller sets MultiVM in increment

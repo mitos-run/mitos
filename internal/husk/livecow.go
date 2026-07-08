@@ -1,8 +1,10 @@
 package husk
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -228,6 +230,17 @@ func (s *Stub) armLiveCowSource(workDir string) []string {
 // copy-before-unprotect faults, and returns when the handler is Closed at teardown.
 func (s *Stub) serveLiveCowSource(handle fork.WPForkHandle) {
 	if err := handle.Receive(); err != nil {
+		// A closed-listener accept is the EXPECTED teardown path, not an arm failure:
+		// closeLiveCowSource (pod Close) closes the socket to unblock this Receive, and
+		// a warm pod that is recycled BEFORE it is ever claimed never had a source
+		// Firecracker restore to connect, so its accept unblocks with net.ErrClosed.
+		// Logging that at WARN as "handshake not received" wrongly implicated the fork
+		// path (the v1.32.2 prod log noise). Report it at debug; only a REAL handshake
+		// error (a connected-but-malformed offer, a bad export) stays a WARN.
+		if errors.Is(err, net.ErrClosed) {
+			slog.Debug("live-cow source arm socket closed before a source connected (teardown or unclaimed warm pod); no fork used it", "err", err)
+			return
+		}
 		slog.Warn("live-cow source arm incomplete: write-protect handshake not received; forks use the Full snapshot fallback",
 			"err", err)
 		return

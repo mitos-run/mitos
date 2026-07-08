@@ -292,7 +292,8 @@ running source VM: the freezer seam is no longer nil in production once the sour
 Firecracker completes the write-protect handshake. `forkSnapshotInstance`
 (`internal/husk/multivm.go`) therefore branches on the armed
 parent handle (`Stub.liveCowSnapshotFreezer`, gated on `--live-cow-fork` AND a
-parent that satisfies the `Freeze()` seam): inside the paused window it calls the
+parent that satisfies the `Freeze()` seam) AND on `--live-cow-child-import`
+(`Stub.liveCowChildImport`, see the child-restorability invariant below): inside the paused window it calls the
 handle's `Freeze()` (the m2 `UFFDIO_WRITEPROTECT`-all, microseconds) and then
 `vmm.CreateSnapshotVMStateOnly` (`internal/firecracker` PUT `/snapshot/create` with
 the Mitos `MitosVmstateOnly` type and NO `mem_file_path`), so NO `mem` file is
@@ -338,15 +339,36 @@ the source-arm gating and fail-safe are unit-tested
 vmstate-only Firecracker request is unit-tested in `internal/firecracker`
 `TestCreateSnapshotVMStateOnlyOmitsMemFile`.
 
-Pending (documented, not a gap in what ships): the vmstate-only capture is now
-reachable in production (the pinned `mitos-fc-vmstate-only-v1.15.0` Firecracker
-supports the `MitosVmstateOnly` snapshot mode and the m1/m2 parent share, and m6b
-arms the source), but a fork on this path writes NO `mem` file, so the co-located
-child MUST import its RAM from the parent memfd. The child-restore Firecracker patch
-(the m5 section above) is therefore the LAST prerequisite before `--live-cow-fork` is
-flipped on; until it ships the flag stays OFF (default) and every fork takes the
-Full-snapshot fallback. The source mem-write elimination and the child memfd import go
-live together.
+CHILD-RESTORABILITY INVARIANT (issue #832, the v1.32.2 prod hang fix): a fork
+snapshot MUST be restorable by the consumer that will boot from it. The co-located
+child (`SpawnVM` -> `activateInstance` -> `LoadSnapshotWithOverrides(mem, vmstate)`)
+RESTORES FROM THE DISK fork snapshot unless a CHILD-SIDE memfd-import Firecracker
+patch boots its guest RAM from the parent memfd. The shipped patched binary
+(`mitos-fc-wp-on-restore`) patches the SOURCE (restore) side ONLY: no child-side
+import exists, and `ComposeChildFromImport` has no production caller (it is exercised
+only by the KVM/unit tests). So the vmstate-only capture (NO `mem` file) leaves the
+co-located child with nothing to restore, and turning `--live-cow-fork` on hung every
+fork (children stuck `phase=Restoring` until the client 120s deadline: `FORKERR
+120.3` on the v1.32.2 canary), because the source armed and `forkSnapshotInstance`
+skipped the mem write while the child still restored from disk.
+
+The mem-skip is therefore gated on a SEPARATE capability, `--live-cow-child-import`
+(`Options.LiveCowChildImport`, DEFAULT OFF), NOT on `--live-cow-fork` alone.
+`forkSnapshotInstance` takes the vmstate-only path only when the source is armed AND
+child import is enabled; otherwise an ARMED source still writes the Full disk `mem`
+so every co-located child is restorable and the fork never hangs (the proven disk
+path, ~832ms). This splits arming the source (safe on its own: the freezer goes
+live, exercised on prod) from skipping the disk mem (safe only once a child-side
+import binary is shipped and every co-located child imports the memfd). Re-enabling
+`--live-cow-fork` is therefore safe on the shipped stack: the fork falls back Full
+and clean. `--live-cow-child-import` is flipped on ONLY once a child-side
+memfd-import Firecracker ships; the source mem-write elimination and the child memfd
+import go live together. Guarded by
+`TestForkSnapshotArmedSourceWritesMemWhenChildImportOff` (unit: an armed source with
+child import off writes the disk `mem`, is not frozen, records no `freeze` stage) and
+`TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM` (KVM: the prod
+restore->claim->arm->fork sequence, then a REAL co-located `SpawnVM` child restores
+and execs with no hang).
 
 ### Workspace resume from a memory snapshot
 
