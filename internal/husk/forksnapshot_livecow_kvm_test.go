@@ -422,37 +422,44 @@ func TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM(t *testing.T) {
 		armed, fres.Stages["create_snapshot"])
 }
 
-// TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM is the m5
-// real-KVM gate that closes the loop: with --live-cow-fork AND child import ON, a
-// co-located fork child BOOTS ITS GUEST RAM BY IMPORTING THE SOURCE MEMFD (the
-// patched child restore reads FIRECRACKER_MITOS_CHILD_MEMFD, MAP_PRIVATEs the
-// source's shared memfd, overlays the frozen pages, and loads NO disk mem file), so
-// the create_snapshot mem write disappears end to end and the fork still completes.
+// TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM is the
+// real-KVM gate that closes the loop AND proves the fork latency actually drops:
+// with --live-cow-fork AND child import ON, a co-located fork child BOOTS ITS GUEST
+// RAM BY LAZILY FAULTING IT IN FROM THE SOURCE MEMFD. The child restores through
+// Firecracker's NATIVE Uffd backend pointed at a husk-side handler socket (NO disk
+// mem file, NO FIRECRACKER_MITOS_CHILD_MEMFD env): the handler serves each faulting
+// page from the source memfd + FROZEN overlay ON DEMAND, so the child copies only
+// its working set (a few MiB) instead of eagerly copying all 256MiB.
 //
 // This is the half TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM
 // deliberately leaves off: that test proves the SAFE fallback (child import OFF ->
 // source writes the disk mem -> child restores from disk, no hang). Here child
 // import is ON, so the source writes NO mem file and the ONLY way the co-located
-// child can boot is by importing the source memfd. It asserts, end to end on KVM:
+// child can boot is by faulting its guest RAM from the source memfd. It asserts,
+// end to end on KVM:
 //   - (VMSTATE ONLY) the fork wrote NO `mem` file (the ~364ms guest-RAM write is
 //     gone) and create_snapshot is sub-15ms;
-//   - (CHILD IMPORTS, BOOTS, NO DISK MEM) a real co-located SpawnVM child restores
-//     from the fork snapshot that has NO mem file and still boots + execs within a
-//     bounded deadline: it can only have taken its guest RAM from the source memfd;
+//   - (CHILD LAZILY FAULTS, BOOTS, NO DISK MEM) a real co-located SpawnVM child
+//     restores from the fork snapshot that has NO mem file and still boots + execs
+//     within a bounded deadline: it can only have taken its guest RAM from the
+//     source memfd via the lazy UFFD handler;
+//   - (LATENCY DROPS) the child's vmstate_restore stage is SMALL (well below 100ms),
+//     NOT the ~391ms the EAGER 256MiB child copy cost: this is the whole point of the
+//     lazy import, that the vmstate-only source win is finally realized end to end;
 //   - (FORK COMPLETES) SpawnVM returns OK (no hang, the v1.32.2 prod failure mode);
 //   - (FORK-TIME MEMORY, NO LEAK) when the restored source can exec, a fork-time
 //     sentinel planted in guest tmpfs is read back by the child as its FORK-TIME
 //     value even after the resumed source overwrites it, so the source's post-fork
-//     write is write-protect-frozen and never leaks into the child (the m2
-//     invariant, observed through the real guest).
+//     write is write-protect-frozen and served from FROZEN at fault time, never
+//     leaking into the child (the m2 invariant, observed through the real guest).
 //
 // GATING: skips on no /dev/kvm, no assets, race detector, or a source that does not
 // arm the write-protect handshake (unpatched / uffd-less runner), exactly like the
-// sibling tests. The child-import boot additionally needs the m5 patched binary; a
-// child that cannot boot from the memfd SKIPS unless
-// MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT is set (the firecracker-test job sets it
-// once the re-pinned child-import binary is installed), so an old patched binary is
-// never a false pass and the shipped binary is never a false skip.
+// sibling tests. The child boots through Firecracker's STOCK Uffd backend (no child
+// patch), so a child that cannot boot lazily (e.g. a runner that blocks the child's
+// userfaultfd) SKIPS unless MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT is set (the
+// firecracker-test job sets it once the runner's userfaultfd is reachable), so a
+// gap is never a false pass and a capable runner is never a false skip.
 func TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM(t *testing.T) {
 	if raceDetectorEnabled {
 		t.Skip("skipping live-cow child-import KVM test under -race (WP handshake is timing-sensitive; firecracker-test runs it without -race)")
@@ -596,12 +603,12 @@ func TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM(t *testi
 		}
 	}
 
-	// (CHILD IMPORTS, BOOTS, NO DISK MEM) spawn a real co-located child from the
-	// mem-less fork snapshot. With child import ON and the source armed, SpawnVM sets
-	// FIRECRACKER_MITOS_CHILD_MEMFD on the child from the armed handle's ChildImport,
-	// so the patched child restore imports the source memfd instead of a disk mem file
-	// (there is none). On the v1.32.2 prod binary (no child-import patch) this HANGS;
-	// with the m5 binary it boots.
+	// (CHILD LAZILY FAULTS, BOOTS, NO DISK MEM) spawn a real co-located child from the
+	// mem-less fork snapshot. With child import ON and the source armed, SpawnVM
+	// restores the child through Firecracker's NATIVE Uffd backend pointed at a
+	// husk-side handler (from the armed handle's ChildImport), so the child faults its
+	// guest RAM from the source memfd + FROZEN overlay ON DEMAND instead of a disk mem
+	// file (there is none). No child Firecracker patch is needed (stock Uffd backend).
 	spawnCtx, spawnCancel := context.WithTimeout(ctx, 60*time.Second)
 	defer spawnCancel()
 	childRes := src.SpawnVM(spawnCtx, SpawnVMRequest{
@@ -610,9 +617,9 @@ func TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM(t *testi
 	})
 	if !childRes.OK {
 		if requireChildImport {
-			t.Fatalf("live-cow child-import e2e (strict, MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT set): co-located child must boot BY IMPORTING THE SOURCE MEMFD from the mem-less fork snapshot, got: %+v. The pinned Firecracker must honor FIRECRACKER_MITOS_CHILD_MEMFD (m5)", childRes)
+			t.Fatalf("live-cow child-import e2e (strict, MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT set): co-located child must boot BY LAZILY FAULTING THE SOURCE MEMFD from the mem-less fork snapshot, got: %+v. Firecracker's native Uffd restore backend + the husk lazy handler must serve the child's guest RAM", childRes)
 		}
-		t.Skipf("skipping live-cow child-import e2e: co-located child did not boot from the source memfd (runner Firecracker lacks the m5 child-import patch); the mem-less fork is only bootable by import: %+v", childRes)
+		t.Skipf("skipping live-cow child-import e2e: co-located child did not boot by lazy UFFD from the source memfd (runner Firecracker Uffd backend or child userfaultfd unavailable); the mem-less fork is only bootable by import: %+v", childRes)
 	}
 	// A child that boots from a mem-less fork snapshot proves it read NO disk mem file
 	// (there is none) and took its guest RAM from the imported source memfd.
@@ -630,6 +637,22 @@ func TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM(t *testi
 		t.Fatalf("co-located child imported the source memfd and restored but could not exec (a corrupt/incoherent RAM import would not boot a working guest): %v", err)
 	}
 
+	// (LATENCY DROPS) the whole point of the lazy import: the child's vmstate_restore
+	// must be SMALL, not the ~391ms the EAGER 256MiB child copy cost. The lazy UFFD
+	// load returns as soon as the device-restore faults are served (a few pages), and
+	// the guest faults the rest of its working set on demand after resume, so
+	// vmstate_restore drops back to the low-tens-of-ms it was before the eager copy.
+	// A stage at or above 100ms means the child still copied its whole guest RAM
+	// up front (the eager path), which would make the vmstate-only source win
+	// latency-neutral, the exact failure this change fixes.
+	childRestoreMs, ok := childRes.Stages["vmstate_restore"]
+	if !ok {
+		t.Fatalf("co-located child spawn result missing vmstate_restore stage; got %v", childRes.Stages)
+	}
+	if childRestoreMs >= 100 {
+		t.Fatalf("child vmstate_restore = %.3fms, want well below 100ms (lazy UFFD faults only the working set; >=100ms means the child eagerly copied all %dMiB, leaving the fork latency-neutral)", childRestoreMs, memMiB)
+	}
+
 	// (FORK-TIME MEMORY, NO LEAK) the child must read the sentinel at its FORK-TIME
 	// value, never the source's post-fork overwrite. Hard when the sentinel was
 	// planted; a corrupt import or a leaked source write would fail here.
@@ -645,8 +668,8 @@ func TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM(t *testi
 		}
 	}
 
-	t.Logf("m5 live-cow child-import PASS: vmstate-only fork wrote NO mem file; create_snapshot=%.3fms freeze=%.3fms (vs ~364ms Full mem write); co-located child BOOTED BY IMPORTING THE SOURCE MEMFD (%dMiB) and execed with no hang; sentinelPlanted=%v sourceOverwrote=%v (child read fork-time value, no leak)",
-		fres.Stages["create_snapshot"], fres.Stages["freeze"], memMiB, sentinelPlanted, sourceOverwrote)
+	t.Logf("live-cow lazy child-import PASS: vmstate-only fork wrote NO mem file; create_snapshot=%.3fms freeze=%.3fms (vs ~364ms Full mem write); co-located child LAZILY FAULTED its guest RAM from the source memfd (%dMiB) with child vmstate_restore=%.3fms (vs ~391ms eager copy) and execed with no hang; sentinelPlanted=%v sourceOverwrote=%v (child read fork-time value, no leak)",
+		fres.Stages["create_snapshot"], fres.Stages["freeze"], memMiB, childRestoreMs, sentinelPlanted, sourceOverwrote)
 }
 
 // fullPathRestoredSourceSurvivesFork stands up a SECOND source with live-cow OFF (the

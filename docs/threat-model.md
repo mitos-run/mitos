@@ -645,6 +645,66 @@ Trust and residual, stated honestly:
   (default OFF): with the flag off the source still writes the disk mem and the child
   restores from disk, so a pod running the m5 binary with the flag off is byte-for-byte
   the disk co-location.
+- LAZY child import (the fork-latency fix). The eager child copy above skips the
+  ~364ms source mem-file write but then EAGERLY copies the whole guest RAM (e.g.
+  256MiB) into the child's anonymous RAM at restore, so the child `vmstate_restore`
+  grows from ~20ms to ~391ms and the vmstate-only fork is latency-NEUTRAL: the cost
+  just moves from the source to the child. The husk now imports the child's guest RAM
+  LAZILY instead: it restores the co-located child through Firecracker's NATIVE
+  userfaultfd memory backend (`mem_backend.backend_type=Uffd`, stock Firecracker, NO
+  child patch and NO `FIRECRACKER_MITOS_CHILD_MEMFD` env), pointing `/snapshot/load`
+  at a husk-side handler socket, and a new handler
+  (`internal/fork/childuffd*.go`, `fork.StartChildUFFDHandler`, driven by
+  `Stub.loadSnapshotChildUFFD`) fills each faulting guest page ON DEMAND. The child
+  therefore copies only the pages its working set touches (a few MiB), so its restore
+  drops back to milliseconds and the source-side win is finally realized end to end.
+  Trust and residual, stated honestly:
+  - The handler reads ONLY the parent's own m1-exported guest memfd, this pod's
+    PRIVATE FROZEN memfd, and this pod's LIVE frozen-bitmap memfd, each opened through
+    the SAME identity-verified `/proc/<pid>/fd/<fd>` reopen the eager import uses
+    (`openProcFdVerified`: the target must be a memfd of the expected name with a
+    matching `(st_ino, st_dev)`, so a recycled PID fails closed). It maps the parent
+    memfd READ-ONLY (`MAP_SHARED` `PROT_READ`), so it opens no write channel into the
+    source, and writes ONLY into the guest RAM Firecracker registered, via
+    `UFFDIO_COPY` of a private staging page it composed. It makes NO host-path write.
+  - Its only external input is the region layout Firecracker itself sends over the
+    PRIVATE per-VM backend socket plus the uffd (`SCM_RIGHTS`), the same
+    `GuestRegionUffdMapping` handshake the issue #167 UFFD restore backend already
+    uses. The socket is host-local and per-VM (a fixed-length 64-bit vmID hash under
+    the pod workdir, so two co-located children never collide on one socket), not
+    reachable by the guest; it adds NO new tenant-facing input. Because this socket IS
+    the child's memory backend, `Receive` accepts ONLY the expected peer: it checks the
+    connecting process's `SO_PEERCRED` uid against the husk's own uid (the child
+    Firecracker runs as that uid) and fails closed on a mismatch, so a hostile local
+    process that raced the real child to connect cannot supply its own uffd + regions
+    and drive `UFFDIO_COPY` into memory it controls.
+  - NO LEAK, checked PER FAULT: for each faulting page the handler consults the LIVE
+    frozen bit AT FAULT TIME. A frozen page is served from FROZEN at its fork-time
+    value; a not-yet-frozen page is served from the live source memfd (still the
+    fork-time value, because the WP handler freezes a page BEFORE it lets the source's
+    write land), then the bit is RE-CHECKED after the live read and, if it flipped, the
+    page is overridden from FROZEN. So a resumed source's post-fork overwrite is always
+    served as its fork-time value, never the mutated value, closing the leak window the
+    eager copy avoided by privatizing everything up front. The point-in-time-T
+    inheritance + no-leak is unit-tested over a real userfaultfd in
+    `TestChildUFFDLazyImportComposesAndNoLeak` and end to end on KVM in
+    `TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM` (child boots
+    from the source memfd with NO disk mem, child `vmstate_restore` well below 100ms,
+    fork-time sentinel read back after the source overwrote it).
+  - Fail-closed: the lazy path is taken ONLY when the source armed AND
+    `LiveCowChildImport` is on. On THAT path the fork went vmstate-only and wrote NO
+    disk mem, so there is NO disk fallback: any handshake, handler-start, or load
+    failure FAILS THE SPAWN (`OK=false`) rather than serving a half-restored guest, and
+    no wait hangs (the load, the handshake, and the Serve result all race so any one
+    failing unblocks the rest). The disk-mem restore is the fallback only where a mem
+    file EXISTS, i.e. when child-import is OFF: then the source wrote a Full fork
+    snapshot with a `mem` file and the child restores from it byte-for-byte (the
+    `TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM` posture). A non-Linux
+    host (`StartChildUFFDHandler` returns `ErrChildUFFDUnsupported`) or a pod with no
+    armed parent never sets the plan, so it takes that same disk restore. The handler
+    is Closed at instance teardown (`closeInstanceBody`), AFTER the child Firecracker is
+    gone, and Close WAITS for any in-flight fault (a `serveMu` write lock) before it
+    munmaps the source views, so a fault never dereferences an unmapped view.
 - Source-side arming (milestone m6b): the parent-side handler is now BOUND to the
   running source VM in production. When a source (default) VM launches under
   `--live-cow-fork` with a real workdir, `prepareInstance` calls

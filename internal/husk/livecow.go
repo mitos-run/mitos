@@ -3,6 +3,7 @@ package husk
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net"
 	"os"
@@ -105,6 +106,73 @@ func (s *Stub) liveCowChildImportEnv(req ActivateRequest) ([]string, error) {
 		return nil, fmt.Errorf("live-cow child import: write export %s: %w", exportPath, err)
 	}
 	return fork.ChildMemfdEnv(exportPath), nil
+}
+
+// liveCowChildUFFDPlan assembles the LAZY UFFD import plan a co-located fork child
+// Firecracker must be launched with so it faults its guest RAM in ON DEMAND from
+// the parent's live shared memfd (composed per page with the FROZEN overlay)
+// through Firecracker's NATIVE Uffd restore backend, instead of eagerly copying the
+// whole guest RAM (the shipped child-memfd-import path) or reading a disk mem file.
+// This is the fork-latency fix (childuffd.go): the child restore drops back to
+// milliseconds because it copies only the working set, not all 256MiB.
+//
+// It returns:
+//   - (plan, nil) when an armed live-cow parent published a child import: the child
+//     restores through the Uffd backend on plan.sockPath, and the husk-side handler
+//     serves faults from the source memfd + FROZEN overlay;
+//   - (nil, nil) when no live-cow parent is armed: the child restores from disk;
+//   - (nil, err) on a real failure assembling the import: SpawnVM logs and falls
+//     back to the disk restore, so the flag never breaks a fork (fail-closed).
+func (s *Stub) liveCowChildUFFDPlan(id vmID, req ActivateRequest) (*lazyChildUFFDPlan, error) {
+	// Read the armed parent under s.mu (see liveCowChildImportEnv): an interface value
+	// is two words, so an unsynchronized read of a concurrently armed parent tears.
+	s.mu.Lock()
+	parent := s.liveCowParent
+	s.mu.Unlock()
+	if parent == nil {
+		return nil, nil
+	}
+	if req.SnapshotDir == "" {
+		return nil, fmt.Errorf("live-cow child uffd: empty snapshot dir")
+	}
+	imp, err := parent.ChildImport(req.SnapshotDir)
+	if err != nil {
+		return nil, fmt.Errorf("live-cow child uffd: %w", err)
+	}
+	sockPath, err := s.childUFFDSockPath(id)
+	if err != nil {
+		return nil, fmt.Errorf("live-cow child uffd: %w", err)
+	}
+	return &lazyChildUFFDPlan{imp: imp, sockPath: sockPath}, nil
+}
+
+// sunPathMax is the AF_UNIX sun_path capacity (sizeof(sockaddr_un.sun_path)) on
+// Linux: a bind/connect to a longer absolute path is truncated/rejected, so the
+// child UFFD backend socket path MUST fit. 108 bytes INCLUDING the NUL terminator,
+// so the usable path is at most 107 bytes.
+const sunPathMax = 108
+
+// childUFFDSockPath returns the backend unix socket path a co-located fork child's
+// lazy UFFD restore connects to. It lives in the POD workdir (not the child's
+// nested per-VM workdir) under a FIXED-LENGTH hashed name so the absolute path stays
+// as short as possible for a long vmID. The name uses a 64-bit vmID hash (16 hex
+// digits) so two co-located children in one pod do not collide on the same socket
+// (a 32-bit hash could, and a collision would let one child unlink or misroute a
+// sibling child's memory backend). It FAILS CLOSED when the pod workdir is empty (no
+// place to bind, the unit path) or when the resulting absolute path would exceed the
+// AF_UNIX sun_path limit, so a too-long workdir never silently binds a truncated
+// path the child cannot reach.
+func (s *Stub) childUFFDSockPath(id vmID) (string, error) {
+	if s.cfg.WorkDir == "" {
+		return "", fmt.Errorf("no pod workdir to bind the child uffd socket")
+	}
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(id))
+	sock := filepath.Join(s.cfg.WorkDir, fmt.Sprintf("cu-%016x.sock", h.Sum64()))
+	if len(sock) >= sunPathMax {
+		return "", fmt.Errorf("child uffd socket path %d bytes exceeds the AF_UNIX sun_path limit %d (pod workdir too long)", len(sock), sunPathMax)
+	}
+	return sock, nil
 }
 
 // LiveCowForkEnabled reports whether this pod was started with the live-cow fork

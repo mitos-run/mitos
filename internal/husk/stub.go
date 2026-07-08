@@ -100,6 +100,29 @@ type vmInstance struct {
 	rootfsClonePath string
 	activeTap       string
 	dnsProxy        *dnsproxy.Server
+
+	// childUFFDPlan carries a co-located live-cow fork child's LAZY UFFD import
+	// intent from SpawnVM to activateInstance: the ChildMemfdImport coordinates (the
+	// source memfd + FROZEN overlay + live bitmap) and the backend socket path.
+	// activateInstance consumes it at the load step to restore through Firecracker's
+	// native Uffd backend (faulting the working set in on demand) instead of a disk
+	// mem file. Nil keeps the disk restore. Set + read under inst.mu.
+	childUFFDPlan *lazyChildUFFDPlan
+	// childUFFD is the live lazy-UFFD handler serving this instance's guest-memory
+	// faults for the life of the child, retained so teardown Closes it (which unblocks
+	// its Serve loop and munmaps the source views). Nil on the disk-restore path.
+	childUFFD fork.ChildUFFDHandle
+}
+
+// lazyChildUFFDPlan is the co-located live-cow fork child's lazy-UFFD import
+// intent. imp is the armed parent handle's ChildImport (the source shared memfd,
+// the FROZEN memfd, and the LIVE frozen bitmap memfd, each identity-verified);
+// sockPath is the backend unix socket the child Firecracker's Uffd restore backend
+// connects to. Built by SpawnVM on the armed child-import path and consumed once by
+// activateInstance.
+type lazyChildUFFDPlan struct {
+	imp      fork.ChildMemfdImport
+	sockPath string
 }
 
 // newVMInstance builds a fresh per-VM instance in StateNew. It is the
@@ -119,6 +142,16 @@ type vmm interface {
 	// (PatchDrive) while the VM is PAUSED, before the guest can write anything,
 	// then resumes explicitly via Resume.
 	LoadSnapshotWithOverrides(mem, snapshot string, resume bool, overrides []firecracker.NetworkOverride) error
+	// LoadSnapshotUFFD loads a snapshot through Firecracker's native userfaultfd
+	// memory backend: instead of a mem file it points /snapshot/load at
+	// uffdSocketPath, a unix socket an external handler is already listening on, so
+	// Firecracker creates the guest userfaultfd and hands it to the handler over the
+	// socket. Always loads PAUSED. The live-cow lazy child import uses it so a
+	// co-located fork child faults its guest RAM in on demand (composed from the
+	// source memfd + FROZEN overlay) instead of restoring a disk mem file. The
+	// vmstate-only fork writes no mem file, so this is the ONLY memory backend a
+	// child-import spawn can take.
+	LoadSnapshotUFFD(snapshot, uffdSocketPath string, overrides []firecracker.NetworkOverride) error
 	// VsockHostPath resolves a relative vsock uds_path to its host location.
 	VsockHostPath(rel string) string
 	// PatchDrive rebinds an existing baked drive (by drive id) to a host backing
