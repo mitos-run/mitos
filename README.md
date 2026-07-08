@@ -155,7 +155,7 @@ Homebrew, deb/rpm, scoop/winget, checksums) is in
 kubectl apply -k deploy/
 ```
 
-The self-contained kustomize base installs the CRDs, the controller (husk mode), the forkd DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`. The Helm chart is published at `https://mitos.run/charts` (`helm repo add mitos https://mitos.run/charts`); see [deploy/charts/mitos](deploy/charts/mitos/README.md). Then declare a warm pool, and fork from it with a `Sandbox` whose `source.fromSandbox` points at a live session ([templates](docs/templates.md)):
+The self-contained kustomize base installs the CRDs, the controller (husk mode), the forkd DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`. The Helm chart is published to the OCI registry on GHCR: `helm install mitos oci://ghcr.io/mitos-run/charts/mitos --version 1.25.0`; see [deploy/charts/mitos](deploy/charts/mitos/README.md). Then declare a warm pool, and fork from it with a `Sandbox` whose `source.fromSandbox` points at a live session ([templates](docs/templates.md)):
 
 ```yaml
 apiVersion: mitos.run/v1
