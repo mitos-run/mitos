@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -168,7 +169,24 @@ func (k *K8sControlPlane) fork(ctx context.Context, req saas.ForwardRequest) (sa
 		}
 	}
 
-	return k.pollReady(ctx, ns, name, startedAt)
+	// Timing split for the fork latency investigation. submitToCreateMs is the
+	// control plane's own cost to persist the fork Sandbox (request receipt to a
+	// successful Create); submitToReadyMs is the full server-side wall the client
+	// waits on (request receipt to the ready watch observing the child Ready), so
+	// the difference is the controller scheduling + fork work + watch delivery.
+	// This is the authoritative, client-correlated server-side fork latency: it
+	// does NOT depend on the controller's "fork timing complete" totalMs, which
+	// measures to the end of the reconcile pass and overstates the client-observed
+	// latency (it can keep counting after the ready watch already returned).
+	// Purely observational: it does not change the fork control flow.
+	createdAt := k.now()
+	resp, err := k.pollReady(ctx, ns, name, startedAt)
+	slog.Info("fork served",
+		"sandbox", name,
+		"submitToCreateMs", createdAt.Sub(startedAt).Milliseconds(),
+		"submitToReadyMs", k.now().Sub(startedAt).Milliseconds(),
+	)
+	return resp, err
 }
 
 // forkSourceID extracts the SOURCE sandbox id from a fork path
