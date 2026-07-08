@@ -45,7 +45,20 @@ const defaultDeviceCount = 100
 // /dev/net/tun: forkd is non-privileged and receives devices only from this
 // plugin, so omitting vhost-vsock makes every fork boot a VM whose guest-agent
 // vsock transport never comes up, and the fork hangs. Do not drop it.
-const defaultDevicePaths = "/dev/kvm,/dev/net/tun,/dev/vhost-vsock"
+//
+// /dev/userfaultfd is injected so the live-cow write-protect fork works on a
+// non-privileged husk pod (issue #832). The patched restore path creates its
+// write-protect userfaultfd via the /dev/userfaultfd device (the userfaultfd
+// crate's device path: open + USERFAULTFD_IOC_NEW), NOT the userfaultfd(2)
+// syscall. The syscall is unreachable in the pod because the container
+// RuntimeDefault seccomp profile denies userfaultfd(2) with EPERM even when
+// CAP_SYS_PTRACE is present (CAP_SYS_PTRACE only satisfies the kernel gate, not
+// the seccomp gate). Injecting the device gives the device-cgroup allow the
+// crate needs and matches what the firecracker-test CI has always proven; the
+// ioctl device path is permitted by the same seccomp profile. Every KVM node
+// runs a kernel that exposes /dev/userfaultfd (present since 6.1), the same
+// homogeneous-node assumption /dev/vhost-vsock already relies on.
+const defaultDevicePaths = "/dev/kvm,/dev/net/tun,/dev/vhost-vsock,/dev/userfaultfd"
 
 func main() {
 	var (
@@ -57,7 +70,7 @@ func main() {
 	)
 	flag.StringVar(&resourceName, "resource-name", "mitos.run/kvm", "Extended resource name the plugin advertises; pods request it under resources.limits")
 	flag.IntVar(&deviceCount, "device-count", 0, "Number of synthetic device slots to advertise when /dev/kvm is present; 0 means auto (a sane default). /dev/kvm is shareable, so this is a soft per-node concurrency cap, not a physical device count")
-	flag.StringVar(&devicePaths, "device-paths", defaultDevicePaths, "Comma-separated host device nodes injected into a requesting container on Allocate (each at the same container path, rw). Includes /dev/vhost-vsock: forkd is non-privileged and needs the host vsock device to build the guest-agent transport, so a fork without it boots a VM that never reaches Ready and hangs.")
+	flag.StringVar(&devicePaths, "device-paths", defaultDevicePaths, "Comma-separated host device nodes injected into a requesting container on Allocate (each at the same container path, rw). Includes /dev/vhost-vsock (forkd needs the host vsock device to build the guest-agent transport) and /dev/userfaultfd (the live-cow write-protect fork creates its userfaultfd via the device path because the container seccomp profile denies the userfaultfd(2) syscall; issue #832).")
 	flag.StringVar(&kubeletDir, "kubelet-dir", "/var/lib/kubelet/device-plugins", "Kubelet device-plugins directory: the plugin serves its socket here and dials the kubelet registry socket (kubelet.sock) here")
 	flag.StringVar(&kvmDevicePath, "kvm-device-path", defaultKVMDevicePath, "Container path the plugin stat(2)s to decide whether KVM is present; the DaemonSet mounts the host /dev read-only here (not over the container /dev)")
 	flag.Parse()

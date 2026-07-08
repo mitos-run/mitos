@@ -123,7 +123,7 @@ open, with a severity on the review rows) is preserved throughout.
 |---|---|---|---|
 | Guest workload | VM guest, untrusted | nothing | nobody |
 | Guest agent - Rust (`guest/agent-rs`) | PID 1 in guest; the SOLE production agent since Phase E (#310). Baked as `/init` by `guest/rootfs/build.sh` and `kvm-test.yaml`. Serves ONLY gRPC on vsock port 53 (AgentGRPCPort); all host callers speak gRPC (SP1.5 merged, Go agent and legacy JSON protocol removed). SECURITY-SENSITIVE: requires named human reviewer; see `docs/security-review-policy.md`. | nothing | forkd / husk stub (gRPC, port 53) |
-| husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps and add only `NET_ADMIN` (in-pod egress firewall, scoped to the pod netns), plus `SYS_PTRACE` ONLY on a live-cow pool (see below), `seccomp: RuntimeDefault`, read-only snapshot mount; the long-lived husk-stub container is NOT privileged | controller (mTLS control channel) | controller |
+| husk pod stub (`cmd/husk-stub`), the DEFAULT runner | unprivileged pod, `/dev/kvm` via device plugin (not `privileged`), drop ALL caps and add only `NET_ADMIN` (in-pod egress firewall, scoped to the pod netns), `seccomp: RuntimeDefault`, read-only snapshot mount; on a live-cow pool the kvm device plugin also injects `/dev/userfaultfd` (see below), no extra capability; the long-lived husk-stub container is NOT privileged | controller (mTLS control channel) | controller |
 | husk `enable-ip-forward` init container (name-egress pools only) | short-lived PRIVILEGED init container on the husk pod; writes `net.ipv4.ip_forward=1` in the shared pod netns and exits BEFORE the workload runs; added only when name-based egress is configured (`--husk-dns-upstream` set) | controller (it is part of the pod spec) | controller |
 | forkd (`cmd/forkd`), the snapshot BUILDER and the raw-forkd fallback | NON-privileged DaemonSet pod (uid 0, `privileged: false`, `allowPrivilegeEscalation: false`, `seccomp: RuntimeDefault`): drops ALL capabilities and adds back ONLY the explicit builder set (`SYS_ADMIN`, `CHOWN`, `SETUID`, `SETGID`, `MKNOD` for the jailer, plus `NET_ADMIN` for the build-time placeholder tap and `DAC_OVERRIDE` so the builder can reopen the template `rootfs.ext4` it wrote after the jailer chowned the shared inode to the per-VM uid, #426; `cmd/forkd/jailer.go` `forkdRequiredCapabilities`). `DAC_OVERRIDE` is negligible marginal authority next to the `CAP_SYS_ADMIN` the builder already holds. The per-VM jailer is ENABLED in the shipped DaemonSet (`deploy/daemon/daemonset.yaml`: `--jailer`/`--chroot-base`/`--uid-range`), so every build/raw-forkd VM runs under a dedicated uid/gid in a per-VM chroot. `/dev/kvm` and `/dev/net/tun` come from the device plugin (`mitos.run/kvm`), NOT a privileged hostPath. (#352) | controller | controller, nodes |
 | controller (`cmd/controller`) | cluster Deployment, CRD + Secrets RBAC | kube-apiserver | forkd, husk pods |
@@ -171,24 +171,33 @@ privileged process and RUN many times by unprivileged pods.
   in the shared pod netns and exits before the workload runs (surface 5); it is
   privileged but one-shot, and the long-lived husk-stub container itself stays
   unprivileged (`NET_ADMIN` only).
-- **Live-cow pools add `CAP_SYS_PTRACE` to the husk-stub, scoped to the pool
-  (issue #832).** The live-cow write-protect fork needs the source Firecracker to
-  create a KERNEL-MODE userfaultfd over its guest RAM (so the KVM guest's own
-  writes fault to the copy-before-unprotect handler). From an unprivileged
-  container the `userfaultfd(2)` syscall for a kernel-mode uffd is gated by
-  `CAP_SYS_PTRACE` (the same check as `sysctl vm.unprivileged_userfaultfd`);
-  `/dev/userfaultfd` is not injected into the pod, so the syscall path is the one
-  used. The controller adds `SYS_PTRACE` to `capabilities.add` ONLY when the pool
-  runs `--live-cow-fork` (`internal/controller/huskpod.go`); a pool that does not
-  use live-cow keeps the minimal `NET_ADMIN`-only set. Blast radius: the capability
-  is confined to the pod (not `privileged`, not `hostPID`, `seccomp: RuntimeDefault`),
-  so the stub can ptrace only processes in its own pod, which it already fully
-  controls; it grants no host, node, or cross-pod authority. It is the fourth
-  documented PSA exception and is added only on the pools that opt into the
-  write-protect fork. Deploy note: the KVM node must permit a kernel-mode
-  userfaultfd (the `CAP_SYS_PTRACE` grant suffices; alternatively a node
-  `vm.unprivileged_userfaultfd=1` sysctl), else the source falls back to the Full
-  snapshot fork (no correctness loss, only the 364ms capture returns).
+- **Live-cow pools get `/dev/userfaultfd` injected by the kvm device plugin, no
+  extra capability (issue #832).** The live-cow write-protect fork needs the source
+  Firecracker to create a KERNEL-MODE userfaultfd over its guest RAM (so the KVM
+  guest's own writes fault to the copy-before-unprotect handler). The patched
+  restore path creates that userfaultfd via the `/dev/userfaultfd` DEVICE (the
+  `userfaultfd` crate's device path: `open` + `USERFAULTFD_IOC_NEW`), NOT the
+  `userfaultfd(2)` syscall. The syscall is unreachable from the husk pod: the
+  container `RuntimeDefault` seccomp profile denies `userfaultfd(2)` with `EPERM`
+  even when `CAP_SYS_PTRACE` is present (reproduced under the exact pod
+  securityContext: root + `CAP_SYS_PTRACE` + `RuntimeDefault` seccomp returns
+  `EPERM`; only `seccomp=unconfined` lets the syscall through). `CAP_SYS_PTRACE`
+  satisfies only the kernel gate (`sysctl vm.unprivileged_userfaultfd`), never the
+  seccomp gate, so the earlier scoped `CAP_SYS_PTRACE` grant never armed a real
+  prod source and is REMOVED. Instead the kvm device plugin (`mitos.run/kvm`)
+  injects `/dev/userfaultfd` alongside `/dev/kvm`, `/dev/net/tun`, and
+  `/dev/vhost-vsock` (`cmd/kvm-device-plugin`, `deploy/charts/mitos/templates/device-plugin-daemonset.yaml`);
+  the device plugin sets the device-cgroup allow a plain hostPath cannot, and the
+  ioctl device path is permitted by the same `RuntimeDefault` seccomp profile. This
+  matches what the `firecracker-test` CI has always proven (it creates the source's
+  uffd via `/dev/userfaultfd`). Blast radius: `/dev/userfaultfd` is a benign misc
+  device that only lets the holder create userfaultfds within its own address
+  space; it grants no host, node, or cross-pod authority, strictly less than the
+  removed `CAP_SYS_PTRACE`, and the husk-stub keeps the minimal `NET_ADMIN`-only
+  capability set. It is injected on every KVM husk pod (the same homogeneous-node
+  device set as `/dev/vhost-vsock`); a node whose kernel lacks `/dev/userfaultfd`
+  (pre-6.1) would fall back to the Full snapshot fork (no correctness loss, only
+  the 364ms capture returns).
 - **forkd-the-builder is the residual host privilege, but it is no longer a
   privileged container (#352).** Building a template snapshot still needs
   `/dev/kvm` and the jailer, so forkd remains the privileged BUILDER role on the

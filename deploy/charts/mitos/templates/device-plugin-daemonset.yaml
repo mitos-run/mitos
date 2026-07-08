@@ -41,7 +41,13 @@ spec:
             # /dev/vhost-vsock is required: forkd is non-privileged and gets its
             # devices only from this plugin, so without it a fork boots a VM whose
             # guest-agent vsock transport never comes up and the fork hangs.
-            - --device-paths=/dev/kvm,/dev/net/tun,/dev/vhost-vsock
+            # /dev/userfaultfd lets the live-cow write-protect fork arm on a
+            # non-privileged husk pod (issue #832): the patched restore path
+            # creates its userfaultfd via the device (open + ioctl), because the
+            # container seccomp profile denies the userfaultfd(2) syscall even
+            # with CAP_SYS_PTRACE. This is the device path the firecracker-test
+            # CI has always proven.
+            - --device-paths=/dev/kvm,/dev/net/tun,/dev/vhost-vsock,/dev/userfaultfd
             - --kubelet-dir=/var/lib/kubelet/device-plugins
             # Probe the host /dev/kvm at /host-dev/kvm: the host /dev is mounted
             # read-only at /host-dev, NOT over the container's own /dev.
