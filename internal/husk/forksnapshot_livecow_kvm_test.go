@@ -832,11 +832,27 @@ func TestPrewarmedLiveCowChildImportNoLeakKVM(t *testing.T) {
 	}
 
 	// EAGERLY pre-warm the dormant child BEFORE the fork, so the fork adopts it.
+	// The source activation above ALSO kicks an eager warm (eagerPrewarmChildAsync),
+	// and warmPrewarmChild is single-flight, so this explicit PrewarmChild can return
+	// while that in-flight warm is still finishing (the slot momentarily reads new).
+	// A racing fork just misses and boots on demand in prod; here we need the adopt
+	// path, so wait for the slot to actually reach dormant before forking.
 	if err := src.PrewarmChild(ctx); err != nil {
 		t.Fatalf("PrewarmChild must boot a dormant child: %v", err)
 	}
-	if got := src.instances[prewarmSlotVMID].state; got != StateDormant {
-		t.Fatalf("pre-warmed slot state = %s, want dormant before the fork", got)
+	var slotState State
+	warmDeadline := time.Now().Add(20 * time.Second)
+	for {
+		if inst := src.instances[prewarmSlotVMID]; inst != nil {
+			slotState = inst.state
+		}
+		if slotState == StateDormant || time.Now().After(warmDeadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if slotState != StateDormant {
+		t.Fatalf("pre-warmed slot state = %s, want dormant before the fork", slotState)
 	}
 
 	// Fork down the vmstate-only path (freeze + vmstate, NO mem file).
