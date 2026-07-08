@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -155,7 +156,7 @@ func StartVM(cfg VMConfig) (*Client, error) {
 		},
 	}
 
-	if err := client.waitReady(5 * time.Second); err != nil {
+	if err := client.waitReady(readyTimeoutFor(5 * time.Second)); err != nil {
 		_ = cmd.Process.Kill()
 		// Reap the failed launch so it does not linger as a zombie (I2).
 		_ = cmd.Wait()
@@ -280,7 +281,7 @@ func startJailedVM(cfg VMConfig) (*Client, error) {
 		},
 	}
 
-	if err := client.waitReady(10 * time.Second); err != nil {
+	if err := client.waitReady(readyTimeoutFor(10 * time.Second)); err != nil {
 		_ = cmd.Process.Kill()
 		// Reap before the deferred uid Release (I2): the uid must not be
 		// reusable while the killed jailer can still run under it.
@@ -346,6 +347,22 @@ func ConnectVM(socketPath string) *Client {
 			Timeout: 30 * time.Second,
 		},
 	}
+}
+
+// readyTimeoutFor returns base, or an override from MITOS_FC_READY_TIMEOUT_SECONDS
+// when set (and larger). The wait is a ceiling: a healthy Firecracker returns as
+// soon as its API socket answers, so a larger value only gives a slow or
+// resource-contended launch (co-located child VMs on a loaded KVM runner) more
+// headroom without slowing the common path. Prod leaves the env unset (base wins).
+func readyTimeoutFor(base time.Duration) time.Duration {
+	if v := os.Getenv("MITOS_FC_READY_TIMEOUT_SECONDS"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			if d := time.Duration(secs) * time.Second; d > base {
+				return d
+			}
+		}
+	}
+	return base
 }
 
 func (c *Client) waitReady(timeout time.Duration) error {

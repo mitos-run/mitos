@@ -2701,6 +2701,40 @@ jobs:
           fi
           go test ./internal/husk/ -run TestForkSnapshotLiveCowSourceArmedVmstateOnlyKVM -count=1 -v
 
+      # Live-cow CHILD-side memfd import (m5, #832): the co-located fork child boots
+      # its guest RAM BY IMPORTING THE SOURCE MEMFD (FIRECRACKER_MITOS_CHILD_MEMFD)
+      # instead of a disk mem file, so the vmstate-only fork drops the create_snapshot
+      # mem write end to end. The patched binary installed above adds the child restore
+      # path, so when the uffd is reachable we REQUIRE the child to boot by import
+      # (MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT): the mem-less fork is only bootable by
+      # import, so a child that boots + execs proves it took its RAM from the source
+      # memfd with no disk mem. The armed full-fallback test (child import OFF) proves
+      # the safe disk restore in the same run. Where uffd is blocked both skip cleanly.
+      - name: Live-cow child imports the source memfd (#832)
+        timeout-minutes: 15
+        env:
+          MITOS_KVM_HUSK_SNAPSHOT_DIR: /tmp/mitos-test/bench-data/templates/bench/snapshot
+          MITOS_KVM_FIRECRACKER: /usr/local/bin/firecracker
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm || true
+          sudo chmod 666 /dev/userfaultfd 2>/dev/null || true
+          sudo sysctl -w vm.unprivileged_userfaultfd=1 2>/dev/null || true
+          # The co-located child Firecracker (dormant VMM) shares the runner with the
+          # source VM (a 256MB memfd + write-protect handler), so on a contended nested
+          # KVM runner it needs more than the 5s default to bind its API socket. Raise
+          # the ready ceiling for this step only (prod is unaffected; a healthy launch
+          # still returns immediately).
+          export MITOS_FC_READY_TIMEOUT_SECONDS=20
+          if [ -r /dev/userfaultfd ] && [ -w /dev/userfaultfd ]; then
+            export MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM=1
+            export MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT=1
+            echo "uffd reachable: requiring the co-located child to boot by importing the source memfd"
+          else
+            echo "uffd not reachable on this runner: the child-import boot will skip cleanly"
+          fi
+          go test ./internal/husk/ -run 'TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM|TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM' -count=1 -v
+
       # Husk activate-correctness proof (#18). The fork-correctness phase above
       # proves the GUEST mechanism (distinct RNG + clock resync) when the host
       # sends NotifyForked directly via test-agent. THIS phase proves the same
