@@ -206,6 +206,9 @@ type pathVMM struct {
 func (m *pathVMM) LoadSnapshotWithOverrides(_, _ string, _ bool, _ []firecracker.NetworkOverride) error {
 	return nil
 }
+func (m *pathVMM) LoadSnapshotUFFD(_, _ string, _ []firecracker.NetworkOverride) error {
+	return nil
+}
 func (m *pathVMM) VsockHostPath(string) string              { return m.vsockPath }
 func (m *pathVMM) PatchDrive(_, _ string) error             { return nil }
 func (m *pathVMM) Resume() error                            { return nil }
