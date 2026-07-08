@@ -217,6 +217,50 @@ func recordStage(stages map[string]float64, name string, since time.Time) {
 // no allocation. It is written under the instance lock, so a caller reads it only
 // after prepareInstance returns. Timing/observability only.
 func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride string, stages map[string]float64, extraEnv ...string) error {
+	return s.prepareInstanceOpt(ctx, id, prepareOpts{
+		rootfsSrcOverride: rootfsSrcOverride,
+		stages:            stages,
+		extraEnv:          extraEnv,
+	})
+}
+
+// prepareOpts carries the optional inputs prepareInstanceOpt varies over. The
+// zero value (what prepareInstance forwards) is a plain fresh prepare: start a
+// dormant VMM, verify the template snapshot when configured, clone the
+// per-activation rootfs.
+type prepareOpts struct {
+	// rootfsSrcOverride selects the file the per-activation rootfs CoW clone is
+	// made FROM. Empty clones from the pool template rootfs (s.rootfsTemplatePath);
+	// a co-located fork child passes the frozen source rootfs the fork snapshot
+	// carries (SnapshotDir/rootfs.ext4).
+	rootfsSrcOverride string
+	// skipRootfsClone leaves the instance WITHOUT a per-activation rootfs clone,
+	// used by the pre-warm boot to keep a GENERIC dormant child. The child's
+	// fork-time rootfs is cloned later, at consume, from the fork snapshot it
+	// actually carries, so the reflink stays at fork time (never on the pre-warm).
+	skipRootfsClone bool
+	// reuseVM, when non-nil, ADOPTS an already-booted dormant VMM (the pre-warmed
+	// child) into this instance instead of starting a fresh Firecracker. The
+	// process boot (fc_boot) and the template snapshot verify were paid during the
+	// pre-warm, off the hot path, so both are skipped here and fc_boot is recorded
+	// as 0. extraEnv is ignored (the VMM is already launched).
+	reuseVM vmm
+	// stages, when non-nil, is filled with this prepare's per-stage timing.
+	stages map[string]float64
+	// extraEnv is appended to the child Firecracker process environment at launch
+	// (the m5 child memfd-import env). It never applies to an adopted VMM.
+	extraEnv []string
+}
+
+// prepareInstanceOpt is prepareInstance's core, parameterized by prepareOpts so
+// ONE fail-closed, per-instance-locked state machine backs three callers: a plain
+// fresh prepare (SpawnVM on-demand, the single-VM Prepare), the pre-warm BOOT
+// (skipRootfsClone: a generic dormant child, no rootfs clone), and the pre-warm
+// CONSUME (reuseVM: adopt the pre-warmed VMM, skipping fc_boot + the template
+// verify, still cloning THIS fork's rootfs). Fail closed: any error tears the
+// (started or adopted) VMM down and leaves the instance out of StateDormant. It
+// never reads or mutates a sibling instance.
+func (s *Stub) prepareInstanceOpt(ctx context.Context, id vmID, opts prepareOpts) error {
 	if err := checkVMID(id); err != nil {
 		return err
 	}
@@ -243,8 +287,8 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride s
 	cfg := s.deriveVMConfig(id)
 	// Append any per-spawn environment (m5: the child memfd-import env) onto a COPY
 	// of the base env so one spawn's env never mutates the shared s.cfg slice.
-	if len(extraEnv) > 0 {
-		cfg.Env = append(append([]string(nil), cfg.Env...), extraEnv...)
+	if len(opts.extraEnv) > 0 {
+		cfg.Env = append(append([]string(nil), cfg.Env...), opts.extraEnv...)
 	}
 	// Arm the PARENT side of the live-cow fork for the SOURCE (default) VM (milestone
 	// m6b): bind the write-protect handshake socket and launch THIS Firecracker with
@@ -268,72 +312,97 @@ func (s *Stub) prepareInstance(ctx context.Context, id vmID, rootfsSrcOverride s
 			return fmt.Errorf("husk: create per-VM workdir for vm %q: %w", id, err)
 		}
 	}
-	fcBootStart := time.Now()
-	vm, err := s.start(cfg)
-	if err != nil {
-		return fmt.Errorf("husk: prepare dormant VMM for vm %q: %w", id, err)
-	}
-	recordStage(stages, "fc_boot", fcBootStart)
-	inst.vm = vm
+	if opts.reuseVM != nil {
+		// ADOPT the pre-warmed dormant VMM. Its process boot AND the template
+		// snapshot verify were paid during the pre-warm, off the hot path, so the
+		// fork path skips both here. fc_boot is recorded as 0 to make the "boot was
+		// pre-paid" fact legible in the merged stage breakdown. The adopted VMM was
+		// booted with a GENERIC config (no fork-specific env), so it only serves a
+		// fork that needs no launch env (the live-cow child-import fork, which needs
+		// FIRECRACKER_MITOS_CHILD_MEMFD at exec, is never routed here).
+		inst.vm = opts.reuseVM
+		if opts.stages != nil {
+			opts.stages["fc_boot"] = 0
+		}
+	} else {
+		fcBootStart := time.Now()
+		vm, err := s.start(cfg)
+		if err != nil {
+			return fmt.Errorf("husk: prepare dormant VMM for vm %q: %w", id, err)
+		}
+		recordStage(opts.stages, "fc_boot", fcBootStart)
+		inst.vm = vm
 
-	// Snapshot verify at prepare time (pre-paid, dormant), the same fail-closed
-	// gate the single-VM Prepare runs, when the pod was started with the snapshot
-	// dir + expected digest. The snapshot is read-only and content-addressed, so
-	// verifying once here is equivalent to verifying at activate.
-	if s.prepareSnapshotDir != "" && s.prepareExpectedDigest != "" {
-		verifyStart := time.Now()
-		for _, name := range []string{"mem", "vmstate"} {
-			f := filepath.Join(s.prepareSnapshotDir, name)
-			if err := waitForFile(ctx, f, rootfsTemplateWait); err != nil {
+		// Snapshot verify at prepare time (pre-paid, dormant), the same fail-closed
+		// gate the single-VM Prepare runs, when the pod was started with the snapshot
+		// dir + expected digest. The snapshot is read-only and content-addressed, so
+		// verifying once here is equivalent to verifying at activate.
+		if s.prepareSnapshotDir != "" && s.prepareExpectedDigest != "" {
+			verifyStart := time.Now()
+			for _, name := range []string{"mem", "vmstate"} {
+				f := filepath.Join(s.prepareSnapshotDir, name)
+				if err := waitForFile(ctx, f, rootfsTemplateWait); err != nil {
+					_ = inst.vm.Close()
+					inst.vm = nil
+					return fmt.Errorf("husk: snapshot file %s not ready for vm %q: %w", f, id, err)
+				}
+			}
+			if err := s.verify(ActivateRequest{
+				SnapshotDir:    s.prepareSnapshotDir,
+				ExpectedDigest: s.prepareExpectedDigest,
+			}); err != nil {
 				_ = inst.vm.Close()
 				inst.vm = nil
-				return fmt.Errorf("husk: snapshot file %s not ready for vm %q: %w", f, id, err)
+				return fmt.Errorf("husk: prepare-time snapshot verification failed for vm %q: %w", id, err)
 			}
+			recordStage(opts.stages, "verify_prepare", verifyStart)
+			inst.prepareVerified = true
 		}
-		if err := s.verify(ActivateRequest{
-			SnapshotDir:    s.prepareSnapshotDir,
-			ExpectedDigest: s.prepareExpectedDigest,
-		}); err != nil {
-			_ = inst.vm.Close()
-			inst.vm = nil
-			return fmt.Errorf("husk: prepare-time snapshot verification failed for vm %q: %w", id, err)
-		}
-		recordStage(stages, "verify_prepare", verifyStart)
-		inst.prepareVerified = true
 	}
 
 	// Per-activation rootfs CoW clone, scoped to this VM's derived id so two VMs in
-	// the pod never share or overwrite a rootfs clone. Same primitive and dormant
-	// pre-paid timing as the single-VM Prepare. The clone SOURCE is the pool template
-	// rootfs by default; a CO-LOCATED fork child overrides it with the frozen source
-	// rootfs the fork snapshot carries so the child inherits the parent's DISK.
+	// the pod never share or overwrite a clone. Skipped for the pre-warm boot: a
+	// generic dormant child clones its fork-time rootfs at consume, not here.
+	if !opts.skipRootfsClone {
+		if err := s.cloneRootfsForInstance(ctx, id, cfg, inst, opts.rootfsSrcOverride, opts.stages); err != nil {
+			_ = inst.vm.Close()
+			inst.vm = nil
+			return err
+		}
+	}
+
+	inst.state = StateDormant
+	return nil
+}
+
+// cloneRootfsForInstance makes THIS VM's per-activation rootfs CoW clone and
+// records it on the instance so activate rebinds the drive to it and Close removes
+// it. The clone SOURCE is the pool template rootfs by default; a co-located fork
+// child overrides it with the frozen source rootfs the fork snapshot carries so
+// the child inherits the parent's DISK. A no-op (nil) when no template rootfs or
+// CoW dir is configured (the mock/unit path). It NEVER tears the VMM down on
+// error; the caller owns that so the fail-closed teardown stays in one place.
+func (s *Stub) cloneRootfsForInstance(ctx context.Context, id vmID, cfg firecracker.VMConfig, inst *vmInstance, rootfsSrcOverride string, stages map[string]float64) error {
 	rootfsSrc := s.rootfsTemplatePath
 	if rootfsSrcOverride != "" {
 		rootfsSrc = rootfsSrcOverride
 	}
-	if rootfsSrc != "" && s.rootfsCoWDir != "" {
-		clonePath := filepath.Join(s.rootfsCoWDir, cfg.ID, "rootfs.ext4")
-		if err := os.MkdirAll(filepath.Dir(clonePath), 0o755); err != nil {
-			_ = inst.vm.Close()
-			inst.vm = nil
-			return fmt.Errorf("husk: create per-activation rootfs dir for vm %q: %w", id, err)
-		}
-		if err := waitForFile(ctx, rootfsSrc, rootfsTemplateWait); err != nil {
-			_ = inst.vm.Close()
-			inst.vm = nil
-			return fmt.Errorf("husk: per-activation rootfs source %s not ready for vm %q: %w", rootfsSrc, id, err)
-		}
-		cloneStart := time.Now()
-		if err := s.reflink(rootfsSrc, clonePath); err != nil {
-			_ = inst.vm.Close()
-			inst.vm = nil
-			return fmt.Errorf("husk: clone per-activation rootfs for vm %q: %w", id, err)
-		}
-		recordStage(stages, "rootfs_clone", cloneStart)
-		inst.rootfsClonePath = clonePath
+	if rootfsSrc == "" || s.rootfsCoWDir == "" {
+		return nil
 	}
-
-	inst.state = StateDormant
+	clonePath := filepath.Join(s.rootfsCoWDir, cfg.ID, "rootfs.ext4")
+	if err := os.MkdirAll(filepath.Dir(clonePath), 0o755); err != nil {
+		return fmt.Errorf("husk: create per-activation rootfs dir for vm %q: %w", id, err)
+	}
+	if err := waitForFile(ctx, rootfsSrc, rootfsTemplateWait); err != nil {
+		return fmt.Errorf("husk: per-activation rootfs source %s not ready for vm %q: %w", rootfsSrc, id, err)
+	}
+	cloneStart := time.Now()
+	if err := s.reflink(rootfsSrc, clonePath); err != nil {
+		return fmt.Errorf("husk: clone per-activation rootfs for vm %q: %w", id, err)
+	}
+	recordStage(stages, "rootfs_clone", cloneStart)
+	inst.rootfsClonePath = clonePath
 	return nil
 }
 
@@ -670,6 +739,18 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 	if err := checkVMID(id); err != nil {
 		return SpawnVMResult{OK: false, VMID: req.VMID, Error: err.Error()}
 	}
+	// Refuse the RESERVED pre-warm slot id: checkVMID only enforces the character
+	// allowlist, so a caller could otherwise pass the internal slot id and collide
+	// with the pod's pre-warmed dormant child (adopting or tearing down the slot's
+	// Firecracker out from under the pool). The reserved id is engine-internal and
+	// is never a tenant fork, so it is rejected up front.
+	if id == prewarmSlotVMID {
+		return SpawnVMResult{
+			OK:    false,
+			VMID:  req.VMID,
+			Error: fmt.Sprintf("husk: spawn-vm refused: vm id %q is reserved for the pre-warm slot", req.VMID),
+		}
+	}
 	// A CO-LOCATED fork child clones its rootfs from the FROZEN source rootfs the
 	// fork snapshot carries at SnapshotDir/rootfs.ext4 (inherit the parent's DISK),
 	// NOT the pool template rootfs. Empty otherwise, so a non-fork spawn keeps the
@@ -709,11 +790,39 @@ func (s *Stub) SpawnVM(ctx context.Context, req SpawnVMRequest) SpawnVMResult {
 	// come from prepare, vmstate_restore / guest_ready / handshake from activate.
 	prepStart := time.Now()
 	prepStages := make(map[string]float64, 3)
-	if err := s.prepareInstance(ctx, id, rootfsSrcOverride, prepStages); err != nil {
+	// Consume a pre-warmed dormant child when one is ready: ADOPT its already-booted
+	// generic Firecracker into this fork's instance so the process boot (fc_boot) and
+	// the template snapshot verify are OFF the fork hot path (paid ahead), leaving
+	// only this fork's rootfs clone to run here. A miss (pre-warm off, or the slot not
+	// yet warm) falls back to the on-demand prepare, byte-for-byte the prior behavior.
+	// The pre-warmed child is GENERIC (no fork-specific launch env): the live-cow
+	// lazy-UFFD import (childPlan) is armed on the dormant instance AFTER prepare and
+	// BEFORE activate below, exactly as on the on-demand path, so the pre-warm never
+	// changes HOW the child restores (disk mem, or the husk UFFD fault handler when
+	// armed). The pre-warmed child counts against the pod's per-VM memory budget, so
+	// at most one is kept.
+	var prepErr error
+	if prewarmed := s.consumePrewarmedChild(); prewarmed != nil {
+		if err := s.prepareInstanceOpt(ctx, id, prepareOpts{
+			rootfsSrcOverride: rootfsSrcOverride,
+			reuseVM:           prewarmed,
+			stages:            prepStages,
+		}); err != nil {
+			prepErr = fmt.Errorf("adopt pre-warmed child: %w", err)
+		}
+	} else {
+		prepErr = s.prepareInstance(ctx, id, rootfsSrcOverride, prepStages)
+	}
+	// Replenish the pool for the NEXT fork, OFF this fork's hot path, whether we hit
+	// or missed the slot (a miss warms it so a later fork skips the boot). A no-op
+	// when pre-warm is off or a re-warm is already in flight, so the fork never waits
+	// on it and the pod never keeps more than one dormant child.
+	s.rewarmPrewarmChildAsync()
+	if prepErr != nil {
 		return SpawnVMResult{
 			OK:    false,
 			VMID:  req.VMID,
-			Error: fmt.Errorf("husk: spawn-vm prepare vm %q: %w", req.VMID, err).Error(),
+			Error: fmt.Errorf("husk: spawn-vm prepare vm %q: %w", req.VMID, prepErr).Error(),
 		}
 	}
 	prepStages["prepare_total"] = stageMs(prepStart)
