@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.36.0](https://github.com/mitos-run/mitos/compare/v1.35.0...v1.36.0) (2026-07-08)
+
+
+### Features
+
+* **husk:** pre-warm a dormant child VMM to cut the fork spawn latency ([#851](https://github.com/mitos-run/mitos/issues/851)) ([ca09c90](https://github.com/mitos-run/mitos/commit/ca09c90b5425c00d789aad2eee637c5871cd3fda))
+
 ## [1.35.0](https://github.com/mitos-run/mitos/compare/v1.34.0...v1.35.0) (2026-07-08)
 
 
