@@ -2662,7 +2662,11 @@ jobs:
         run: |
           set -e
           sudo chmod 666 /dev/kvm || true
-          go test ./internal/husk/ -run 'TestColocatedForkInheritsSourceStateKVM|TestMultiVMForkSnapshotDefaultVMKVM' -count=1 -v
+          # TestPrewarmedColocatedForkSkipsBootKVM proves the pre-warm on the SAME
+          # disk-restore co-located fork: a pre-warmed dormant child is ADOPTED
+          # (fc_boot ~0, boot pre-paid off the hot path) and still inherits the
+          # source disk + memory, alive, with a fresh child re-warmed after.
+          go test ./internal/husk/ -run 'TestColocatedForkInheritsSourceStateKVM|TestMultiVMForkSnapshotDefaultVMKVM|TestPrewarmedColocatedForkSkipsBootKVM' -count=1 -v
 
       # Live-cow fork engages on a RESTORED source (issue #832). A warm husk SOURCE VM
       # is RESTORED from the pool template snapshot, so the live-cow fork engages only
@@ -2733,7 +2737,13 @@ jobs:
           else
             echo "uffd not reachable on this runner: the child-import boot will skip cleanly"
           fi
-          go test ./internal/husk/ -run 'TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM|TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM' -count=1 -v
+          # TestPrewarmedLiveCowChildImportNoLeakKVM proves the pre-warm does NOT
+          # regress the mem-less lazy-UFFD import: a pre-warmed generic child is
+          # ADOPTED (fc_boot ~0) and STILL lazily faults its guest RAM from the
+          # source memfd through the husk fault handler, alive, with the fork-time
+          # sentinel intact (NO LEAK). Same require-arm/import env as the on-demand
+          # child-import proof.
+          go test ./internal/husk/ -run 'TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM|TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM|TestPrewarmedLiveCowChildImportNoLeakKVM' -count=1 -v
 
       # Husk activate-correctness proof (#18). The fork-correctness phase above
       # proves the GUEST mechanism (distinct RNG + clock resync) when the host
