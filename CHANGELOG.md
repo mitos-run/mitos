@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.33.0](https://github.com/mitos-run/mitos/compare/v1.32.2...v1.33.0) (2026-07-08)
+
+
+### Features
+
+* **husk:** child-side memfd import so the live-cow vmstate-only fork drops create_snapshot ([#844](https://github.com/mitos-run/mitos/issues/844)) ([28fa4b2](https://github.com/mitos-run/mitos/commit/28fa4b2a9abfa72dcb1e04ca398df902c2ab376d))
+
+
+### Bug Fixes
+
+* **husk:** gate the vmstate-only fork mem-skip on child import so co-located forks never hang ([#832](https://github.com/mitos-run/mitos/issues/832)) ([#842](https://github.com/mitos-run/mitos/issues/842)) ([eecb0a8](https://github.com/mitos-run/mitos/commit/eecb0a867a96cb3aaa73377ed72da933916e4fb0))
+
 ## [1.32.2](https://github.com/mitos-run/mitos/compare/v1.32.1...v1.32.2) (2026-07-08)
 
 
