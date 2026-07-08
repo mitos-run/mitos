@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.37.1](https://github.com/mitos-run/mitos/compare/v1.37.0...v1.37.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* **husk:** eagerly prewarm the child slot at startup so the first fork adopts it ([#855](https://github.com/mitos-run/mitos/issues/855)) ([718b1ce](https://github.com/mitos-run/mitos/commit/718b1cef3b28cbf2923a1338f06675e4cb4eb91e))
+
 ## [1.37.0](https://github.com/mitos-run/mitos/compare/v1.36.0...v1.37.0) (2026-07-08)
 
 
