@@ -12,4 +12,5 @@ exec /tmp/bench \
   --template "${TEMPLATE:-python}" \
   --firecracker /fc/firecracker \
   --iterations "${ITERS:-6}" \
-  --warmup "${WARMUP:-2}"
+  --warmup "${WARMUP:-2}" \
+  --allow-unverified-snapshots
