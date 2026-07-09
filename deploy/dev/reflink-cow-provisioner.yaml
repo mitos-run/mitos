@@ -1,8 +1,9 @@
 # Reflink CoW provisioner (KVM node): mounts a reversible loopback XFS(reflink=1)
-# at /var/lib/mitos-cow so the husk per-fork rootfs clone is a FICLONE (~16ms)
-# instead of a full copy (~40ms warm / ~448ms cold). Reversible: umount + rm the
-# image restores the node. It nsenters the host mount namespace so the mount is
-# visible to the husk pods' hostPath mounts. Idempotent: skips if already mounted.
+# at /var/lib/mitos-cow so the husk per-fork rootfs clone is a FICLONE (~16ms,
+# proven on the forkbench) instead of a full copy (~40ms warm / ~448ms cold).
+# Does the mount INSIDE the container with mountPropagation: Bidirectional so it
+# propagates to the host (no host shell needed - the node OS is shell-less).
+# Idempotent (skips if mounted); reversible (umount + rm the image on the host).
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -14,7 +15,6 @@ spec:
   template:
     metadata: { labels: { app.kubernetes.io/component: reflink-cow } }
     spec:
-      hostPID: true
       nodeSelector: { mitos.run/kvm: "true" }
       tolerations:
         - { key: mitos.run/dedicated, operator: Exists, effect: NoSchedule }
@@ -23,17 +23,12 @@ spec:
         - name: provisioner
           image: alpine:3.20
           securityContext: { privileged: true }
-          command:
-            - nsenter
-            - "-t"
-            - "1"
-            - "-m"
-            - "--"
-            - /bin/sh
-            - "-c"
+          command: ["/bin/sh", "-c"]
+          args:
             - |
               set -e
-              IMG=/var/lib/mitos-reflink.img
+              apk add --no-cache xfsprogs util-linux e2fsprogs >/dev/null 2>&1
+              IMG=/host-var-lib/mitos-reflink.img
               MNT=/var/lib/mitos-cow
               if mountpoint -q "$MNT"; then
                 echo "reflink CoW already mounted at $MNT"
@@ -48,3 +43,11 @@ spec:
               df -T "$MNT" | tail -1
               echo REFLINK-COW-READY
               sleep infinity
+          volumeMounts:
+            - { name: host-var-lib, mountPath: /host-var-lib }
+            - { name: cow, mountPath: /var/lib/mitos-cow, mountPropagation: Bidirectional }
+      volumes:
+        - name: host-var-lib
+          hostPath: { path: /var/lib }
+        - name: cow
+          hostPath: { path: /var/lib/mitos-cow, type: DirectoryOrCreate }
