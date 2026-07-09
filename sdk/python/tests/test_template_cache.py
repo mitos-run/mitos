@@ -153,3 +153,29 @@ def test_a_non_404_fork_error_is_not_retried(monkeypatch):
         mitos.create("python", api_key="sk-a", base_url="http://testserver")
 
     assert rec.paths.count("/v1/fork") == 1, "a 429 must not be retried"
+
+
+def test_the_cache_key_holds_no_material_derived_from_the_api_key():
+    """The API key is a live credential. Neither its value nor a digest of it may end
+    up in the cache key: a digest is cheap to brute force if it ever escapes the
+    process. The key is represented by an opaque, random, per-process id."""
+    import hashlib
+
+    secret = "sk-super-secret-value"
+    key = direct._template_key("http://testserver", "python", secret)
+    opaque = key[2]
+
+    assert secret not in key
+    assert opaque != secret
+    assert opaque != hashlib.sha256(secret.encode()).hexdigest()[: len(opaque)]
+    assert opaque != hashlib.sha256(secret.encode()).hexdigest()
+
+    # Stable within the process, and distinct per key.
+    assert direct._template_key("http://testserver", "python", secret) == key
+    other = direct._template_key("http://testserver", "python", "sk-different")
+    assert other[2] != opaque
+
+    # A fresh process (simulated by clearing the map) must not reproduce the id, so a
+    # leaked id cannot be correlated back to a key across runs.
+    direct.close_http_pools()
+    assert direct._template_key("http://testserver", "python", secret)[2] != opaque

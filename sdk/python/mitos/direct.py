@@ -30,9 +30,9 @@ Usage:
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import os
+import secrets
 import socket
 import uuid
 from typing import Any, Callable, Optional
@@ -337,6 +337,9 @@ def close_http_pools() -> None:
         _HTTP_TRANSPORT = None
     with _TEMPLATE_LOCK:
         _TEMPLATES_ENSURED.clear()
+        # Drop the api-key -> opaque-id map too: it is the only place the SDK holds a
+        # key value beyond the life of a request.
+        _KEY_IDS.clear()
 
 
 # --- per-process template cache ---------------------------------------------------
@@ -346,15 +349,34 @@ def close_http_pools() -> None:
 # connection against the hosted API. Remember that we already ensured it.
 #
 # Keyed by API KEY as well as URL and image: two orgs share a base URL, and one org's
-# create must never skip its ensure because another org warmed the cache. The key is
-# hashed so the secret VALUE is not held in a container that a traceback could print.
+# create must never skip its ensure because another org warmed the cache.
+#
+# The key is represented by an OPAQUE, random, per-process id rather than by its value
+# or by a digest of its value. A digest would be a hash of a live credential: cheap to
+# brute force if it ever escaped the process, and (correctly) flagged by CodeQL's
+# py/weak-sensitive-data-hashing. An opaque id cannot be reversed at all, and nothing
+# derived from the secret ends up in a container a traceback could print.
 _TEMPLATES_ENSURED: set[tuple[str, str, str]] = set()
 _TEMPLATE_LOCK = threading.Lock()
 
+# api key value -> opaque id. The VALUE lives here only as a lookup key, which is the
+# same exposure it already has on SandboxServer._api_key and on every request header.
+_KEY_IDS: dict[str, str] = {}
+
+
+def _key_identity(api_key: Optional[str]) -> str:
+    """A stable, opaque, per-process id for this API key. Never derived from its value."""
+    with _TEMPLATE_LOCK:
+        value = api_key or ""
+        identity = _KEY_IDS.get(value)
+        if identity is None:
+            identity = secrets.token_hex(8)
+            _KEY_IDS[value] = identity
+        return identity
+
 
 def _template_key(base_url: str, image: str, api_key: Optional[str]) -> tuple[str, str, str]:
-    digest = hashlib.sha256((api_key or "").encode()).hexdigest()[:16]
-    return (base_url.rstrip("/"), image, digest)
+    return (base_url.rstrip("/"), image, _key_identity(api_key))
 
 
 class DirectSandboxFiles:
