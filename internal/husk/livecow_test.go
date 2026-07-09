@@ -140,6 +140,10 @@ func TestArmLiveCowSourceBindsAndEmitsEnv(t *testing.T) {
 		"FIRECRACKER_MITOS_SHARED_MEM=1",
 		"FIRECRACKER_MITOS_SHARED_MEM_EXPORT=" + filepath.Join(workDir, "mitos-memfd.export"),
 		"FIRECRACKER_MITOS_WP_UDS=" + filepath.Join(workDir, "mitos-wp.sock"),
+		// LAZY restore: guest RAM comes back as an EMPTY shared memfd whose pages the
+		// WP handler faults in from the mem file, instead of an eager copy inside
+		// PUT /snapshot/load. Firecracker requires this AND the WP UDS.
+		"FIRECRACKER_MITOS_LAZY_RESTORE=1",
 	}
 	if len(env) != len(want) {
 		t.Fatalf("arm env = %v, want %d entries", env, len(want))
