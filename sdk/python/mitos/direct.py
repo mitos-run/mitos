@@ -33,7 +33,7 @@ import base64
 import json
 import os
 import uuid
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Optional
 
 import threading
 
@@ -259,7 +259,7 @@ def _json(resp: httpx.Response, api_key: Optional[str] = None) -> Any:
 # negotiated. Pooling removes it without touching the engine.
 #
 # httpx.Client is thread-safe, so one pooled client is safe to share across threads.
-_HTTP_POOLS: Dict[Tuple[str, float], httpx.Client] = {}
+_HTTP_POOLS: dict[tuple[str, float], httpx.Client] = {}
 _HTTP_POOL_LOCK = threading.Lock()
 
 

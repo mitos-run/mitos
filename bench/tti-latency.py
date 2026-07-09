@@ -51,10 +51,14 @@ API = os.environ.get("MITOS_API_BASE", "https://api.mitos.run")
 PROBE = "print(1)"
 
 
+# An unresponsive API must fail the iteration, never hang the harness forever.
+REQ_TIMEOUT = 30.0
+
+
 def _req(path, method="GET", key=""):
     r = urllib.request.Request(API + path, method=method,
                                headers={"Authorization": "Bearer " + key})
-    return urllib.request.urlopen(r)
+    return urllib.request.urlopen(r, timeout=REQ_TIMEOUT)
 
 
 def cleanup(key):
@@ -96,8 +100,11 @@ def main():
 
     tti, creates, execs = [], [], []
     failures = throttled = 0
+    retries = 3
     for i in range(args.iterations):
-        for attempt in range(3):
+        # The for/else below fires only when no attempt broke out of the loop, which
+        # is exactly the case where every attempt was rate limited.
+        for attempt in range(retries):
             sb = None
             try:
                 t0 = time.perf_counter()
@@ -132,6 +139,13 @@ def main():
                   % (i + 1, tti[-1], creates[-1], execs[-1]))
             time.sleep(args.interval)
             break
+        else:
+            # Every attempt was rate limited. Without this the iteration lands in
+            # neither tti nor failures and vanishes from the denominator, so a run
+            # that produced almost no samples would still report a 100% success rate.
+            failures += 1
+            print("  iter %2d: FAILED rate_limited after %d attempts"
+                  % (i + 1, retries), file=sys.stderr)
 
     if not tti:
         print("no successful iterations", file=sys.stderr)
