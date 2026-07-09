@@ -129,24 +129,6 @@ func Integrate(samples []Sample, cfg Config) []UsageRecord {
 		group = dedupeByTimestamp(group)
 		sort.Slice(group, func(i, j int) bool { return group[i].Timestamp.Before(group[j].Timestamp) })
 
-		// Counter units: per window, the in-window progress is the SUM of the
-		// positive steps between consecutive in-window samples. A non-decreasing
-		// step is the difference; a DECREASE means the cumulative counter reset
-		// (a sandbox restart zeroes its egress/GPU counter), so the post-reset
-		// value is fresh progress counted from zero, never a negative bill. For a
-		// monotonic counter this telescopes to last-minus-first (unchanged); a
-		// single in-window sample contributes zero. group is already sorted by
-		// timestamp, so each window's slice is in time order.
-		byWindow := map[time.Time][]Sample{}
-		var windows []time.Time
-		for _, s := range group {
-			w := s.Timestamp.Truncate(cfg.Window)
-			if _, ok := byWindow[w]; !ok {
-				windows = append(windows, w)
-			}
-			byWindow[w] = append(byWindow[w], s)
-		}
-
 		// Rate units: integrate level * elapsed between consecutive samples, clipped
 		// to window bounds, with the earlier level held up to MaxHold then gapped.
 		for i := 0; i+1 < len(group); i++ {
@@ -164,26 +146,35 @@ func Integrate(samples []Sample, cfg Config) []UsageRecord {
 			integrateInterval(recs, sandbox, a, a.Timestamp, a.Timestamp.Add(held), cfg.Window)
 		}
 
-		// Apply the reset-aware counter deltas to each window's record. Ensure a
-		// record exists for every window with non-zero counter progress.
-		for _, w := range windows {
-			win := byWindow[w]
-			var egress, gpu int64
-			for i := 1; i < len(win); i++ {
-				egress += counterStep(win[i-1].EgressBytes, win[i].EgressBytes)
-				gpu += counterStep(win[i-1].GPUSeconds, win[i].GPUSeconds)
+		// Counter units: the in-window progress of each cumulative counter is the
+		// SUM of the reset-aware positive steps between consecutive samples. A
+		// non-decreasing step is the plain difference; a DECREASE means the counter
+		// reset (a sandbox restart zeroes its egress/GPU counter), so the post-reset
+		// value is fresh progress counted from zero, never a negative bill. Each
+		// step counterStep(a, b) is attributed to the EARLIER sample's window, so a
+		// step whose two samples straddle a window boundary (a the last sample of one
+		// window, b the first of the next) is billed to a's window instead of being
+		// dropped (issue #755). Attributing to the earlier window is what keeps this
+		// stable under the collector's rolling, pruned sample buffer: b is newer than
+		// a, so whenever a is still buffered b is too, and a window's counter total
+		// recomputes to the same value on every cycle until the window is pruned (the
+		// idempotency property). For a counter that never resets the per-window steps
+		// telescope to last-minus-first over the whole lifetime; a single sample with
+		// no successor contributes nothing, so a lone boundary sample never emits a
+		// spurious zero-usage record. group is already sorted by timestamp.
+		for i := 0; i+1 < len(group); i++ {
+			a := group[i]
+			b := group[i+1]
+			egress := counterStep(a.EgressBytes, b.EgressBytes)
+			gpu := counterStep(a.GPUSeconds, b.GPUSeconds)
+			if egress == 0 && gpu == 0 {
+				continue
 			}
+			w := a.Timestamp.Truncate(cfg.Window)
 			k := recKey{sandbox: sandbox, window: w}
 			r := recs[k]
 			if r == nil {
-				// Do not materialize a window that has neither rate integration nor a
-				// counter delta. A lone boundary sample (the last scrape of a sandbox,
-				// which opens a new window but is never integrated forward) would
-				// otherwise emit a spurious zero-usage record for that window.
-				if egress == 0 && gpu == 0 {
-					continue
-				}
-				r = &UsageRecord{OrgID: win[len(win)-1].OrgID, Region: win[len(win)-1].Region, SandboxID: sandbox, Window: w}
+				r = &UsageRecord{OrgID: a.OrgID, Region: a.Region, SandboxID: sandbox, Window: w}
 				recs[k] = r
 			}
 			r.EgressBytes += egress
