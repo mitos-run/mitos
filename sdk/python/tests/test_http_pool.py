@@ -168,3 +168,46 @@ def test_clients_with_different_timeouts_share_one_connection():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_pooled_transport_disables_nagle():
+    """Nagle must be off on every pooled connection.
+
+    httpcore 0.16 (shipped with httpx 0.23) did NOT set TCP_NODELAY. With Nagle on,
+    httpcore's separate header and body writes make the second segment wait on the
+    peer's delayed ACK. Measured against the hosted API, that cost 37 ms on EVERY
+    request: `exec true` took 61.8 ms through httpx and 25.1 ms through http.client
+    over the same warm connection, interleaved call by call. Newer httpcore sets it,
+    but the SDK must not depend on a transitive default for a 37 ms regression.
+    """
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        base = "http://127.0.0.1:%d" % srv.server_address[1]
+        resp = direct._http_for(base).get(base + "/")
+        stream = resp.extensions.get("network_stream")
+        assert stream is not None, "no network_stream extension; cannot inspect the socket"
+        sock = stream.get_extra_info("socket")
+        assert sock is not None
+        assert sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY) != 0, (
+            "Nagle is enabled on the pooled connection: every request pays a delayed ACK"
+        )
+    finally:
+        srv.shutdown()
+        srv.server_close()

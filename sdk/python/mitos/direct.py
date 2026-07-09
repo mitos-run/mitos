@@ -33,6 +33,7 @@ import base64
 import hashlib
 import json
 import os
+import socket
 import uuid
 from typing import Any, Callable, Optional
 
@@ -285,7 +286,17 @@ def _transport() -> httpx.HTTPTransport:
     """
     global _HTTP_TRANSPORT
     if _HTTP_TRANSPORT is None:
-        _HTTP_TRANSPORT = httpx.HTTPTransport(limits=_HTTP_LIMITS)
+        _HTTP_TRANSPORT = httpx.HTTPTransport(
+            limits=_HTTP_LIMITS,
+            # TCP_NODELAY explicitly, never inherited from whatever httpcore defaults
+            # to. httpcore 0.16 (httpx 0.23) left Nagle ON, and because it writes the
+            # request headers and body as separate segments the second one waited on
+            # the peer's delayed ACK. Measured against the hosted API, interleaved call
+            # by call over the same warm connection: `exec true` took 61.8 ms through
+            # httpx and 25.1 ms through http.client. 37 ms on EVERY request, which for
+            # an agent is every tool call.
+            socket_options=[(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)],
+        )
     return _HTTP_TRANSPORT
 
 
