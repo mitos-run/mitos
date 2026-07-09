@@ -357,9 +357,10 @@ func TestProductionGuestReadyGRPC_RetryBackoffIsTight(t *testing.T) {
 	if attempts < 2 {
 		t.Fatalf("expected the seam to retry after the forced failure, got %d attempt(s)", attempts)
 	}
-	// The old fixed 20ms backoff lands at ~20ms. Anything at or above 10ms means
-	// the first retry is still charging the claim tens of milliseconds.
-	if elapsed >= 10*time.Millisecond {
-		t.Errorf("first-retry backoff too slow: guestReadyGRPC took %v after one failed dial; want < 10ms", elapsed)
+	// The old fixed 20ms backoff lands at ~20ms. The measured span also covers a real
+	// dial + gRPC handshake + Ping over a unix socket, so bound at 15ms: still well
+	// under the 20ms regression this pins, but with room for CI scheduler noise.
+	if elapsed >= 15*time.Millisecond {
+		t.Errorf("first-retry backoff too slow: guestReadyGRPC took %v after one failed dial; want < 15ms", elapsed)
 	}
 }

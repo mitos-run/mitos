@@ -155,6 +155,9 @@ func TestLiveCowLazyRestoreServesMissingAndFillsResidualOnFreeze(t *testing.T) {
 	if skip {
 		t.Skipf("lazy-restore precondition not met on this runner: %s", reason)
 	}
+	// sendUffd hands the handler a DUPLICATE via SCM_RIGHTS; this descriptor stays
+	// ours, so close it or the KVM suite leaks one fd per run.
+	defer unix.Close(uffd)
 	base := uint64(uintptr(unsafe.Pointer(&guest[0])))
 	if !registerMissingWP(t, uffd, base, size) {
 		t.Skip("lazy-restore precondition not met: MISSING|WP register failed over the memfd mapping")

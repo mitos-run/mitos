@@ -304,7 +304,10 @@ func (s *Stub) setLiveCowMemSource(memFile string) error {
 	if handle == nil {
 		return nil
 	}
-	return handle.SetMemSource(memFile)
+	if err := handle.SetMemSource(memFile); err != nil {
+		return fmt.Errorf("set live-cow mem source %s: %w", memFile, err)
+	}
+	return nil
 }
 
 // serveLiveCowSource completes the write-protect handshake with the patched source

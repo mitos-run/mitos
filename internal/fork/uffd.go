@@ -100,10 +100,11 @@ func hostAddrForFileOffset(regions []uffdMapping, fileOffset uint64) (hostAddr u
 // ~88 ms faulting in ~194 MiB for a far smaller working set, which merely moved the
 // eager copy's cost out of vmstate_restore and into guest_ready + handshake.
 //
-// Measured on the reference node against the real python template: 2 MiB chunks
-// faulted in ~194 MiB and cost ~88 ms; 256 KiB faulted in ~125 MiB and cost ~54 ms.
-// 64 KiB (16 pages) trims amplification further while keeping the per-fault copy
-// (~14 us) close to the round-trip cost.
+// Measured on the reference node against the real python template, as warm-claim
+// activate P50 (bench/results/2026-07-09-lazy-livecow-restore.md): 2 MiB faulted in
+// ~194 MiB at 114.4 ms, 256 KiB ~125 MiB at 89.6 ms, 64 KiB ~72 MiB at 76.2 ms.
+// 64 KiB (16 pages) trims amplification while keeping the per-fault copy (~14 us)
+// close to the round-trip cost.
 const lazyChunkBytes = 64 << 10
 
 // lazyChunkForAddr expands a faulting host address into the chunk the handler should

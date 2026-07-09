@@ -215,6 +215,27 @@ func frozenBitmapBytes(memSize, pageSize uint64) uint64 {
 	return (npages + 7) / 8
 }
 
+// setBit and testBit are the plain bit primitives the handler's two bitmaps share:
+// the per-page FROZEN selector and the per-chunk POPULATED map of the lazy restore.
+// They carry no epoch or fork semantics, so a reader cannot mistake "populated" for
+// "frozen". Out-of-range indices are ignored (defensive: a fault outside the mapped
+// range is a fault the handler skips).
+func setBit(bm []byte, i uint64) {
+	byteIdx := i / 8
+	if byteIdx >= uint64(len(bm)) {
+		return
+	}
+	bm[byteIdx] |= 1 << (i % 8)
+}
+
+func testBit(bm []byte, i uint64) bool {
+	byteIdx := i / 8
+	if byteIdx >= uint64(len(bm)) {
+		return false
+	}
+	return bm[byteIdx]&(1<<(i%8)) != 0
+}
+
 // setFrozenBit marks page index i frozen in bm. Out-of-range indices are ignored
 // (defensive: a fault outside the mapped range is a fault the handler skips).
 func setFrozenBit(bm []byte, i uint64) {

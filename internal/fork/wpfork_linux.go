@@ -156,6 +156,10 @@ type wpForkHandler struct {
 	frozen bool
 	// missingServed counts MISSING faults populated from the mem file.
 	missingServed int64
+	// residualNanos records how long populate-on-freeze took at the last fork point,
+	// kept separate from freezeNanos (the UFFDIO_WRITEPROTECT-all cost) because the
+	// two scale with different things.
+	residualNanos int64
 }
 
 // newWPForkHandler binds the write-protect handshake unix socket the caller
@@ -248,7 +252,8 @@ func (h *wpForkHandler) Receive() error {
 	// chunks are already installed (UFFDIO_COPY on a present page returns EEXIST) and
 	// which the fork point still has to fill. Sized from the live memfd, so it covers
 	// every region's mem-file offset. Harmless (and unread) for a booted source.
-	h.populatedBM = make([]byte, (exp.bytes/lazyChunkBytes+8)/8+1)
+	numChunks := (exp.bytes + lazyChunkBytes - 1) / lazyChunkBytes
+	h.populatedBM = make([]byte, (numChunks+7)/8)
 	h.mu.Unlock()
 	return nil
 }
@@ -418,12 +423,20 @@ func (h *wpForkHandler) Freeze() (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
-	start := time.Now()
 	// POPULATE-ON-FREEZE. A lazily restored source's memfd is sparse: any page the
 	// guest never touched is a hole. The co-located child MAP_PRIVATEs this memfd, so
 	// it would read those holes as zeros instead of the snapshot's bytes. Fill them
 	// before the fork point captures the memory. Runs with the source paused, so no
 	// fault can race it. A booted source has no mem source and this is a no-op.
+	//
+	// Timed SEPARATELY from the write-protect arm below. Both happen inside the fork
+	// window with the source paused, so both are parent-pause contributors, but they
+	// scale with completely different things: the WP arm is O(regions) and takes
+	// microseconds, while the residual fill is O(guest RAM the source never touched)
+	// and is largest for a fork that happens right after activate. Folding the fill
+	// into freezeNanos would make the "UFFDIO_WRITEPROTECT-all took" number silently
+	// balloon back toward the pre-lazy-restore eager-copy cost.
+	residualStart := time.Now()
 	h.mu.Lock()
 	perr := h.populateResidual()
 	h.mu.Unlock()
@@ -431,20 +444,25 @@ func (h *wpForkHandler) Freeze() (time.Duration, error) {
 		ep.close()
 		return 0, perr
 	}
+	residual := time.Since(residualStart)
+	atomic.StoreInt64(&h.residualNanos, residual.Nanoseconds())
+
+	start := time.Now()
 	for _, r := range regions {
 		if err := h.writeprotect(r.BaseHostVirtAddr, r.Size, true); err != nil {
 			ep.close()
 			return 0, fmt.Errorf("wpfork: freeze region [%#x,+%#x): %w", r.BaseHostVirtAddr, r.Size, err)
 		}
 	}
-	d := time.Since(start)
+	wp := time.Since(start)
 	h.mu.Lock()
 	// Any chunk installed from here on must land write-protected.
 	h.frozen = true
 	h.epochs = append(h.epochs, ep)
 	h.mu.Unlock()
-	atomic.StoreInt64(&h.freezeNanos, d.Nanoseconds())
-	return d, nil
+	atomic.StoreInt64(&h.freezeNanos, wp.Nanoseconds())
+	// The caller measures the parent pause, which is BOTH contributors.
+	return residual + wp, nil
 }
 
 // close munmaps and closes the epoch's memfds. Idempotent-ish: called on Freeze
@@ -845,7 +863,7 @@ func (h *wpForkHandler) populateChunk(dst, fileOffset, length uint64, extraMode 
 	if err := h.uffdCopy(h.uffd, dst, buf, mode); err != nil {
 		return err
 	}
-	setFrozenBit(h.populatedBM, fileOffset/lazyChunkBytes)
+	setBit(h.populatedBM, fileOffset/lazyChunkBytes)
 	return nil
 }
 
@@ -860,7 +878,7 @@ func (h *wpForkHandler) serveMissing(addr uint64) error {
 		// ignoring it would hang the faulting thread forever. Fail loudly.
 		return fmt.Errorf("wpfork: MISSING fault at %#x outside regions %s", addr, dumpRegions(h.regions))
 	}
-	if testFrozenBit(h.populatedBM, fileOffset/lazyChunkBytes) {
+	if testBit(h.populatedBM, fileOffset/lazyChunkBytes) {
 		// Already installed (a concurrent chunk covered it); nothing to do, and the
 		// kernel will not re-deliver.
 		return nil
@@ -894,7 +912,7 @@ func (h *wpForkHandler) populateResidual() error {
 				length = r.Size - start
 			}
 			fileOffset := r.Offset + start
-			if testFrozenBit(h.populatedBM, fileOffset/lazyChunkBytes) {
+			if testBit(h.populatedBM, fileOffset/lazyChunkBytes) {
 				continue
 			}
 			if err := h.populateChunk(r.BaseHostVirtAddr+start, fileOffset, length, copyModeDontwake); err != nil {
@@ -907,3 +925,9 @@ func (h *wpForkHandler) populateResidual() error {
 
 // MissingFaultCount reports how many MISSING faults the lazy restore has served.
 func (h *wpForkHandler) MissingFaultCount() int64 { return atomic.LoadInt64(&h.missingServed) }
+
+// ResidualFillDuration reports how long the last fork point spent filling the chunks
+// the source never demand-faulted. Zero on a booted source (nothing to fill).
+func (h *wpForkHandler) ResidualFillDuration() time.Duration {
+	return time.Duration(atomic.LoadInt64(&h.residualNanos))
+}
