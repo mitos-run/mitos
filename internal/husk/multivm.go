@@ -523,6 +523,21 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	recordStage(stages, "egress_filter", mark)
 	mark = time.Now()
 
+	// LAZY live-cow restore (this is what makes vmstate_restore O(1) instead of an
+	// eager 512 MiB memfd copy inside PUT /snapshot/load): hand the armed WP handler
+	// the mem file BEFORE the load, so it can serve the MISSING faults the patched
+	// Firecracker will take for every guest page. Only the SOURCE VM restores from a
+	// disk mem file; a co-located fork child imports the parent's memfd and never
+	// reaches the lazy branch. FAIL CLOSED: the source was launched with
+	// EnvLazyRestore, so a handler that cannot read the mem file means guest RAM would
+	// stay zeroed; refuse to load rather than run a VM on empty memory.
+	if id == defaultVMID && !req.ForkSnapshot {
+		if err := s.setLiveCowMemSource(memFile); err != nil {
+			werr := fmt.Errorf("husk: arm lazy live-cow mem source for vm %q: %w", id, err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+	}
+
 	// Load PAUSED so the rootfs drive can be rebound before the guest runs, then
 	// resume explicitly, exactly as the single-VM path does. A co-located live-cow
 	// fork child armed with a lazy-UFFD import (childUFFDPlan) restores through

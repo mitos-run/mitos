@@ -3,11 +3,13 @@ package husk
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
 )
 
 // newMultiVMTestStub builds a stub with the multi-VM execution mode ON, using a
@@ -589,5 +591,63 @@ func TestSpawnVMActivationFailureReturnsNotOK(t *testing.T) {
 	}
 	if got := s.instances[defaultVMID].state; got != StateActive {
 		t.Fatalf("the primary instance must stay active despite the spawn failure, got %s", got)
+	}
+}
+
+// failingMemSourceHandle is a WPForkHandle whose SetMemSource always fails. Only the
+// one method under test does anything; the rest satisfy the interface.
+type failingMemSourceHandle struct{ err error }
+
+func (h *failingMemSourceHandle) Receive() error                 { return nil }
+func (h *failingMemSourceHandle) Freeze() (time.Duration, error) { return 0, nil }
+func (h *failingMemSourceHandle) Serve() error                   { return nil }
+func (h *failingMemSourceHandle) SetMemSource(string) error      { return h.err }
+func (h *failingMemSourceHandle) FrozenFd() int                  { return -1 }
+func (h *failingMemSourceHandle) FrozenPage(uint64) bool         { return false }
+func (h *failingMemSourceHandle) FrozenBitmap() []byte           { return nil }
+func (h *failingMemSourceHandle) ChildImport(string) (fork.ChildMemfdImport, error) {
+	return fork.ChildMemfdImport{}, nil
+}
+func (h *failingMemSourceHandle) FaultCount() int64             { return 0 }
+func (h *failingMemSourceHandle) FreezeDuration() time.Duration { return 0 }
+func (h *failingMemSourceHandle) Close() error                  { return nil }
+
+// TestActivateInstanceFailsClosedWhenLazyMemSourceCannotArm proves the fail-closed
+// gate on the LAZY live-cow restore.
+//
+// The source Firecracker is launched with FIRECRACKER_MITOS_LAZY_RESTORE, so it maps
+// guest RAM as an EMPTY shared memfd and every page must arrive through the WP
+// handler's userfaultfd MISSING faults. If the handler cannot open the snapshot mem
+// file there is nothing to populate that memory: loading the snapshot anyway and
+// resuming the vCPUs would run the guest on all-zero RAM. activateInstance must
+// therefore abort BEFORE the load, leave the VM not active, and say why.
+func TestActivateInstanceFailsClosedWhenLazyMemSourceCannotArm(t *testing.T) {
+	vms := map[string]*fakeVMM{}
+	s := newMultiVMTestStub(t, vms)
+	s.liveCowFork = true
+	s.liveCowHandle = &failingMemSourceHandle{err: errors.New("open mem source: no such file")}
+
+	if err := s.prepareInstance(context.Background(), defaultVMID, "", nil); err != nil {
+		t.Fatalf("prepareInstance: %v", err)
+	}
+	res, err := s.activateInstance(context.Background(), defaultVMID, ActivateRequest{SnapshotDir: "/snap"})
+	if err == nil || res.OK {
+		t.Fatalf("activate must fail closed when the lazy mem source cannot arm; got ok=%v err=%v", res.OK, err)
+	}
+	if !strings.Contains(res.Error, "mem source") {
+		t.Errorf("activate error must name the failing step; got %q", res.Error)
+	}
+	if got := s.instances[defaultVMID].state; got == StateActive {
+		t.Errorf("VM must NOT be active after a failed lazy arm; state = %s", got)
+	}
+	// The snapshot must never have been loaded: a loaded-but-unpopulated VM is the
+	// exact hazard this gate exists to prevent.
+	if vm := vms[string(defaultVMID)]; vm != nil {
+		vm.mu.Lock()
+		loads := vm.loadCalls
+		vm.mu.Unlock()
+		if loads > 0 {
+			t.Errorf("snapshot was loaded %d time(s) despite the failed arm; must abort before the load", loads)
+		}
 	}
 }

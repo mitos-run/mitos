@@ -310,9 +310,36 @@ func productionNotifier(vsockPath string, generation uint64, entropy []byte, req
 // Ping RPC, retrying at fixed intervals until the timeout elapses or ctx is
 // cancelled. It uses the supplied dial function so tests can inject DialUnix.
 // The retry semantics mirror the legacy productionGuestReady JSON poll loop.
+// Retry pacing for the post-resume guest readiness probe. The guest agent's
+// vsock listener is not accepting the instant Firecracker resumes the VM, so the
+// first dial nearly always fails and the retry delay is charged straight to the
+// claim's activate latency. A fixed 20ms backoff therefore cost ~20ms on EVERY
+// warm claim while the guest was in fact answering a millisecond later. Start
+// sub-millisecond and grow geometrically so a healthy guest is picked up almost
+// immediately, while an unhealthy one still backs off to a cheap poll rather
+// than spinning on dial for the whole readyTimeout.
+const (
+	guestReadyBackoffInitial = 500 * time.Microsecond
+	guestReadyBackoffMax     = 5 * time.Millisecond
+)
+
 func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration, dial dialFunc) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
+	backoff := guestReadyBackoffInitial
+	// wait sleeps the current backoff then grows it, capped. It reports false when
+	// the context ended, so the caller returns instead of retrying.
+	wait := func() bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > guestReadyBackoffMax {
+			backoff = guestReadyBackoffMax
+		}
+		return true
+	}
 	for {
 		if ctx.Err() != nil {
 			return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
@@ -324,10 +351,8 @@ func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration
 		client, err := dial(vsockPath)
 		if err != nil {
 			lastErr = err
-			select {
-			case <-ctx.Done():
+			if !wait() {
 				return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
-			case <-time.After(20 * time.Millisecond):
 			}
 			continue
 		}
@@ -340,10 +365,8 @@ func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration
 			return nil
 		}
 		lastErr = pingErr
-		select {
-		case <-ctx.Done():
+		if !wait() {
 			return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
-		case <-time.After(20 * time.Millisecond):
 		}
 	}
 	if lastErr == nil {

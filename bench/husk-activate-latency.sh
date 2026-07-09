@@ -70,7 +70,7 @@ samples=()
 cleanup() {
   # best-effort: remove the sandboxes we created so the run leaves no residue.
   for i in $(seq 1 "$ITERATIONS"); do
-    kubectl delete sandbox "bench-activate-${RUN_ID}-${i}" \
+    kubectl delete sandboxes.mitos.run "bench-activate-${RUN_ID}-${i}" \
       -n "$NAMESPACE" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   done
 }
@@ -81,7 +81,7 @@ trap cleanup EXIT
 parse_latency() {
   local claim="$1"
   local msg
-  msg="$(kubectl get sandbox "$claim" -n "$NAMESPACE" \
+  msg="$(kubectl get sandboxes.mitos.run "$claim" -n "$NAMESPACE" \
     -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}' 2>/dev/null || true)"
   # message: "activated husk pod <pod> on node <node> in <X>ms"
   printf '%s\n' "$msg" | sed -n 's/.* in \([0-9][0-9.]*\)ms$/\1/p'
@@ -120,7 +120,7 @@ EOF
   deadline=$(( $(date +%s) + READY_TIMEOUT ))
   latency=""
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    ready="$(kubectl get sandbox "$claim" -n "$NAMESPACE" \
+    ready="$(kubectl get sandboxes.mitos.run "$claim" -n "$NAMESPACE" \
       -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
     if [ "$ready" = "True" ]; then
       latency="$(parse_latency "$claim")"
@@ -138,7 +138,7 @@ EOF
 
   # release the sandbox before the next iteration so the warm pool can refill and
   # each measured sandbox is an independent warm activation.
-  kubectl delete sandbox "$claim" -n "$NAMESPACE" \
+  kubectl delete sandboxes.mitos.run "$claim" -n "$NAMESPACE" \
     --ignore-not-found --wait=false >/dev/null 2>&1 || true
 done
 
