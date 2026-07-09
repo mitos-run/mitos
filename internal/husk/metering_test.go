@@ -286,10 +286,15 @@ func TestHuskMeteringBillsMemoryStorageAndEgress(t *testing.T) {
 	if diff := rec.StorageGiBHours - wantStorage; diff > 1e-12 || diff < -1e-12 {
 		t.Errorf("StorageGiBHours = %v, want %v (rootfs bytes x window); production bug was 0", rec.StorageGiBHours, wantStorage)
 	}
-	// The egress counter grew by one meteredEgressStep between the window's two
-	// in-window scrapes; the record bills the delta, never the cumulative value.
-	if rec.EgressBytes != meteredEgressStep {
-		t.Errorf("EgressBytes = %d, want %d (counter delta within the window)", rec.EgressBytes, meteredEgressStep)
+	// The egress counter is read once per scrape and grows one meteredEgressStep
+	// each read, so across the three scrapes it climbs 1000 -> 2000 -> 3000. The
+	// record bills the delta of the counter, never its cumulative value: the two
+	// intra-window steps (t0 -> t0+30 and t0+30 -> t0+60) are both attributed to
+	// the earlier sample's window (this window), including the step whose later
+	// sample opens the next window. That boundary-crossing step used to be dropped
+	// (issue #755); it is now billed here, so the window's egress is two steps.
+	if rec.EgressBytes != 2*meteredEgressStep {
+		t.Errorf("EgressBytes = %d, want %d (both counter deltas, boundary step billed to the earlier window)", rec.EgressBytes, 2*meteredEgressStep)
 	}
 }
 
