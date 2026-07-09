@@ -103,6 +103,18 @@ type huskVMSpawner func(ctx context.Context, addr string, tlsConf *tls.Config, r
 // scheduler reserved, so an over-admission fails closed as an intra-pod OOM, not a
 // node overcommit), spilling the over-budget child is the correct outcome and is
 // now what happens.
+// noteFirstBlocked records the FIRST child that could not be brought up in this
+// fan-out pass, together with why. Later blockers in the same pass are usually
+// consequences of the same underlying stall, so the first cause is the useful one.
+// Every retry `continue` in the fan-out calls this, so a fork that cannot progress
+// always has a cause to report on its Ready condition instead of a bare count (#872).
+func noteFirstBlocked(child, reason *string, name, cause string) {
+	if *child != "" {
+		return
+	}
+	*child, *reason = name, cause
+}
+
 // forkReadyMessage renders the fork's Ready condition message. When the fan-out cannot
 // make progress it names the blocking child and its cause, so a stalled fork says WHY
 // instead of repeating a bare count forever (#872). A complete fork reports only the
@@ -1055,6 +1067,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 			// logged (issue #28), and the reconcile requeues below because
 			// ReadyReplicas < Replicas. It never silently hangs and never weakens the
 			// new-pod fallback for the OFF path.
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, "co-located spawn-vm did not bring the child up")
 			continue
 		}
 
@@ -1069,6 +1082,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		logForkOrchStage(logger, childName, "child_pod_ensure", time.Since(childPodStart))
 		if err != nil {
 			logger.Error(err, "create fork child pod failed", "child", childName)
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, "create child pod failed: "+err.Error())
 			continue
 		}
 
@@ -1078,9 +1092,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// #872) is visible on the fork's condition instead of hiding behind the count.
 		if child.Status.PodIP == "" || !huskPodReady(child) {
 			reason := huskPodNotReadyReason(child)
-			if blockedChild == "" {
-				blockedChild, blockedReason = childName, reason
-			}
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, reason)
 			logger.Info("fork child pod not ready yet, will retry", "child", childName, "detail", reason)
 			continue
 		}
@@ -1101,6 +1113,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		logForkOrchStage(logger, childName, "child_token_write", time.Since(tokenStart))
 		if err != nil {
 			logger.Error(err, "fork child token secret write failed", "child", childName)
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, "child token secret write failed: "+err.Error())
 			continue
 		}
 
@@ -1137,12 +1150,14 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		}
 		if err != nil {
 			logger.Info("fork child activation failed, will retry", "child", childName, "detail", err.Error())
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, "activate transport error: "+err.Error())
 			continue
 		}
 		if !actRes.OK && !actRes.AlreadyActive {
 			// Surface WHY (issue #28 LLM-legible errors): the bare "will retry" hid
 			// the cause of stuck fork children.
 			logger.Info("fork child activation failed, will retry", "child", childName, "detail", actRes.Error)
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, "activate failed: "+actRes.Error)
 			continue
 		}
 		// OK, or AlreadyActive: a prior Activate brought this child up but its ack

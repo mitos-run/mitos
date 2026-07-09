@@ -93,3 +93,31 @@ func TestHuskPodNotReadyReason(t *testing.T) {
 		t.Errorf("not-ready pod reason = %q", got)
 	}
 }
+
+// TestNoteFirstBlockedKeepsTheFirstCause pins the first-wins accumulator behind the
+// stall reporting. Every retry path in the fan-out (a failed co-located spawn, a child
+// pod that will not create, a token write error, an activate transport error, a not-OK
+// activate, and a pod that never turns Ready) must record its cause, so
+// forkReadyMessage always has something to say. The FIRST blocker is the one reported:
+// later slots in the same pass are usually consequences of the same underlying stall.
+func TestNoteFirstBlockedKeepsTheFirstCause(t *testing.T) {
+	var child, reason string
+
+	noteFirstBlocked(&child, &reason, "fork-0", "spawn-vm failed: no budget")
+	if child != "fork-0" || reason != "spawn-vm failed: no budget" {
+		t.Fatalf("first cause not recorded: child=%q reason=%q", child, reason)
+	}
+
+	// A later blocker in the same pass must not clobber the first.
+	noteFirstBlocked(&child, &reason, "fork-4", "pod not ready: ContainersNotReady")
+	if child != "fork-0" || reason != "spawn-vm failed: no budget" {
+		t.Errorf("later blocker overwrote the first: child=%q reason=%q", child, reason)
+	}
+
+	// An empty reason still records the child, so the message never claims a bare count.
+	var c2, r2 string
+	noteFirstBlocked(&c2, &r2, "fork-1", "")
+	if c2 != "fork-1" {
+		t.Errorf("a blocker with no detail must still name the child, got %q", c2)
+	}
+}
