@@ -114,7 +114,9 @@ def _validate_git_args(
         raise AgentRunError(
             "git spec credentials_secret must be a (secret_name, secret_key) pair",
             code="invalid_git_credentials",
-            cause=f"credentials_secret {credentials_secret!r} is not a 2-tuple of non-blank strings",
+            # Never echo the argument value: a plausible misuse is passing the
+            # raw token itself, and secret values must never appear in errors.
+            cause=f"credentials_secret got a {type(credentials_secret).__name__}, not a 2-tuple of non-blank strings",
             remediation='Pass credentials_secret=("my-secret", "token") naming the Secret and key.',
         )
 

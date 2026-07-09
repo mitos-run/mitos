@@ -79,6 +79,17 @@ def test_malformed_credentials_secret_raises():
     assert ei.value.code == "invalid_git_credentials"
 
 
+def test_malformed_credentials_secret_never_echoes_value():
+    # A realistic misuse is passing the raw token where the Secret ref belongs;
+    # the error must describe the shape without echoing the value.
+    token = "ghp_verySecretTokenValue123"
+    with pytest.raises(AgentRunError) as ei:
+        mitos.git(paths=["/workspace/repo"], credentials_secret=token)  # type: ignore[arg-type]
+    assert ei.value.code == "invalid_git_credentials"
+    assert token not in str(ei.value)
+    assert token not in (ei.value.cause or "")
+
+
 def test_create_workspace_sets_spec_git_from_helper():
     c = _fake_client()
     c.create_workspace("proj-x", git=mitos.git(paths=["/workspace/repo"]))
