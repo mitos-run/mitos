@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.38.1](https://github.com/mitos-run/mitos/compare/v1.38.0...v1.38.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* **controller:** surface a durable restart signal when a sandbox's VM is destroyed and replaced ([#875](https://github.com/mitos-run/mitos/issues/875)) ([5a3c054](https://github.com/mitos-run/mitos/commit/5a3c0542cda08b16151d64fe8185b9d6515db78e)), closes [#870](https://github.com/mitos-run/mitos/issues/870)
+* **controller:** write the fork mem file when a child will spill, so fork(n) stops hanging ([#874](https://github.com/mitos-run/mitos/issues/874)) ([dcd4187](https://github.com/mitos-run/mitos/commit/dcd41875dc530ec1cd49d1785c12ce650f744fca))
+* **husk:** stop copying 512 MiB into the live-cow guest memfd on every warm-claim activate ([#869](https://github.com/mitos-run/mitos/issues/869)) ([8fef611](https://github.com/mitos-run/mitos/commit/8fef6118cd66d863a88404dd6c9ebf55b58f4686))
+
+## [1.38.0](https://github.com/mitos-run/mitos/compare/v1.37.2...v1.38.0) (2026-07-08)
+
+
+### Features
+
+* **cli:** shell completion for bash, zsh, and fish ([#811](https://github.com/mitos-run/mitos/issues/811)) ([68c8e55](https://github.com/mitos-run/mitos/commit/68c8e550e74f51887dcb116ad371e073c6a44e0f))
+* **controller:** reuse the husk control-plane connection across RPCs ([#865](https://github.com/mitos-run/mitos/issues/865)) ([cf0a073](https://github.com/mitos-run/mitos/commit/cf0a07303b379b216cc5fc5b808bb15f3e6a6f19))
+
+## [1.37.2](https://github.com/mitos-run/mitos/compare/v1.37.1...v1.37.2) (2026-07-08)
+
+
+### Bug Fixes
+
+* **husk:** await dormant slot in the prewarm KVM test (eager warm races it) ([#861](https://github.com/mitos-run/mitos/issues/861)) ([ffe96fe](https://github.com/mitos-run/mitos/commit/ffe96fe2345bed5845d1e9ccb185b6b9d0ab167d))
+
+## [1.37.1](https://github.com/mitos-run/mitos/compare/v1.37.0...v1.37.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* **husk:** eagerly prewarm the child slot at startup so the first fork adopts it ([#855](https://github.com/mitos-run/mitos/issues/855)) ([718b1ce](https://github.com/mitos-run/mitos/commit/718b1cef3b28cbf2923a1338f06675e4cb4eb91e))
+
+## [1.37.0](https://github.com/mitos-run/mitos/compare/v1.36.0...v1.37.0) (2026-07-08)
+
+
+### Features
+
+* **controller:** wire --prewarm-child so the pre-warmed fork slot engages ([#853](https://github.com/mitos-run/mitos/issues/853)) ([63eb53a](https://github.com/mitos-run/mitos/commit/63eb53a912bb88fce14b8e443a1f51eb2a38cac1))
+
 ## [1.36.0](https://github.com/mitos-run/mitos/compare/v1.35.0...v1.36.0) (2026-07-08)
 
 

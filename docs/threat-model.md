@@ -327,6 +327,32 @@ controller is the trust anchor here, the same anchor as in the raw-forkd model
 and the encryption key custody (section 5); this is not a regression, it is the
 same boundary.
 
+*Persistent (reused) control connection.* `serveControlConn` serves MORE than one
+request per accepted connection: the mTLS handshake and the
+`AuthorizeControllerIdentity` check run ONCE, then the connection loops read-op /
+dispatch / write-result until the peer closes it, it sits idle past
+`controlIdleTimeout` (90s), or a framing error desyncs the stream. This exists so
+the controller can REUSE one authenticated connection per husk pod across RPCs
+(`internal/controller.HuskConnPool`, behind the DEFAULT-OFF `--husk-conn-reuse`
+flag), removing a TCP+TLS handshake per op on the hot fork path (a co-located
+fork's fork-snapshot + spawn-vm go to the SAME source pod). Reuse changes only
+WHEN the verified handshake happens, never WHETHER it is verified: the peer
+identity is bound to the mTLS session at handshake and does not change under a
+persistent connection, so every request on it comes from the same verified
+`pki.ControllerName` peer; there is no per-request re-auth to weaken because the
+session is unchanged. The pool serializes RPCs to a given pod behind a per-address
+mutex, so exactly one request/response is in flight per connection and concurrent
+forks never interleave frames on one stream; a read/write error, an idle
+connection past the pool's shorter retirement window (`huskConnIdle`, 30s), or a
+husk restart drops the connection and the pool re-dials a fresh authenticated one.
+The one-shot path (dial, one request, close) stays byte-for-byte the default and
+is what runs with the flag off. No secret VALUE is logged on this surface: a
+per-connection error names only the operation and the transport error, never the
+request payload. This is a NET-NEW long-lived-socket surface (a husk pod now holds
+an authenticated controller connection open between ops), bounded by the idle
+timeout and the one-in-flight-request-per-connection invariant; it does not widen
+who may drive the channel (still the controller identity only).
+
 **Surface 3: the READ-ONLY SNAPSHOT HOSTPATH.** The node template snapshot is
 mounted READ-ONLY into the husk pod (`huskpod.go`: the snapshot hostPath and the
 kernel file are both `ReadOnly: true`). The husk stub RE-VERIFIES the snapshot ON
@@ -562,6 +588,34 @@ is byte-for-byte the disk co-location (Husk fork snapshot row above). The patche
 Firecracker binary is behavior-identical to stock UNLESS the `FIRECRACKER_MITOS_*`
 env is set, and only the live-cow path sets it, so a pod with the flag off runs the
 stock VMM.
+
+**m7 lazy restore (guest memory is populated on demand).** A restored source used to
+get its guest RAM by COPYING the whole snapshot mem file into the shared memfd inside
+`PUT /snapshot/load`. The memfd is now created EMPTY and the same WP handler serves
+userfaultfd MISSING faults out of the mem file, so only the pages a guest touches are
+ever materialized. Three properties keep this from widening the surface:
+
+- The mem file the handler reads is the SAME snapshot the verify-on-activate gate
+  already checked (digest + snapcompat) before the load, so a MISSING fault can only
+  ever install bytes from an already-trusted image. The handler opens it read-only.
+- A page installed AFTER the freeze lands write-protected (`UFFDIO_COPY_MODE_WP`), so
+  the copy-before-unprotect invariant holds for pages that arrive late. The residual
+  chunks a parent never faulted in are filled AT the fork point (populate-on-freeze),
+  before the region is write-protected, so a co-located child never reads a hole (which
+  would be zeros, not the snapshot's bytes) through its `MAP_PRIVATE` view of the memfd.
+- FAIL CLOSED both ways: the patched VMM takes the lazy path only when the husk sets
+  BOTH `FIRECRACKER_MITOS_LAZY_RESTORE` and `FIRECRACKER_MITOS_WP_UDS`, and it ABORTS
+  the restore (`MitosLazyArmFailed`) rather than resuming vCPUs on all-zero guest RAM
+  if the handler does not arm. The stub likewise fails the activate if it cannot open
+  the mem source before the load. An older husk paired with the patched binary keeps
+  the eager copy.
+
+The kernel permits ONE userfaultfd per VMA, so MISSING and WRITE_PROTECT are registered
+on the SAME uffd (negotiating `UFFD_FEATURE_MISSING_SHMEM`, without which the kernel
+silently never delivers a MISSING fault on a shmem mapping and the guest would read the
+zero page). No new capability, socket, or file is introduced: it reuses the existing
+per-VM `FIRECRACKER_MITOS_WP_UDS` handshake and the `/dev/userfaultfd` device the kvm
+device plugin already injects on a live-cow pool.
 
 The new component is the parent-side write-protect fork handler on the forkd/husk
 side (`internal/fork/wpfork*.go`, a Go port of the m2 reference C handler). At a

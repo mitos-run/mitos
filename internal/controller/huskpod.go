@@ -196,6 +196,10 @@ type HuskPodOptions struct {
 	// memfd. REQUIRES LiveCowFork on and a child-side-import Firecracker binary;
 	// default off, fails closed to the disk restore.
 	LiveCowChildImport bool
+	// PrewarmChild starts the husk stub with --prewarm-child so a multi-vm pod keeps
+	// one dormant generic co-located child Firecracker pre-prepared and a fork adopts
+	// it (fc_boot off the hot path). DEFAULT OFF; requires MultiVM.
+	PrewarmChild bool
 	// MultiVMForkVMs is the number of ADDITIONAL fork-child VMs a multi-VM pod
 	// reserves node memory for up front (beyond the source VM), so the co-location
 	// routing has room to co-locate that many children before a fork spills to a new
@@ -555,6 +559,9 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 	}
 	if opts.LiveCowChildImport {
 		args = append(args, "--live-cow-child-import")
+	}
+	if opts.PrewarmChild {
+		args = append(args, "--prewarm-child")
 	}
 
 	// Live-cow write-protect needs a KERNEL-MODE userfaultfd over the guest RAM: the
@@ -1388,6 +1395,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 			MultiVM:            r.MultiVM,
 			LiveCowFork:        r.LiveCowFork,
 			LiveCowChildImport: r.LiveCowChildImport,
+			PrewarmChild:       r.PrewarmChild,
 			MultiVMForkVMs:     r.MultiVMForkVMs,
 			StubImage:          r.HuskStubImage,
 			DNSUpstream:        r.HuskDNSUpstream,
@@ -1687,6 +1695,31 @@ func huskPodOwnedByPool(pod *corev1.Pod, pool *v1.SandboxPool) bool {
 // huskPodReady reports whether a husk pod is a usable dormant slot: Running,
 // with a Ready condition True, and a non-empty PodIP (so the controller can
 // dial its control channel and set a reachable endpoint).
+// huskPodNotReadyReason renders, in one short phrase, why a husk pod is not usable
+// yet. The fan-out and claim paths skip such a pod and retry; without a reason a
+// permanently stuck pod is indistinguishable from one that is still coming up.
+// Returns "" for a pod that IS ready.
+func huskPodNotReadyReason(p *corev1.Pod) string {
+	if p.Status.Phase != corev1.PodRunning {
+		return fmt.Sprintf("pod phase %s", p.Status.Phase)
+	}
+	if p.Status.PodIP == "" {
+		return "pod has no IP yet"
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			if c.Status == corev1.ConditionTrue {
+				return ""
+			}
+			if c.Reason != "" {
+				return "pod not ready: " + c.Reason
+			}
+			return "pod not ready"
+		}
+	}
+	return "pod has no Ready condition"
+}
+
 func huskPodReady(p *corev1.Pod) bool {
 	if p.Status.Phase != corev1.PodRunning || p.Status.PodIP == "" {
 		return false

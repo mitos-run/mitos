@@ -120,6 +120,28 @@ release publishes them. Do not assume they work before then.
 - Windows: scoop and winget manifests are planned; until they publish, use the
   manual `.zip` archive.
 
+## Shell completion
+
+`mitos completion <bash|zsh|fish>` prints a completion script for the CLI verbs,
+subcommands, and flags. The scripts are static: they complete from the built-in
+command tree without contacting a cluster, so they work offline and never block
+your shell.
+
+```bash
+# current shell now, or persist for new shells
+source <(mitos completion bash)
+mitos completion bash | sudo tee /etc/bash_completion.d/mitos > /dev/null
+```
+
+```zsh
+# ensure `autoload -U compinit && compinit` runs in ~/.zshrc first
+mitos completion zsh > "${fpath[1]}/_mitos"
+```
+
+```fish
+mitos completion fish > ~/.config/fish/completions/mitos.fish
+```
+
 ## Verifying a download
 
 Every release publishes `mitos_<version>_checksums.txt`, a SHA256 manifest over all

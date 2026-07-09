@@ -187,3 +187,62 @@ func TestForkSnapshotLiveCowResumesSourceOnFreezeError(t *testing.T) {
 		t.Errorf("source VM must be resumed after a freeze failure (never left frozen)")
 	}
 }
+
+// TestForkSnapshotArmedSourceWritesMemWhenAChildWillSpill is the fork(n) spill gate.
+//
+// The vmstate-only capture writes NO `mem` file on the promise that every child boots
+// its guest RAM from the SOURCE's shared memfd. That promise only holds for a child
+// CO-LOCATED in the source pod. A fork whose replica count exceeds the pod's
+// co-location budget spills the remaining children into their own husk pods, and a
+// child in a different pod cannot reach the source's memfd: it must restore from the
+// disk fork snapshot. With no `mem` file there is nothing to restore, so those
+// children never activate and the fork hangs at "<budget>/<replicas> husk forks ready"
+// forever (observed in prod: replicas 6 stuck at 4/6, with the pool idle).
+//
+// So an armed source with child import ON must STILL take the Full path whenever the
+// controller tells it a child will spill.
+func TestForkSnapshotArmedSourceWritesMemWhenAChildWillSpill(t *testing.T) {
+	parent := &fakeLiveCowParent{freezeDur: 9 * time.Microsecond}
+	s, f := liveCowArmedStub(t, parent, true) // ARMED and child import ON
+
+	dir := t.TempDir()
+	res, err := s.ForkSnapshot(context.Background(), ForkSnapshotRequest{
+		ForkID:      "fork-1",
+		SnapshotDir: dir,
+		// The controller saw replicas > co-location budget: at least one child lands
+		// in its own pod and can only restore from disk.
+		RequireMemFile: true,
+	})
+	if err != nil || !res.OK {
+		t.Fatalf("ForkSnapshot (armed, child import on, spill expected): err=%v res=%+v", err, res)
+	}
+	if f.snapVMStateOnly {
+		t.Errorf("a fork with a spilling child must NOT take the vmstate-only path: the new-pod child cannot import the source memfd and would hang")
+	}
+	if f.snapMem != filepath.Join(dir, "mem") {
+		t.Errorf("a fork with a spilling child must write the disk mem file so the new-pod child is restorable, got mem=%q", f.snapMem)
+	}
+	if !f.resumed {
+		t.Errorf("source VM must be resumed after the fork snapshot")
+	}
+}
+
+// TestForkSnapshotArmedSourceStaysVmstateOnlyWhenAllChildrenCoLocate pins the fast
+// path: when every child fits the co-location budget the controller leaves
+// RequireMemFile false, and the armed source still skips the mem write.
+func TestForkSnapshotArmedSourceStaysVmstateOnlyWhenAllChildrenCoLocate(t *testing.T) {
+	parent := &fakeLiveCowParent{freezeDur: 9 * time.Microsecond}
+	s, f := liveCowArmedStub(t, parent, true)
+
+	dir := t.TempDir()
+	res, err := s.ForkSnapshot(context.Background(), ForkSnapshotRequest{ForkID: "fork-1", SnapshotDir: dir})
+	if err != nil || !res.OK {
+		t.Fatalf("ForkSnapshot: err=%v res=%+v", err, res)
+	}
+	if !f.snapVMStateOnly {
+		t.Errorf("an armed source whose children all co-locate must still take the vmstate-only path")
+	}
+	if f.snapMem != "" {
+		t.Errorf("the vmstate-only path must write no mem file, got %q", f.snapMem)
+	}
+}

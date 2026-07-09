@@ -70,12 +70,31 @@ controller:
   # fork. Only meaningful with enableHuskPods.
   liveCowFork: false
 
+  # EXPERIMENTAL, default off. When true, render --husk-conn-reuse: the controller
+  # reuses ONE authenticated mTLS husk control connection per husk pod across RPCs
+  # (activate, fork-snapshot, spawn-vm, remove-fork-snapshot) instead of a fresh
+  # TCP+TLS handshake per RPC. A co-located fork does fork-snapshot then spawn-vm
+  # to the SAME source pod, so reuse saves the second handshake and cuts per-RPC
+  # connection-setup overhead toward zero (hosted fork toward sub-100ms). Off is
+  # byte-for-byte the current one-shot dial-per-RPC path. The husk server always
+  # accepts both a one-shot and a reused connection, so this only changes the
+  # controller and canaries + rolls back independently. mTLS identity is verified
+  # on every dial and one request is in flight per connection. Only meaningful
+  # with enableHuskPods.
+  huskConnReuse: false
+
   # EXPERIMENTAL, default off. When true (and liveCowFork on), render
   # --live-cow-child-import so an armed live-cow fork takes the vmstate-only capture
   # (skip the ~364ms disk mem write) and the co-located child boots its guest RAM
   # from the source shared memfd. Requires a child-side-import patched Firecracker;
   # off keeps the armed source writing the disk mem so every child restores from disk.
   liveCowChildImport: false
+
+  # EXPERIMENTAL, default off. When true (and multiVMFork on), render --prewarm-child
+  # so each multi-vm husk pod keeps one dormant generic co-located child Firecracker
+  # pre-prepared and a fork adopts it (fc_boot off the hot path) instead of booting one
+  # at fork time. A fresh slot re-warms async; a miss falls back to on-demand prepare.
+  prewarmChild: false
   # Value for --husk-data-dir: the node template snapshot root the husk pods
   # mount; must match forkd's --data-dir.
   huskDataDir: /var/lib/mitos

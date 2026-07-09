@@ -17,6 +17,8 @@ import (
 
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/vsock"
+
+	"mitos.run/mitos/internal/guestgrpc"
 )
 
 // fakeVMM records the snapshot-load arguments and returns a canned error.
@@ -205,7 +207,7 @@ type fakeNotifier struct {
 	gotReq     []ActivateRequest
 }
 
-func (f *fakeNotifier) notify(vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error {
+func (f *fakeNotifier) notify(_ *guestgrpc.Client, vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -247,7 +249,11 @@ func newTestStubWithNotifier(t *testing.T, vm *fakeVMM, ready guestReady, n *fak
 	})
 }
 
-func readyOK(context.Context, string, time.Duration) error { return nil }
+// readyOK is the no-op readiness seam. It returns a nil client, which makes the
+// notifier dial the guest itself (the unit paths have no live gRPC server to reuse).
+func readyOK(context.Context, string, time.Duration) (*guestgrpc.Client, error) {
+	return nil, nil
+}
 
 func TestActivateBeforePrepareErrors(t *testing.T) {
 	s := newTestStub(t, &fakeVMM{}, readyOK)
@@ -364,8 +370,8 @@ func TestActivateLoadFailureFailsClosed(t *testing.T) {
 
 func TestActivateGuestNotReadyFailsClosed(t *testing.T) {
 	vm := &fakeVMM{}
-	readyTimeout := func(context.Context, string, time.Duration) error {
-		return errors.New("no ping")
+	readyTimeout := func(context.Context, string, time.Duration) (*guestgrpc.Client, error) {
+		return nil, errors.New("no ping")
 	}
 	s := newTestStub(t, vm, readyTimeout)
 	if err := s.Prepare(context.Background()); err != nil {
@@ -543,9 +549,9 @@ func TestServeDispatchesActivate(t *testing.T) {
 	vm := &fakeVMM{}
 	// A readiness wait long enough that the measured activate latency is
 	// non-zero even on a fast machine (the fake load is instantaneous).
-	readySlow := func(context.Context, string, time.Duration) error {
+	readySlow := func(context.Context, string, time.Duration) (*guestgrpc.Client, error) {
 		time.Sleep(time.Millisecond)
-		return nil
+		return nil, nil
 	}
 	s := newTestStub(t, vm, readySlow)
 	if err := s.Prepare(context.Background()); err != nil {

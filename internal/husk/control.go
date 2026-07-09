@@ -163,6 +163,52 @@ func ReadResult(r io.Reader) (ActivateResult, error) {
 	return res, err
 }
 
+// The Read*ResultReader variants below decode exactly one newline-delimited
+// result from a SHARED, persistent *bufio.Reader (via readLineReader, which
+// stops at the first '\n' and leaves any surplus buffered on the reader). The
+// io.Reader forms above wrap the stream in a per-call bufio.Scanner that MAY
+// read past the newline and DISCARD the surplus, which corrupts the next read on
+// a REUSED connection. A one-shot connection (dial, one request, close) sees no
+// next read, so the io.Reader forms stay correct there; a controller connection
+// pool that reuses one authenticated stream across RPCs MUST use these reader
+// forms so consecutive results decode cleanly. The decoded value is byte-for-
+// byte identical either way; only the stream-position bookkeeping differs.
+
+// ReadResultReader reads one ActivateResult from a shared reader.
+func ReadResultReader(r *bufio.Reader) (ActivateResult, error) {
+	var res ActivateResult
+	err := readLineReader(r, &res)
+	return res, err
+}
+
+// ReadForkSnapshotResultReader reads one ForkSnapshotResult from a shared reader.
+func ReadForkSnapshotResultReader(r *bufio.Reader) (ForkSnapshotResult, error) {
+	var res ForkSnapshotResult
+	err := readLineReader(r, &res)
+	return res, err
+}
+
+// ReadSpawnVMResultReader reads one SpawnVMResult from a shared reader.
+func ReadSpawnVMResultReader(r *bufio.Reader) (SpawnVMResult, error) {
+	var res SpawnVMResult
+	err := readLineReader(r, &res)
+	return res, err
+}
+
+// ReadDehydrateWorkspaceResultReader reads one DehydrateWorkspaceResult from a shared reader.
+func ReadDehydrateWorkspaceResultReader(r *bufio.Reader) (DehydrateWorkspaceResult, error) {
+	var res DehydrateWorkspaceResult
+	err := readLineReader(r, &res)
+	return res, err
+}
+
+// ReadHydrateWorkspaceResultReader reads one HydrateWorkspaceResult from a shared reader.
+func ReadHydrateWorkspaceResultReader(r *bufio.Reader) (HydrateWorkspaceResult, error) {
+	var res HydrateWorkspaceResult
+	err := readLineReader(r, &res)
+	return res, err
+}
+
 // ControlOp discriminates the control message that follows it on the wire, so
 // one mTLS control channel can serve activate, fork-snapshot, and
 // remove-fork-snapshot. The op line is written BEFORE the request line. The
@@ -286,6 +332,22 @@ type ForkSnapshotRequest struct {
 	ForkID      string `json:"fork_id"`
 	SnapshotDir string `json:"snapshot_dir"`
 	PauseSource bool   `json:"pause_source,omitempty"`
+	// RequireMemFile forces the Full CreateSnapshot(mem, vmstate) capture even on an
+	// armed live-cow source with child import enabled, which would otherwise take the
+	// vmstate-only path and write NO `mem` file.
+	//
+	// The vmstate-only capture is only restorable by a child that can reach the
+	// SOURCE's shared memfd, which means a child CO-LOCATED in the source pod. When a
+	// fork's replica count exceeds the pod's co-location budget the remaining children
+	// spill into their OWN husk pods, and a child in a different pod has no path to
+	// that memfd: it must restore from the disk fork snapshot. Without a `mem` file it
+	// has nothing to restore, never activates, and the fork hangs at
+	// "<budget>/<replicas> husk forks ready" forever.
+	//
+	// The controller knows the co-location budget before it takes the one-time fork
+	// snapshot, so it sets this whenever ANY child will land in its own pod. Empty
+	// (false) keeps the fast vmstate-only path for a fully co-located fork.
+	RequireMemFile bool `json:"require_mem_file,omitempty"`
 }
 
 // ForkSnapshotResult is the control reply for a ForkSnapshot op. OK is true only

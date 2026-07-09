@@ -167,6 +167,77 @@ func TestPrewarmedChildIsConsumedAndReWarmed(t *testing.T) {
 	}
 }
 
+// TestSourceActivationEagerlyWarmsSlotSoFirstForkAdopts proves the STARTUP wiring:
+// activating the SOURCE (default) VM eagerly warms the child slot on its own, so a
+// pod's FIRST co-located fork adopts it (fc_boot=0) WITHOUT any caller ever calling
+// PrewarmChild by hand. This is the exact gap the manual-PrewarmChild tests missed:
+// in prod the slot must exist before the first fork, and only the source activation
+// (not a prior fork) can create it for that first fork.
+func TestSourceActivationEagerlyWarmsSlotSoFirstForkAdopts(t *testing.T) {
+	vms := newVMRegistry()
+	s := newPrewarmTestStub(t, vms)
+
+	// Bring up + activate the source VM ONLY. Deliberately do NOT call PrewarmChild:
+	// the activation itself must trigger the eager warm.
+	if err := s.prepareInstance(context.Background(), defaultVMID, "", nil); err != nil {
+		t.Fatalf("prepareInstance(default): %v", err)
+	}
+	if _, err := s.activateInstance(context.Background(), defaultVMID, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
+		t.Fatalf("activateInstance(default): %v", err)
+	}
+
+	// The source activation alone must have booted a dormant child slot (off the
+	// activate path), so the first fork has something to adopt.
+	warmed := waitForPrewarmSlot(t, s)
+	if got := vms.get(prewarmSlotCfgID); got != warmed {
+		t.Fatalf("source activation must eagerly boot the dormant child under %q", prewarmSlotCfgID)
+	}
+
+	// The pod's FIRST fork (no prior fork, no manual PrewarmChild) ADOPTS the eagerly
+	// warmed child: no on-demand boot under its own derived id, and fc_boot=0.
+	res := s.SpawnVM(context.Background(), SpawnVMRequest{
+		VMID:     "fork-1",
+		Activate: ActivateRequest{SnapshotDir: "/snap"},
+	})
+	if !res.OK {
+		t.Fatalf("first SpawnVM must adopt the eagerly warmed child: %+v", res)
+	}
+	if instVM(s, "fork-1") != warmed {
+		t.Fatal("the FIRST fork must ADOPT the eagerly warmed child, not boot its own")
+	}
+	if booted := vms.get("husk-test-fork-1"); booted != nil {
+		t.Fatal("adopting the eager slot must NOT boot a Firecracker under the fork's derived id")
+	}
+	if fc, ok := res.Stages["fc_boot"]; !ok || fc != 0 {
+		t.Fatalf("first fork fc_boot = %v (ok=%v), want 0 (boot pre-paid by eager warm at source activation)", fc, ok)
+	}
+}
+
+// TestSourceActivationDoesNotWarmWhenPrewarmOff proves the eager warm is gated: with
+// pre-warm OFF (the default), activating the source VM creates NO reserved slot, so
+// the wiring is byte-for-byte the prior on-demand path when the flag is off.
+func TestSourceActivationDoesNotWarmWhenPrewarmOff(t *testing.T) {
+	vms := map[string]*fakeVMM{}
+	s := newMultiVMTestStub(t, vms) // PrewarmChild defaults off
+	if err := s.prepareInstance(context.Background(), defaultVMID, "", nil); err != nil {
+		t.Fatalf("prepareInstance(default): %v", err)
+	}
+	if _, err := s.activateInstance(context.Background(), defaultVMID, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
+		t.Fatalf("activateInstance(default): %v", err)
+	}
+	// eagerPrewarmChildAsync returns before spawning any goroutine when the flag is
+	// off, so this is deterministic: no reserved slot exists.
+	s.mu.Lock()
+	_, slotExists := s.instances[prewarmSlotVMID]
+	s.mu.Unlock()
+	if slotExists {
+		t.Fatal("with pre-warm off, source activation must not create the reserved slot")
+	}
+	if vm := s.consumePrewarmedChild(); vm != nil {
+		t.Fatal("with pre-warm off, no eager slot may be consumable after activation")
+	}
+}
+
 // TestPrewarmMissBootsOnDemandThenWarms proves the fallback: with the slot not yet
 // warm, the FIRST fork boots on demand (fc_boot recorded, byte-for-byte the prior
 // behavior) and the slot is warmed for a LATER fork, off the hot path.

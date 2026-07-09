@@ -142,12 +142,41 @@ func (s *Stub) warmPrewarmChild(ctx context.Context) error {
 // waits on or fails from the pool refill. single-flight in warmPrewarmChild keeps
 // concurrent calls to one dormant child.
 func (s *Stub) rewarmPrewarmChildAsync() {
+	s.warmPrewarmChildAsync("re-warm pre-warmed child failed (next fork boots on demand)")
+}
+
+// eagerPrewarmChildAsync boots the pod's dormant child slot as soon as the SOURCE
+// (default) VM has activated, so a pod's FIRST co-located fork already finds a warm
+// slot to ADOPT (fc_boot=0) instead of paying the process boot on its hot path.
+// Without this the slot is created ONLY by the post-fork rewarmPrewarmChildAsync,
+// so the FIRST fork of a freshly claimed pod always misses the slot (in prod most
+// forks are a fresh pod's first fork). activateInstance calls it once the default
+// VM reaches StateActive; it is a no-op when pre-warm is off or the pod is
+// single-VM. It runs OFF the activate path (its own goroutine + a background
+// context, since the activate ctx may be cancelled once Activate returns) so it
+// never delays the activation or the first request. warmPrewarmChild is
+// single-flight and fail-closed, so an eager warm racing the first fork is safe: a
+// miss just falls back to the on-demand prepare, and the pod never keeps more than
+// one dormant child. It fires ONLY on the source activation (a CLAIMED pod), so an
+// unclaimed warm-pool pod never boots a dormant child it may never fork, and the
+// warm slot the fork adopts is the SAME extra VM the on-demand fork would have
+// booted, so eager warming never over-admits the pod's per-VM memory budget.
+func (s *Stub) eagerPrewarmChildAsync() {
+	s.warmPrewarmChildAsync("eager pre-warm child at source activation failed (first fork boots on demand)")
+}
+
+// warmPrewarmChildAsync is the shared body of the eager (source-activation) and
+// re-warm (post-fork) paths: a no-op when pre-warm is off or the pod is single-VM,
+// else it runs the single-flight, fail-closed warmPrewarmChild on its own goroutine
+// and a background context (the caller's ctx may be cancelled once it returns),
+// logging failCtx on error so neither path ever blocks or fails on the pool refill.
+func (s *Stub) warmPrewarmChildAsync(failCtx string) {
 	if !s.multiVM || !s.prewarmChild {
 		return
 	}
 	go func() {
 		if err := s.warmPrewarmChild(context.Background()); err != nil {
-			fmt.Fprintf(os.Stderr, "husk: re-warm pre-warmed child failed (next fork boots on demand): %v\n", err)
+			fmt.Fprintf(os.Stderr, "husk: %s: %v\n", failCtx, err)
 		}
 	}()
 }

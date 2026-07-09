@@ -523,6 +523,21 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	recordStage(stages, "egress_filter", mark)
 	mark = time.Now()
 
+	// LAZY live-cow restore (this is what makes vmstate_restore O(1) instead of an
+	// eager 512 MiB memfd copy inside PUT /snapshot/load): hand the armed WP handler
+	// the mem file BEFORE the load, so it can serve the MISSING faults the patched
+	// Firecracker will take for every guest page. Only the SOURCE VM restores from a
+	// disk mem file; a co-located fork child imports the parent's memfd and never
+	// reaches the lazy branch. FAIL CLOSED: the source was launched with
+	// EnvLazyRestore, so a handler that cannot read the mem file means guest RAM would
+	// stay zeroed; refuse to load rather than run a VM on empty memory.
+	if id == defaultVMID && !req.ForkSnapshot {
+		if err := s.setLiveCowMemSource(memFile); err != nil {
+			werr := fmt.Errorf("husk: arm lazy live-cow mem source for vm %q: %w", id, err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+	}
+
 	// Load PAUSED so the rootfs drive can be rebound before the guest runs, then
 	// resume explicitly, exactly as the single-VM path does. A co-located live-cow
 	// fork child armed with a lazy-UFFD import (childUFFDPlan) restores through
@@ -560,9 +575,15 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	mark = time.Now()
 
 	vsockPath := inst.vm.VsockHostPath(firecracker.VsockRelPath)
-	if err := s.ready(ctx, vsockPath, s.readyTimeout); err != nil {
+	guestConn, err := s.ready(ctx, vsockPath, s.readyTimeout)
+	if err != nil {
 		werr := fmt.Errorf("husk: guest not ready after activate for vm %q: %w", id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
+	// Reuse the connection the readiness probe proved healthy for the handshake below,
+	// instead of dialing the guest over vsock a second time. We own the Close.
+	if guestConn != nil {
+		defer guestConn.Close() //nolint:errcheck // best-effort on close
 	}
 	recordStage(stages, "guest_ready", mark)
 	mark = time.Now()
@@ -581,7 +602,7 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	// keeping the guest address and the tap/masquerade in agreement per instance.
 	notifyReq := req
 	notifyReq.Network = perNet
-	if err := s.notify(vsockPath, inst.generation, entropy, notifyReq); err != nil {
+	if err := s.notify(guestConn, vsockPath, inst.generation, entropy, notifyReq); err != nil {
 		werr := fmt.Errorf("husk: fork-correctness handshake failed for vm %q: %w", id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
@@ -602,6 +623,18 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	// names and durations only; no secret, token, or entropy value is logged.
 	fmt.Fprintf(os.Stderr, "husk: activate vm %q stage timing ms: %s total=%.2f\n", id, formatStages(stages), float64(latency.Microseconds())/1000.0)
 	inst.state = StateActive
+	// A claimed pod is now a live tenant VM whose next request may be a co-located
+	// fork. Eagerly boot the pod's ONE dormant child slot so that FIRST fork adopts
+	// it (fc_boot=0) instead of paying the boot on its hot path; without this the
+	// slot is created only AFTER a fork, so a fresh pod's first fork always misses.
+	// Gated on the SOURCE (default) VM: a fork child's own activation must not warm
+	// a slot (SpawnVM's post-fork rewarm already replenishes). Off the hot path (a
+	// goroutine) and fail-closed, so it never delays activate and never over-admits
+	// the per-VM budget (the adopted slot is the same extra VM an on-demand fork
+	// would boot). A no-op when pre-warm is off or the pod is single-VM.
+	if id == defaultVMID {
+		s.eagerPrewarmChildAsync()
+	}
 	return ActivateResult{
 		OK:        true,
 		VsockPath: vsockPath,
@@ -1203,7 +1236,12 @@ func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapsh
 	// `mem`) unless child import is enabled; the freeze is only worthwhile when the
 	// child actually consumes the frozen memfd. This keeps a re-enabled live-cow
 	// source's forks fast and RESTORABLE (the proven disk path) instead of hung.
-	if freezer := s.liveCowSnapshotFreezer(); freezer != nil && s.liveCowChildImport {
+	// SPILL GATE (see ForkSnapshotRequest.RequireMemFile): child import only makes the
+	// mem-skip safe for a child CO-LOCATED in this pod, which is the only child that
+	// can reach this source's shared memfd. When the controller tells us a child will
+	// land in its OWN pod, that child can restore only from disk, so the Full path must
+	// write the mem file or the fork hangs with the spilled children stuck Restoring.
+	if freezer := s.liveCowSnapshotFreezer(); freezer != nil && s.liveCowChildImport && !req.RequireMemFile {
 		if _, err := freezer.Freeze(); err != nil {
 			_ = s.resumeInstanceAfterFork(id, inst)
 			werr := fmt.Errorf("husk: freeze source guest for live-cow fork snapshot vm %q: %w", id, err)

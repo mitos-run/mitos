@@ -103,6 +103,53 @@ type huskVMSpawner func(ctx context.Context, addr string, tlsConf *tls.Config, r
 // scheduler reserved, so an over-admission fails closed as an intra-pod OOM, not a
 // node overcommit), spilling the over-budget child is the correct outcome and is
 // now what happens.
+// noteFirstBlocked records the FIRST child that could not be brought up in this
+// fan-out pass, together with why. Later blockers in the same pass are usually
+// consequences of the same underlying stall, so the first cause is the useful one.
+// Every retry `continue` in the fan-out calls this, so a fork that cannot progress
+// always has a cause to report on its Ready condition instead of a bare count (#872).
+func noteFirstBlocked(child, reason *string, name, cause string) {
+	if *child != "" {
+		return
+	}
+	*child, *reason = name, cause
+}
+
+// forkReadyMessage renders the fork's Ready condition message. When the fan-out cannot
+// make progress it names the blocking child and its cause, so a stalled fork says WHY
+// instead of repeating a bare count forever (#872). A complete fork reports only the
+// count: a child recorded as blocked on an earlier pass is stale once every replica is
+// ready.
+func forkReadyMessage(ready, replicas int, blockedChild, blockedReason string) string {
+	msg := fmt.Sprintf("%d/%d husk forks ready", ready, replicas)
+	if ready >= replicas || blockedChild == "" {
+		return msg
+	}
+	return fmt.Sprintf("%s; child %s blocked: %s", msg, blockedChild, blockedReason)
+}
+
+// forkSpillsToNewPod reports whether ANY child of a fork with this many replicas
+// will land in its own husk pod rather than co-locating inside the source pod.
+//
+// It decides whether the one-time fork snapshot must carry a `mem` file. The
+// vmstate-only capture an armed live-cow source takes writes no `mem` and is
+// restorable ONLY by a co-located child, which boots its guest RAM from the source
+// pod's shared memfd. A spilled child lives in a DIFFERENT pod, has no path to that
+// memfd, and can restore only from disk: with no `mem` file it never activates, and
+// the fork wedges at "<budget>/<replicas> husk forks ready" with no error (the prod
+// hang, mitos-run/mitos#872).
+//
+// Conservative by construction: co-location requires multi-vm routing AND a capable
+// source pod, so a false spawnInSourcePod means every child spills. A budget already
+// consumed by other concurrent forks (budgetRemaining 0, including the occupancy-list
+// error path) likewise spills.
+func forkSpillsToNewPod(spawnInSourcePod bool, coLocationBudgetRemaining, replicas int) bool {
+	if !spawnInSourcePod {
+		return true
+	}
+	return replicas > coLocationBudgetRemaining
+}
+
 func coLocatedForkVMBudget(pod *corev1.Pod) int {
 	if pod == nil {
 		return 0
@@ -232,6 +279,26 @@ func logForkStage(logger logr.Logger, id, name string, rpc time.Duration, huskLa
 		kv = append(kv, stage+"Ms", huskStages[stage])
 	}
 	logger.Info("fork stage timing", kv...)
+}
+
+// logForkOrchStage emits one fork-reconcile ORCHESTRATION sub-step boundary: the
+// wall-clock a single non-RPC step of the hosted fork hot path took (an mTLS
+// config resolve, a k8s API List/Get/Create, a Status().Update write, or the gap
+// between two RPCs). It shares logForkStage's "fork stage timing" message and the
+// forkStageDurationSeconds metric so the whole fork breakdown reads as one series
+// (`grep 'fork stage timing'`), but carries only a durMs field: an orchestration
+// step has no husk-reported round-trip or stub sub-stages, and labeling a k8s
+// List as "rpcMs" would be misleading. name is a fixed, low-cardinality stage
+// label (dial_tls, colocation_list, pool_get, child_pod_ensure, status_write_*,
+// snapshot_to_spawn_gap). Timing/observability only; drives no behavior and
+// emits no secret, token, entropy, or id value.
+func logForkOrchStage(logger logr.Logger, id, name string, d time.Duration) {
+	observeForkStage(name, d.Seconds())
+	logger.Info("fork stage timing",
+		"fork", id,
+		"stage", name,
+		"durMs", float64(d.Microseconds())/1000.0,
+	)
 }
 
 // reconcileFromSandbox owns the fork engine for a source.fromSandbox Sandbox: a
@@ -658,17 +725,31 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	if sandboxPort == 0 {
 		sandboxPort = huskSandboxPort
 	}
+	// The husk control seams default to the one-shot huskclient.go dialers, or,
+	// when the connection pool is wired (--husk-conn-reuse), to the pool's reusing
+	// variants so the co-located fork's fork-snapshot and spawn-vm to the SAME
+	// source pod share one authenticated mTLS connection. An explicitly-injected
+	// test fake still wins (the nil check).
 	forkSnap := r.forkSnapshot
 	if forkSnap == nil {
 		forkSnap = ForkSnapshotOnHusk
+		if r.HuskConns != nil {
+			forkSnap = r.HuskConns.ForkSnapshotOnHusk
+		}
 	}
 	activate := r.Activate
 	if activate == nil {
 		activate = ActivateHuskPod
+		if r.HuskConns != nil {
+			activate = r.HuskConns.ActivateHuskPod
+		}
 	}
 	spawnVM := r.spawnVM
 	if spawnVM == nil {
 		spawnVM = SpawnVMOnHusk
+		if r.HuskConns != nil {
+			spawnVM = r.HuskConns.SpawnVMOnHusk
+		}
 	}
 
 	// MultiVMFork routing decision, computed ONCE for the whole fan-out. The
@@ -699,7 +780,13 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	// unchanged.
 	coLocationBudgetRemaining := coLocationBudget
 	if spawnInSourcePod && coLocationBudget > 0 {
+		colocListStart := time.Now()
 		otherOccupancy, occErr := r.coLocatedVMsInPodByOtherForks(ctx, fork, srcPod)
+		// Time the cross-fork occupancy List (a k8s API round-trip over all pods in
+		// the namespace): part of the orchestration overhead between the two husk
+		// RPCs. Only observed on the co-location candidate path, so the flag-off /
+		// non-capable / zero-budget paths never emit it.
+		logForkOrchStage(logger, fork.Name, "colocation_list", time.Since(colocListStart))
 		if occErr != nil {
 			// Conservative on error: treat the pod as full and co-locate nothing this
 			// pass (spill), never over-admit. The children take the honestly
@@ -714,6 +801,16 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		}
 	}
 
+	// The first child that blocked the fan-out this pass, surfaced on the Ready
+	// condition so a stalled fork explains itself.
+	var blockedChild, blockedReason string
+
+	// Whether any child will spill into its own pod, decided from the SAME budget the
+	// fan-out loop below uses. It must be known BEFORE the one-time snapshot, because
+	// a spilled child can restore only from disk and therefore needs the `mem` file
+	// the armed live-cow source would otherwise skip (#872).
+	spillsToNewPod := forkSpillsToNewPod(spawnInSourcePod, coLocationBudgetRemaining, int(effectiveReplicas(fork)))
+
 	// One fork snapshot per SandboxFork, keyed by the fork name, taken EXACTLY
 	// ONCE and reused for every child across reconcile passes. Children take
 	// several passes to reach Ready; re-snapshotting on each pass would re-pause
@@ -723,6 +820,9 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	// persisted Status.ForkSnapshotTaken flag, so it survives a controller restart
 	// mid-fork (the source is never re-paused once the snapshot exists).
 	forkID := fork.Name
+	// Timing only: stamped when the one-time snapshot RPC + its status write finish
+	// on the pass that takes them, so the gap to the fan-out loop is attributable.
+	var snapshotDoneAt time.Time
 	if !fork.Status.ForkSnapshotTaken {
 		srcAddr := net.JoinHostPort(srcPod.Status.PodIP, strconv.Itoa(controlPort))
 		snapCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
@@ -730,7 +830,15 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// The source stub writes the snapshot inside its OWN in-pod forks dir mount
 		// (huskForksMountPath/<fork-id>); the child reads the same node dir mounted
 		// read-only at HuskSnapshotDir.
+		// Time the mTLS config resolve EXPLICITLY. huskDialTLS resolves only the
+		// per-namespace *tls.Config (HuskTLSFor or the prebuilt HuskTLS); the actual
+		// TCP + mTLS handshake happens INSIDE forkSnap's tls.Dialer.DialContext and is
+		// therefore already folded into the fork_snapshot_rpc stage below, not into
+		// this dial_tls number. This split makes it visible whether the config resolve
+		// itself is cheap (expected ~0 ms) versus the handshake cost living in the RPC.
+		dialTLSStart := time.Now()
 		tlsConf, err := r.huskDialTLS(snapCtx, fork.Namespace)
+		logForkOrchStage(logger, forkID, "dial_tls", time.Since(dialTLSStart))
 		var snapRes husk.ForkSnapshotResult
 		snapStart := time.Now()
 		if err == nil {
@@ -738,6 +846,9 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 				ForkID:      forkID,
 				SnapshotDir: huskForksInPodDir(forkID),
 				PauseSource: fork.Spec.Source.FromSandbox.PauseSource,
+				// A spilled child restores from disk, so the source must write `mem`
+				// even when it is an armed live-cow source with child import on.
+				RequireMemFile: spillsToNewPod,
 			})
 		}
 		// Time the fork-snapshot RPC round-trip and record the husk-reported
@@ -761,9 +872,18 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// source on the next pass. The children always re-read the same fork
 		// snapshot dir, so persisting the flag first is safe.
 		fork.Status.ForkSnapshotTaken = true
-		if err := r.Status().Update(ctx, fork); err != nil {
-			return ctrl.Result{}, err
+		snapWriteStart := time.Now()
+		snapWriteErr := r.Status().Update(ctx, fork)
+		logForkOrchStage(logger, forkID, "status_write_snapshot", time.Since(snapWriteStart))
+		if snapWriteErr != nil {
+			return ctrl.Result{}, fmt.Errorf("persist fork snapshot-taken status: %w", snapWriteErr)
 		}
+		// Mark the moment the one-time fork-snapshot work finished on THIS pass, so
+		// the orchestration gap between the snapshot RPC returning and the fan-out
+		// loop starting the spawn/activate RPCs is attributable (only meaningful on
+		// the pass that actually took the snapshot; a later pass skips this block and
+		// leaves the marker zero).
+		snapshotDoneAt = time.Now()
 	}
 
 	// Resolve the SOURCE's pool template so the fork child inherits the SAME
@@ -782,6 +902,10 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	// intends.
 	template := &v1.PoolTemplateSpec{}
 	if source.Spec.Source.PoolRef != nil {
+		// Time the source pool Get + template resolve (one k8s API Get for the pool,
+		// plus resolvePoolTemplate). Runs every pass on the co-location path between
+		// the two husk RPCs, so it is part of the orchestration overhead.
+		poolGetStart := time.Now()
 		var pool v1.SandboxPool
 		if err := r.Get(ctx, client.ObjectKey{Namespace: fork.Namespace, Name: source.Spec.Source.PoolRef.Name}, &pool); err != nil {
 			logger.Info("fork child source pool unresolved; using fail-closed default-deny network and default resources", "pool", source.Spec.Source.PoolRef.Name, "detail", err.Error())
@@ -790,6 +914,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		} else {
 			template = t
 		}
+		logForkOrchStage(logger, forkID, "pool_get", time.Since(poolGetStart))
 	}
 	netCfg := huskEgressConfig(template)
 
@@ -845,6 +970,16 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 	recorded := make(map[string]v1.SandboxChild, len(fork.Status.Children))
 	for _, f := range fork.Status.Children {
 		recorded[f.Name] = f
+	}
+
+	// On the pass that took the snapshot, attribute the orchestration gap between
+	// the fork-snapshot RPC returning and the fan-out loop starting the per-child
+	// spawn/activate RPCs (its constituents status_write_snapshot + pool_get are
+	// logged individually above; the per-child token write + mTLS resolve inside the
+	// spawn path are their own stages). Zero marker means a later pass that skipped
+	// the snapshot, so nothing is emitted.
+	if !snapshotDoneAt.IsZero() {
+		logForkOrchStage(logger, forkID, "snapshot_to_spawn_gap", time.Since(snapshotDoneAt))
 	}
 
 	var ready int32
@@ -915,17 +1050,24 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 					}
 				}
 				fork.Status.Children = persisted
-				if err := r.Status().Update(ctx, fork); err != nil {
+				coWriteStart := time.Now()
+				coWriteErr := r.Status().Update(ctx, fork)
+				// Time the per-co-located-slot status write (one k8s API write per spawned
+				// child, so a wide co-location fan-out pays this N times); logged even on
+				// error so a slow conflict/timeout is still attributable.
+				logForkOrchStage(logger, childName, "status_write_colocated", time.Since(coWriteStart))
+				if coWriteErr != nil {
 					// A conflict means a concurrent writer advanced the fork; returning the
 					// error requeues so the next pass re-reads and recounts occupancy fresh,
 					// never over-admitting.
-					return ctrl.Result{}, err
+					return ctrl.Result{}, fmt.Errorf("persist co-located child status: %w", coWriteErr)
 				}
 			}
 			// A failed spawn is NOT wedged: the slot is left not-ready with the cause
 			// logged (issue #28), and the reconcile requeues below because
 			// ReadyReplicas < Replicas. It never silently hangs and never weakens the
 			// new-pod fallback for the OFF path.
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, "co-located spawn-vm did not bring the child up")
 			continue
 		}
 
@@ -933,15 +1075,25 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// The recorded-slot carry-forward is hoisted above the routing branches, so a
 		// slot already activated (in-source-pod or in its own pod) never reaches here
 		// and this only runs for a genuinely new slot on the new-pod path.
+		childPodStart := time.Now()
 		child, err := r.ensureForkChildPod(ctx, fork, srcPod, childName, opts)
+		// Time the get-or-create of the child pod (a k8s Get, plus a Create on the
+		// first pass for a new slot): the new-pod path's orchestration cost.
+		logForkOrchStage(logger, childName, "child_pod_ensure", time.Since(childPodStart))
 		if err != nil {
 			logger.Error(err, "create fork child pod failed", "child", childName)
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, "create child pod failed: "+err.Error())
 			continue
 		}
 
 		// The child must be Running+Ready before it can be activated. Not ready yet:
-		// requeue this slot next pass WITHOUT creating any extra pod.
+		// requeue this slot next pass WITHOUT creating any extra pod. Record WHY so a
+		// child that will NEVER become ready (a spilled child with nothing to restore,
+		// #872) is visible on the fork's condition instead of hiding behind the count.
 		if child.Status.PodIP == "" || !huskPodReady(child) {
+			reason := huskPodNotReadyReason(child)
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, reason)
+			logger.Info("fork child pod not ready yet, will retry", "child", childName, "detail", reason)
 			continue
 		}
 
@@ -954,14 +1106,23 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		// (the stub refuses: "must be dormant") with a different token, forever.
 		// Persisting first and reusing the same token means a re-drive activates
 		// with the token the VM already holds, and AlreadyActive lets us adopt it.
+		tokenStart := time.Now()
 		apiToken, err := ensureForkChildToken(ctx, r.Client, fork, childName+tokenSecretSuffix, endpoint)
+		// Time the per-child token Secret write (a k8s Secret get-or-create) that
+		// precedes the activate RPC on the new-pod path.
+		logForkOrchStage(logger, childName, "child_token_write", time.Since(tokenStart))
 		if err != nil {
 			logger.Error(err, "fork child token secret write failed", "child", childName)
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, "child token secret write failed: "+err.Error())
 			continue
 		}
 
 		addr := net.JoinHostPort(child.Status.PodIP, strconv.Itoa(controlPort))
+		// mTLS config resolve for the activate dial (the TCP + handshake itself lives
+		// inside the activate_rpc stage; see the snapshot-block dial_tls note).
+		dialTLSStart := time.Now()
 		tlsConf, err := r.huskDialTLS(ctx, fork.Namespace)
+		logForkOrchStage(logger, childName, "dial_tls", time.Since(dialTLSStart))
 		var actRes husk.ActivateResult
 		actStart := time.Now()
 		if err == nil {
@@ -989,12 +1150,14 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		}
 		if err != nil {
 			logger.Info("fork child activation failed, will retry", "child", childName, "detail", err.Error())
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, "activate transport error: "+err.Error())
 			continue
 		}
 		if !actRes.OK && !actRes.AlreadyActive {
 			// Surface WHY (issue #28 LLM-legible errors): the bare "will retry" hid
 			// the cause of stuck fork children.
 			logger.Info("fork child activation failed, will retry", "child", childName, "detail", actRes.Error)
+			noteFirstBlocked(&blockedChild, &blockedReason, childName, "activate failed: "+actRes.Error)
 			continue
 		}
 		// OK, or AlreadyActive: a prior Activate brought this child up but its ack
@@ -1031,10 +1194,15 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		Status:             conditionStatus(fork.Status.ReadyReplicas >= effectiveReplicas(fork)),
 		LastTransitionTime: now,
 		Reason:             "ForksCreated",
-		Message:            fmt.Sprintf("%d/%d husk forks ready", fork.Status.ReadyReplicas, effectiveReplicas(fork)),
+		Message:            forkReadyMessage(int(fork.Status.ReadyReplicas), int(effectiveReplicas(fork)), blockedChild, blockedReason),
 	})
-	if err := r.Status().Update(ctx, fork); err != nil {
-		return ctrl.Result{}, err
+	finalWriteStart := time.Now()
+	finalWriteErr := r.Status().Update(ctx, fork)
+	// Time the end-of-pass children/readiness/condition status write, logged even
+	// on error so a slow conflict/timeout is still attributable.
+	logForkOrchStage(logger, forkID, "status_write_final", time.Since(finalWriteStart))
+	if finalWriteErr != nil {
+		return ctrl.Result{}, fmt.Errorf("persist final fork status: %w", finalWriteErr)
 	}
 	if fork.Status.ReadyReplicas < effectiveReplicas(fork) {
 		// Children still coming up; requeue to drive them Ready.
@@ -1182,14 +1350,22 @@ func (r *SandboxReconciler) spawnForkChildInSourcePod(ctx context.Context, a spa
 	// post-spawn bookkeeping can be lost, leaving the VM ACTIVE while the controller
 	// did not record it. Reusing the same token on a re-drive lets AlreadyActive
 	// adopt the running VM instead of looping.
+	tokenStart := time.Now()
 	apiToken, err := ensureForkChildToken(ctx, r.Client, a.fork, a.childName+tokenSecretSuffix, endpoint)
+	// Time the per-child token Secret write that precedes the spawn-vm RPC on the
+	// co-location path (sits in the snapshot->spawn gap, outside spawn_vm_rpc).
+	logForkOrchStage(logger, a.childName, "child_token_write", time.Since(tokenStart))
 	if err != nil {
 		logger.Error(err, "fork child token secret write failed", "child", a.childName)
 		return v1.SandboxChild{}, false
 	}
 
 	addr := net.JoinHostPort(a.srcPod.Status.PodIP, strconv.Itoa(a.controlPort))
+	// mTLS config resolve for the spawn-vm dial (the TCP + handshake itself lives
+	// inside the spawn_vm_rpc stage; see the snapshot-block dial_tls note).
+	dialTLSStart := time.Now()
 	tlsConf, err := r.huskDialTLS(ctx, a.fork.Namespace)
+	logForkOrchStage(logger, a.childName, "dial_tls", time.Since(dialTLSStart))
 	var spRes husk.SpawnVMResult
 	spawnStart := time.Now()
 	if err == nil {
@@ -1274,6 +1450,9 @@ func (r *SandboxReconciler) finalizeHuskFork(ctx context.Context, fork *v1.Sandb
 	remove := r.removeForkSnapshot
 	if remove == nil {
 		remove = RemoveForkSnapshotOnHusk
+		if r.HuskConns != nil {
+			remove = r.HuskConns.RemoveForkSnapshotOnHusk
+		}
 	}
 
 	// Resolve the source pod to dial; if it is gone the snapshot went with it.
