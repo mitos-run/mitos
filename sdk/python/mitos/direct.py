@@ -33,7 +33,9 @@ import base64
 import json
 import os
 import uuid
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
+
+import threading
 
 import httpx
 
@@ -244,6 +246,52 @@ def _json(resp: httpx.Response, api_key: Optional[str] = None) -> Any:
         ) from exc
 
 
+# --- pooled HTTP transport -------------------------------------------------------
+#
+# One keep-alive httpx.Client per (base URL, timeout), shared by every SandboxServer
+# and DirectSandbox that talks to that URL.
+#
+# Each create() used to build TWO fresh clients (one for the server, one for the
+# returned sandbox) and terminate() closed them, so a create-plus-first-exec paid TWO
+# full TLS handshakes and threw the connection away. Measured from a same-region client
+# against the hosted API that was ~197 ms of a ~572 ms time-to-interactive: roughly a
+# third of the latency a user feels, spent re-negotiating TLS this process had already
+# negotiated. Pooling removes it without touching the engine.
+#
+# httpx.Client is thread-safe, so one pooled client is safe to share across threads.
+_HTTP_POOLS: Dict[Tuple[str, float], httpx.Client] = {}
+_HTTP_POOL_LOCK = threading.Lock()
+
+
+def _http_for(base_url: str, timeout: float = 60.0) -> httpx.Client:
+    """Return the pooled client for base_url, creating it on first use.
+
+    Keyed by timeout as well as URL: the sandbox path uses 30 s and the server path
+    60 s, and collapsing them onto one client would silently change one of them.
+    """
+    key = (base_url.rstrip("/"), float(timeout))
+    with _HTTP_POOL_LOCK:
+        client = _HTTP_POOLS.get(key)
+        if client is None or client.is_closed:
+            client = httpx.Client(
+                timeout=timeout,
+                limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+            )
+            _HTTP_POOLS[key] = client
+        return client
+
+
+def close_http_pools() -> None:
+    """Close every pooled client. For process shutdown and tests; not needed per sandbox."""
+    with _HTTP_POOL_LOCK:
+        for client in _HTTP_POOLS.values():
+            try:
+                client.close()
+            except Exception:
+                pass
+        _HTTP_POOLS.clear()
+
+
 class DirectSandboxFiles:
     """File operations on a DirectSandbox.
 
@@ -336,7 +384,8 @@ class DirectSandbox:
         self.fork_time_ms = fork_time_ms
         self._server_url = server_url.rstrip("/")
         self._api_key = api_key
-        self._http = httpx.Client(timeout=30.0)
+        # Shared, keep-alive. NOT owned by this sandbox: terminate() must not close it.
+        self._http = _http_for(self._server_url, timeout=30.0)
         self.files = DirectSandboxFiles(self)
 
     @classmethod
@@ -639,7 +688,9 @@ class DirectSandbox:
             f"{self._server_url}/v1/sandboxes/{self.id}",
             headers=self._auth_headers(),
         )
-        self._http.close()
+        # The client is POOLED and shared with every other sandbox on this base URL.
+        # Closing it here is what made the next create() re-handshake TLS. Call
+        # mitos.close_http_pools() at process shutdown if you want the sockets gone.
 
     def __enter__(self) -> DirectSandbox:
         return self
@@ -661,7 +712,7 @@ class SandboxServer:
     def __init__(self, url: str = DEFAULT_BASE_URL, api_key: Optional[str] = None):
         self.url = url.rstrip("/")
         self._api_key = api_key
-        self._http = httpx.Client(timeout=60.0)
+        self._http = _http_for(self.url, timeout=60.0)
 
     @classmethod
     def from_auth(
