@@ -50,7 +50,7 @@ Exit codes:
   0  success (run: the executed command's exit code)
   1  a general, remediable runtime error
   2  usage error (unknown subcommand, missing argument, bad flag or format)
-  3  the targeted sandbox or workspace was not found
+  3  the target was not found (sandbox verbs and ws ls/log; other ws verbs exit 1)
   124  a --wait/--timeout deadline elapsed
 `
 
@@ -62,7 +62,7 @@ Exit codes:
 //	ExitOK       (0)    success (for run: the executed command's exit code)
 //	ExitError    (1)    a general, remediable runtime error
 //	ExitUsage    (2)    usage error (unknown subcommand, missing arg, bad flag)
-//	ExitNotFound (3)    the targeted sandbox or workspace was not found
+//	ExitNotFound (3)    the target was not found (sandbox verbs and ws ls/log)
 //	ExitTimeout  (124)  a --wait/--timeout deadline elapsed
 //
 // For run, the exit code is the executed command's exit code so callers can

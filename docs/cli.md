@@ -58,8 +58,8 @@ diagnostic on stderr carries the cause and remediation.
 | `0` | success | The command succeeded. For `run` this is the executed command's own exit code (0 on success). |
 | `1` | error | A general, remediable runtime error (backend unreachable, a failed operation). The stderr diagnostic names the cause. |
 | `2` | usage | A usage error: an unknown subcommand, a missing argument, a bad flag, or an unknown `-o` output format. |
-| `3` | not found | The targeted sandbox or workspace does not exist. |
-| `124` | timeout | A `--wait`/`--timeout` deadline elapsed before the operation completed. The value matches the coreutils `timeout` tool so it is familiar in pipelines. |
+| `3` | not found | The targeted object does not exist. Wired for the sandbox verbs (`create`, `fork`, `terminate`, `run`) and for `ws ls`/`ws log`; the remaining `ws` verbs (`diff`, `fork`, `revert`, `rm`, `bind`) still exit `1` for a missing target, and converting them is a named follow-up. |
+| `124` | timeout | An explicit `--wait`/`--timeout` deadline elapsed before the operation completed. The value matches the coreutils `timeout` tool so it is familiar in pipelines. |
 
 `run` is the one verb that passes through: its exit code is the executed
 command's exit code, so `mitos run false` exits non-zero exactly as `false`
@@ -69,7 +69,8 @@ would. The other verbs use the table above.
 
 The read and inspect verbs accept `-o json` (equivalently `--output json` or the
 `--json` shorthand) and emit a stable JSON envelope on stdout. The default
-remains the human-aligned table. An unrecognized format is a usage error (exit
+remains the human-aligned table (`-o table`; `text` and `human` are accepted
+aliases for it). An unrecognized format is a usage error (exit
 `2`), never a silent fall-back to the human render, so an agent that asked for
 JSON always gets JSON or a clear failure.
 
@@ -128,7 +129,9 @@ The lifecycle verbs that start an asynchronous operation accept a uniform
   no-op there.
 - `--timeout N` bounds the wait to `N` seconds. When the deadline elapses the
   command exits `124` (timeout) rather than blocking indefinitely. `--timeout 0`
-  (the default) uses the backend's own bound.
+  (the default) uses the backend's own bound; that internal bound elapsing is
+  reported as a not-ready runtime error (exit `1`), so `124` always means the
+  deadline the caller asked for.
 - `mitos sandbox terminate` accepts `--timeout N` to bound the delete call.
   Terminate is asynchronous (the controller reaps the object); waiting until the
   sandbox is fully reaped is a named follow-up, so `--wait` is not offered on
