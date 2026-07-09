@@ -103,6 +103,41 @@ type huskVMSpawner func(ctx context.Context, addr string, tlsConf *tls.Config, r
 // scheduler reserved, so an over-admission fails closed as an intra-pod OOM, not a
 // node overcommit), spilling the over-budget child is the correct outcome and is
 // now what happens.
+// forkReadyMessage renders the fork's Ready condition message. When the fan-out cannot
+// make progress it names the blocking child and its cause, so a stalled fork says WHY
+// instead of repeating a bare count forever (#872). A complete fork reports only the
+// count: a child recorded as blocked on an earlier pass is stale once every replica is
+// ready.
+func forkReadyMessage(ready, replicas int, blockedChild, blockedReason string) string {
+	msg := fmt.Sprintf("%d/%d husk forks ready", ready, replicas)
+	if ready >= replicas || blockedChild == "" {
+		return msg
+	}
+	return fmt.Sprintf("%s; child %s blocked: %s", msg, blockedChild, blockedReason)
+}
+
+// forkSpillsToNewPod reports whether ANY child of a fork with this many replicas
+// will land in its own husk pod rather than co-locating inside the source pod.
+//
+// It decides whether the one-time fork snapshot must carry a `mem` file. The
+// vmstate-only capture an armed live-cow source takes writes no `mem` and is
+// restorable ONLY by a co-located child, which boots its guest RAM from the source
+// pod's shared memfd. A spilled child lives in a DIFFERENT pod, has no path to that
+// memfd, and can restore only from disk: with no `mem` file it never activates, and
+// the fork wedges at "<budget>/<replicas> husk forks ready" with no error (the prod
+// hang, mitos-run/mitos#872).
+//
+// Conservative by construction: co-location requires multi-vm routing AND a capable
+// source pod, so a false spawnInSourcePod means every child spills. A budget already
+// consumed by other concurrent forks (budgetRemaining 0, including the occupancy-list
+// error path) likewise spills.
+func forkSpillsToNewPod(spawnInSourcePod bool, coLocationBudgetRemaining, replicas int) bool {
+	if !spawnInSourcePod {
+		return true
+	}
+	return replicas > coLocationBudgetRemaining
+}
+
 func coLocatedForkVMBudget(pod *corev1.Pod) int {
 	if pod == nil {
 		return 0
@@ -754,6 +789,16 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		}
 	}
 
+	// The first child that blocked the fan-out this pass, surfaced on the Ready
+	// condition so a stalled fork explains itself.
+	var blockedChild, blockedReason string
+
+	// Whether any child will spill into its own pod, decided from the SAME budget the
+	// fan-out loop below uses. It must be known BEFORE the one-time snapshot, because
+	// a spilled child can restore only from disk and therefore needs the `mem` file
+	// the armed live-cow source would otherwise skip (#872).
+	spillsToNewPod := forkSpillsToNewPod(spawnInSourcePod, coLocationBudgetRemaining, int(effectiveReplicas(fork)))
+
 	// One fork snapshot per SandboxFork, keyed by the fork name, taken EXACTLY
 	// ONCE and reused for every child across reconcile passes. Children take
 	// several passes to reach Ready; re-snapshotting on each pass would re-pause
@@ -789,6 +834,9 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 				ForkID:      forkID,
 				SnapshotDir: huskForksInPodDir(forkID),
 				PauseSource: fork.Spec.Source.FromSandbox.PauseSource,
+				// A spilled child restores from disk, so the source must write `mem`
+				// even when it is an armed live-cow source with child import on.
+				RequireMemFile: spillsToNewPod,
 			})
 		}
 		// Time the fork-snapshot RPC round-trip and record the husk-reported
@@ -1025,8 +1073,15 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		}
 
 		// The child must be Running+Ready before it can be activated. Not ready yet:
-		// requeue this slot next pass WITHOUT creating any extra pod.
+		// requeue this slot next pass WITHOUT creating any extra pod. Record WHY so a
+		// child that will NEVER become ready (a spilled child with nothing to restore,
+		// #872) is visible on the fork's condition instead of hiding behind the count.
 		if child.Status.PodIP == "" || !huskPodReady(child) {
+			reason := huskPodNotReadyReason(child)
+			if blockedChild == "" {
+				blockedChild, blockedReason = childName, reason
+			}
+			logger.Info("fork child pod not ready yet, will retry", "child", childName, "detail", reason)
 			continue
 		}
 
@@ -1124,7 +1179,7 @@ func (r *SandboxReconciler) reconcileHuskFork(ctx context.Context, fork *v1.Sand
 		Status:             conditionStatus(fork.Status.ReadyReplicas >= effectiveReplicas(fork)),
 		LastTransitionTime: now,
 		Reason:             "ForksCreated",
-		Message:            fmt.Sprintf("%d/%d husk forks ready", fork.Status.ReadyReplicas, effectiveReplicas(fork)),
+		Message:            forkReadyMessage(int(fork.Status.ReadyReplicas), int(effectiveReplicas(fork)), blockedChild, blockedReason),
 	})
 	finalWriteStart := time.Now()
 	finalWriteErr := r.Status().Update(ctx, fork)
