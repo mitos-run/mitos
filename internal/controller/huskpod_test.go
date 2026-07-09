@@ -229,6 +229,38 @@ func TestBuildHuskPodThreadsDNSUpstream(t *testing.T) {
 // so a co-located fork child can share the parent's resident guest memory, and
 // with it OFF (the default, every deployment today) the flag is absent so the pod
 // is byte-for-byte the current disk co-location.
+func TestBuildHuskPodThreadsPrewarmChild(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true, PrewarmChild: true})
+	if !argsContain(on.Spec.Containers[0].Args, "--prewarm-child") {
+		t.Errorf("husk args missing --prewarm-child when enabled: %v", on.Spec.Containers[0].Args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true})
+	if argsContain(off.Spec.Containers[0].Args, "--prewarm-child") {
+		t.Errorf("husk args must omit --prewarm-child by default: %v", off.Spec.Containers[0].Args)
+	}
+}
+
+func TestBuildHuskPodThreadsLiveCowChildImport(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", LiveCowFork: true, LiveCowChildImport: true})
+	if !argsContain(on.Spec.Containers[0].Args, "--live-cow-child-import") {
+		t.Errorf("husk args missing --live-cow-child-import when enabled: %v", on.Spec.Containers[0].Args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", LiveCowFork: true})
+	if argsContain(off.Spec.Containers[0].Args, "--live-cow-child-import") {
+		t.Errorf("husk args must omit --live-cow-child-import by default: %v", off.Spec.Containers[0].Args)
+	}
+}
+
 func TestBuildHuskPodThreadsLiveCowFork(t *testing.T) {
 	r := &controller.SandboxPoolReconciler{}
 	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
@@ -238,11 +270,37 @@ func TestBuildHuskPodThreadsLiveCowFork(t *testing.T) {
 	if !argsContain(on.Spec.Containers[0].Args, "--live-cow-fork") {
 		t.Errorf("husk args missing --live-cow-fork when enabled: %v", on.Spec.Containers[0].Args)
 	}
+	// The live-cow write-protect fork creates its userfaultfd via the /dev/userfaultfd
+	// device injected by the kvm device plugin (issue #832), NOT the userfaultfd(2)
+	// syscall the container seccomp profile denies. So a live-cow husk pod keeps the
+	// minimal NET_ADMIN-only capability set and adds NO CAP_SYS_PTRACE: the earlier
+	// CAP_SYS_PTRACE grant satisfied only the kernel gate, never the seccomp gate, and
+	// is not needed by the device path.
+	if onCaps := on.Spec.Containers[0].SecurityContext.Capabilities.Add; capsContain(onCaps, "SYS_PTRACE") {
+		t.Errorf("live-cow husk must NOT add SYS_PTRACE (device path needs no cap); Capabilities.Add = %+v", onCaps)
+	}
+	if onCaps := on.Spec.Containers[0].SecurityContext.Capabilities.Add; len(onCaps) != 1 || !capsContain(onCaps, "NET_ADMIN") {
+		t.Errorf("live-cow husk Capabilities.Add = %+v, want exactly [NET_ADMIN]", onCaps)
+	}
 
 	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img"})
 	if argsContain(off.Spec.Containers[0].Args, "--live-cow-fork") {
 		t.Errorf("husk args must omit --live-cow-fork by default: %v", off.Spec.Containers[0].Args)
 	}
+	// A non-live-cow pod also stays NET_ADMIN-only.
+	if offCaps := off.Spec.Containers[0].SecurityContext.Capabilities.Add; capsContain(offCaps, "SYS_PTRACE") {
+		t.Errorf("non-live-cow husk must not add SYS_PTRACE; Capabilities.Add = %+v", offCaps)
+	}
+}
+
+// capsContain reports whether a capability is present in the add list.
+func capsContain(caps []corev1.Capability, want corev1.Capability) bool {
+	for _, c := range caps {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 // argsContain reports whether a standalone flag is present in args.

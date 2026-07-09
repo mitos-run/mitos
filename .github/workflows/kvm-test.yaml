@@ -58,6 +58,21 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
+      # This job writes a guest rootfs, a kernel, and several 512 MiB memory snapshots
+      # under /tmp, which lives on the runner's small root filesystem. It ran out of
+      # space on three unrelated pull requests, failing in whichever step happened to
+      # need the last block (a 512 MiB dd, then the Go linker: "mapping output file
+      # failed: no space left on device"). Reclaim the preinstalled toolchains this job
+      # never uses, and print the result so a future exhaustion is diagnosable.
+      - name: Free disk space on the root filesystem
+        run: |
+          echo "Before:"
+          df -h / | sed "s/^/  /"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc             /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          echo "After:"
+          df -h / | sed "s/^/  /"
+
       - name: Check KVM availability
         run: |
           ls -la /dev/kvm
@@ -78,6 +93,19 @@ jobs:
           sudo mv "/tmp/release-${FC_VERSION}-x86_64/jailer-${FC_VERSION}-x86_64" /usr/local/bin/jailer
           sudo chmod +x /usr/local/bin/jailer
           jailer --version
+
+      # Swap in the Mitos-patched Firecracker over the stock binary just installed,
+      # the SAME pinned + sha256-verified swap the forkd/husk-stub images do. The
+      # patched binary is behaviour-identical to stock UNLESS a FIRECRACKER_MITOS_*
+      # env is set (only the live-cow steps below set it), so every other KVM phase in
+      # this job is unaffected. This is what lets the live-cow source-arm proof below
+      # reach the restore-path memfd export + write-protect handshake (issue #832); the
+      # stock jailer is left in place.
+      - name: Install patched Firecracker (live-cow)
+        run: |
+          set -eux
+          sudo ./hack/install-firecracker-patched.sh
+          firecracker --version
 
       - name: Download kernel and rootfs
         run: |
@@ -124,7 +152,7 @@ jobs:
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - name: Run unit tests
         run: go test ./internal/fork/... ./internal/volume/... -v
@@ -1775,8 +1803,17 @@ jobs:
           set -e
           sudo apt-get install -y btrfs-progs
           REFLINK_ROOT=/mnt/reflink-btrfs
-          REFLINK_IMG=/tmp/mitos-test/reflink-btrfs.img
-          dd if=/dev/zero of=$REFLINK_IMG bs=1M count=512 status=none
+          # The backing image lives on /mnt, the runner's LARGE ephemeral disk, not on
+          # /tmp. /tmp is on the small root filesystem that the Firecracker steps above
+          # have already loaded with a rootfs, a kernel, and 512 MiB memory snapshots,
+          # so a 512 MiB dd there intermittently died with
+          # "dd: error writing ...: No space left on device" and failed this job on
+          # three unrelated pull requests.
+          REFLINK_IMG=/mnt/reflink-btrfs.img
+          echo "Disk before creating the btrfs image:"
+          df -h / /mnt | sed "s/^/  /"
+          sudo dd if=/dev/zero of=$REFLINK_IMG bs=1M count=512 status=none
+          sudo chmod 666 $REFLINK_IMG
           mkfs.btrfs -q $REFLINK_IMG
           sudo mkdir -p $REFLINK_ROOT
           sudo mount -o loop $REFLINK_IMG $REFLINK_ROOT
@@ -1788,6 +1825,7 @@ jobs:
           TMPDIR=$REFLINK_ROOT go test -tags reflink_integration \
             ./internal/volume/ -run TestReflinkCopyRealFilesystem -v
           sudo umount $REFLINK_ROOT || true
+          sudo rm -f $REFLINK_IMG
           echo "================================"
           echo "  Per-activation rootfs CoW reflink proven (byte-identical clone on btrfs)"
           echo "================================"
@@ -2649,7 +2687,88 @@ jobs:
         run: |
           set -e
           sudo chmod 666 /dev/kvm || true
-          go test ./internal/husk/ -run 'TestColocatedForkInheritsSourceStateKVM|TestMultiVMForkSnapshotDefaultVMKVM' -count=1 -v
+          # TestPrewarmedColocatedForkSkipsBootKVM proves the pre-warm on the SAME
+          # disk-restore co-located fork: a pre-warmed dormant child is ADOPTED
+          # (fc_boot ~0, boot pre-paid off the hot path) and still inherits the
+          # source disk + memory, alive, with a fresh child re-warmed after.
+          go test ./internal/husk/ -run 'TestColocatedForkInheritsSourceStateKVM|TestMultiVMForkSnapshotDefaultVMKVM|TestPrewarmedColocatedForkSkipsBootKVM' -count=1 -v
+
+      # Live-cow fork engages on a RESTORED source (issue #832). A warm husk SOURCE VM
+      # is RESTORED from the pool template snapshot, so the live-cow fork engages only
+      # if the RESTORED source arms the write-protect handshake. Before the
+      # wp-offer-on-restore Firecracker fix a restored source loaded its guest RAM
+      # MAP_PRIVATE and never exported its memfd or offered WP, so the freezer never
+      # armed and every fork fell back to the 364ms Full snapshot. The patched binary
+      # installed above fixes the restore path, so here we REQUIRE the arm:
+      # MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM turns the runner-gating skip into a HARD
+      # failure, proving a restored source arms and forkSnapshotInstance takes the
+      # vmstate-only path (no mem file, sub-364ms capture). Same snapshot + rootfs the
+      # multi-VM phases above use.
+      - name: Live-cow fork engages on a RESTORED source (#832)
+        timeout-minutes: 15
+        env:
+          MITOS_KVM_HUSK_SNAPSHOT_DIR: /tmp/mitos-test/bench-data/templates/bench/snapshot
+          MITOS_KVM_FIRECRACKER: /usr/local/bin/firecracker
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm || true
+          # The source Firecracker offers the live-cow write-protect handshake over a
+          # userfaultfd, which the patched restore path creates via /dev/userfaultfd.
+          # On this runner that node is root-only, so widen it (and the unprivileged
+          # sysctl) like /dev/kvm above. Only when the uffd is actually reachable do we
+          # REQUIRE the arm: the restored source must arm (hard fail) rather than skip,
+          # proving issue #832 is fixed. Where the platform blocks uffd entirely the
+          # test skips cleanly (never a false pass), the same gating the sibling
+          # internal/fork write-protect KVM tests use.
+          sudo chmod 666 /dev/userfaultfd 2>/dev/null || true
+          sudo sysctl -w vm.unprivileged_userfaultfd=1 2>/dev/null || true
+          if [ -r /dev/userfaultfd ] && [ -w /dev/userfaultfd ]; then
+            export MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM=1
+            echo "uffd reachable: requiring the restored source to arm"
+          else
+            echo "uffd not reachable on this runner: the restored-source arm will skip cleanly"
+          fi
+          go test ./internal/husk/ -run TestForkSnapshotLiveCowSourceArmedVmstateOnlyKVM -count=1 -v
+
+      # Live-cow CHILD-side memfd import (m5, #832): the co-located fork child boots
+      # its guest RAM BY IMPORTING THE SOURCE MEMFD (FIRECRACKER_MITOS_CHILD_MEMFD)
+      # instead of a disk mem file, so the vmstate-only fork drops the create_snapshot
+      # mem write end to end. The patched binary installed above adds the child restore
+      # path, so when the uffd is reachable we REQUIRE the child to boot by import
+      # (MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT): the mem-less fork is only bootable by
+      # import, so a child that boots + execs proves it took its RAM from the source
+      # memfd with no disk mem. The armed full-fallback test (child import OFF) proves
+      # the safe disk restore in the same run. Where uffd is blocked both skip cleanly.
+      - name: Live-cow child imports the source memfd (#832)
+        timeout-minutes: 15
+        env:
+          MITOS_KVM_HUSK_SNAPSHOT_DIR: /tmp/mitos-test/bench-data/templates/bench/snapshot
+          MITOS_KVM_FIRECRACKER: /usr/local/bin/firecracker
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm || true
+          sudo chmod 666 /dev/userfaultfd 2>/dev/null || true
+          sudo sysctl -w vm.unprivileged_userfaultfd=1 2>/dev/null || true
+          # The co-located child Firecracker (dormant VMM) shares the runner with the
+          # source VM (a 256MB memfd + write-protect handler), so on a contended nested
+          # KVM runner it needs more than the 5s default to bind its API socket. Raise
+          # the ready ceiling for this step only (prod is unaffected; a healthy launch
+          # still returns immediately).
+          export MITOS_FC_READY_TIMEOUT_SECONDS=20
+          if [ -r /dev/userfaultfd ] && [ -w /dev/userfaultfd ]; then
+            export MITOS_KVM_REQUIRE_LIVECOW_RESTORE_ARM=1
+            export MITOS_KVM_REQUIRE_LIVECOW_CHILD_IMPORT=1
+            echo "uffd reachable: requiring the co-located child to boot by importing the source memfd"
+          else
+            echo "uffd not reachable on this runner: the child-import boot will skip cleanly"
+          fi
+          # TestPrewarmedLiveCowChildImportNoLeakKVM proves the pre-warm does NOT
+          # regress the mem-less lazy-UFFD import: a pre-warmed generic child is
+          # ADOPTED (fc_boot ~0) and STILL lazily faults its guest RAM from the
+          # source memfd through the husk fault handler, alive, with the fork-time
+          # sentinel intact (NO LEAK). Same require-arm/import env as the on-demand
+          # child-import proof.
+          go test ./internal/husk/ -run 'TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM|TestForkSnapshotLiveCowArmedFullFallbackColocatedChildKVM|TestPrewarmedLiveCowChildImportNoLeakKVM' -count=1 -v
 
       # Husk activate-correctness proof (#18). The fork-correctness phase above
       # proves the GUEST mechanism (distinct RNG + clock resync) when the host

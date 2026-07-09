@@ -159,6 +159,25 @@ var (
 		Help:    "Seconds to distribute a template snapshot to a deficit node by pull from a holder, by template. Populated only on the multi-node distribution path.",
 		Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60, 120, 300},
 	}, []string{"template"})
+
+	// forkStageDurationSeconds is the per-stage latency breakdown of a hosted
+	// co-location fork, keyed by a fixed stage label. It is how the ~728 ms p50
+	// hosted fork is attributed to WHAT dominates: the controller observes one
+	// series per boundary it crosses (the fork-snapshot RPC round-trip, each
+	// spawn-vm RPC round-trip, each activate RPC round-trip), the husk-reported
+	// sub-stages inside those RPCs (fc_boot, vmstate_restore, rootfs_clone,
+	// guest_ready, handshake, ...), and the end-to-end total attributed across
+	// the level-triggered reconcile passes (stage "total"). The stage label set
+	// is a small fixed vocabulary (never error text, an id, or a secret), so the
+	// series cardinality is bounded. Buckets span the sub-millisecond floor to a
+	// few seconds so a stage anywhere from a CoW reflink to a cold FC boot lands
+	// in a real bucket. This is the input to targeting the real bottleneck for
+	// the ms-class fork; it changes no fork behavior.
+	forkStageDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "mitos_fork_stage_duration_seconds",
+		Help:    "Per-stage duration of a hosted co-location fork, by stage (controller RPC round-trips, husk sub-stages, and the end-to-end total).",
+		Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+	}, []string{"stage"})
 )
 
 func init() {
@@ -180,6 +199,7 @@ func init() {
 		refillLatencySeconds,
 		claimWaitForWarmSeconds,
 		snapshotDistributionLagSeconds,
+		forkStageDurationSeconds,
 	)
 }
 
@@ -275,3 +295,11 @@ func observeRefillLatency(seconds float64) { refillLatencySeconds.Observe(second
 // observeClaimWaitForWarm records seconds a claim waited from creation to
 // activating a warm husk pod.
 func observeClaimWaitForWarm(seconds float64) { claimWaitForWarmSeconds.Observe(seconds) }
+
+// observeForkStage records the duration of one hosted-fork stage. stage must be
+// a fixed label from the per-stage fork breakdown vocabulary (e.g.
+// "fork_snapshot_rpc", "spawn_vm_rpc", "vmstate_restore", "guest_ready",
+// "total"), never error text, an id, or a secret.
+func observeForkStage(stage string, seconds float64) {
+	forkStageDurationSeconds.WithLabelValues(stage).Observe(seconds)
+}

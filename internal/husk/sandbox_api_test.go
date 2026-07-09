@@ -41,6 +41,8 @@ import (
 	"mitos.run/mitos/internal/vsock"
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
+
+	"mitos.run/mitos/internal/guestgrpc"
 )
 
 // huskFakeGuest is a minimal sandbox.v1.SandboxServer that returns a fixed
@@ -206,14 +208,18 @@ type pathVMM struct {
 func (m *pathVMM) LoadSnapshotWithOverrides(_, _ string, _ bool, _ []firecracker.NetworkOverride) error {
 	return nil
 }
-func (m *pathVMM) VsockHostPath(string) string      { return m.vsockPath }
-func (m *pathVMM) PatchDrive(_, _ string) error     { return nil }
-func (m *pathVMM) Resume() error                    { return nil }
-func (m *pathVMM) Pause() error                     { return nil }
-func (m *pathVMM) CreateSnapshot(_, _ string) error { return nil }
-func (m *pathVMM) Ping() error                      { return nil }
-func (m *pathVMM) PID() int                         { return 0 }
-func (m *pathVMM) Close() error                     { return nil }
+func (m *pathVMM) LoadSnapshotUFFD(_, _ string, _ []firecracker.NetworkOverride) error {
+	return nil
+}
+func (m *pathVMM) VsockHostPath(string) string              { return m.vsockPath }
+func (m *pathVMM) PatchDrive(_, _ string) error             { return nil }
+func (m *pathVMM) Resume() error                            { return nil }
+func (m *pathVMM) Pause() error                             { return nil }
+func (m *pathVMM) CreateSnapshot(_, _ string) error         { return nil }
+func (m *pathVMM) CreateSnapshotVMStateOnly(_ string) error { return nil }
+func (m *pathVMM) Ping() error                              { return nil }
+func (m *pathVMM) PID() int                                 { return 0 }
+func (m *pathVMM) Close() error                             { return nil }
 
 // huskExec runs "echo hi" over the Connect sandbox.v1.Sandbox/ExecStream RPC
 // (the runtime path forkd and the SDK use; the legacy /v1/exec JSON route is
@@ -387,8 +393,8 @@ func TestActivateServesTokenGatedSandboxAPI(t *testing.T) {
 		vm := &pathVMM{vsockPath: sockPath}
 		stub := New(firecracker.VMConfig{ID: sandboxID}, Options{
 			Start:       func(firecracker.VMConfig) (vmm, error) { return vm, nil },
-			Ready:       func(context.Context, string, time.Duration) error { return nil },
-			Notify:      func(string, uint64, []byte, ActivateRequest) error { return nil },
+			Ready:       func(context.Context, string, time.Duration) (*guestgrpc.Client, error) { return nil, nil },
+			Notify:      func(*guestgrpc.Client, string, uint64, []byte, ActivateRequest) error { return nil },
 			Verify:      verifyOK,
 			OnActivated: onActivated,
 		})
@@ -474,8 +480,8 @@ func TestActivateSingleSandboxAcceptsSDKPodID(t *testing.T) {
 		vm := &pathVMM{vsockPath: sockPath}
 		stub := New(firecracker.VMConfig{ID: localID}, Options{
 			Start:       func(firecracker.VMConfig) (vmm, error) { return vm, nil },
-			Ready:       func(context.Context, string, time.Duration) error { return nil },
-			Notify:      func(string, uint64, []byte, ActivateRequest) error { return nil },
+			Ready:       func(context.Context, string, time.Duration) (*guestgrpc.Client, error) { return nil, nil },
+			Notify:      func(*guestgrpc.Client, string, uint64, []byte, ActivateRequest) error { return nil },
 			Verify:      verifyOK,
 			OnActivated: onActivated,
 		})

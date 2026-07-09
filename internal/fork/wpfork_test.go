@@ -8,12 +8,15 @@ import "testing"
 // present, and never otherwise (so a mis-wired flag can never half-arm the
 // parent). Pure; runs on any host.
 func TestLiveCowParentEnv(t *testing.T) {
-	t.Run("both set emits three vars", func(t *testing.T) {
+	t.Run("both set emits the live-cow parent vars", func(t *testing.T) {
 		got := LiveCowParentEnv("/run/wp.sock", "/run/memfd")
 		want := []string{
 			"FIRECRACKER_MITOS_SHARED_MEM=1",
 			"FIRECRACKER_MITOS_SHARED_MEM_EXPORT=/run/memfd",
 			"FIRECRACKER_MITOS_WP_UDS=/run/wp.sock",
+			// Opts the patched Firecracker into the LAZY restore: guest RAM is an
+			// EMPTY shared memfd populated by MISSING faults, not an eager copy.
+			"FIRECRACKER_MITOS_LAZY_RESTORE=1",
 		}
 		if len(got) != len(want) {
 			t.Fatalf("got %d env entries, want %d: %v", len(got), len(want), got)

@@ -345,6 +345,27 @@ type SandboxStatus struct {
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
+	// Restarts counts how many times this sandbox's backing VM was destroyed and
+	// replaced by a fresh one (a husk pod loss re-pended under DrainPolicy Kill).
+	//
+	// It is the DURABLE signal that the sandbox a caller is holding is no longer the
+	// sandbox it created: the replacement re-activates from the POOL TEMPLATE, so every
+	// process, every write to the guest filesystem, and the whole guest memory of the
+	// previous instance are gone. The Ready condition also flips, but only transiently
+	// (the next reconcile re-activates and sets Ready=True again), so a caller polling
+	// the API would otherwise see an unbroken healthy sandbox and keep issuing calls
+	// against state that no longer exists (mitos-run/mitos#870).
+	//
+	// Monotonic for the lifetime of the sandbox. Zero means the caller still holds the
+	// original VM.
+	// +optional
+	Restarts int32 `json:"restarts,omitempty"`
+
+	// LastRestartTime is when the backing VM was most recently destroyed and replaced.
+	// Nil while Restarts is zero.
+	// +optional
+	LastRestartTime *metav1.Time `json:"lastRestartTime,omitempty"`
+
 	// Pod is the husk host pod name backing the sandbox (for example
 	// "heartbeat-7f3a-husk"), visible to kubectl, quotas, NetworkPolicy, and
 	// OpenCost. NEW explicit v2 field. On the husk path the node is derivable
@@ -436,6 +457,28 @@ type SandboxStatus struct {
 	// SandboxForkStatus.checkpointTime.
 	// +optional
 	CheckpointTime *metav1.Time `json:"checkpointTime,omitempty"`
+
+	// ForkStartedAt is when the husk fork fan-out began its first working
+	// reconcile pass (the source pod resolved Ready and the controller started
+	// the snapshot/spawn work). A hosted co-location fork is LEVEL-TRIGGERED and
+	// reaches Ready across several ~1s requeue passes, so the wall-clock latency
+	// of the whole fork is NOT observable inside one pass; persisting the start
+	// timestamp lets the controller attribute the true end-to-end latency (from
+	// here to Ready) even though the work is split across passes. Set exactly
+	// once and never rewritten. Timing/observability only; it drives no fork
+	// behavior. NEW field.
+	// +optional
+	ForkStartedAt *metav1.Time `json:"forkStartedAt,omitempty"`
+
+	// ForkReconcilePasses counts the husk fork reconcile passes that advanced the
+	// fan-out (each pass that reached a status write). For a level-triggered
+	// controller the pass count is a first-class part of the latency breakdown:
+	// control-plane round-trips (one ~1s requeue per pass) can dominate the
+	// end-to-end fork latency, so the pass count says how much of the total is
+	// requeue wait versus real per-stage work. Timing/observability only. NEW
+	// field.
+	// +optional
+	ForkReconcilePasses int32 `json:"forkReconcilePasses,omitempty"`
 
 	// Conditions are the typed conditions with observedGeneration. Unchanged from
 	// v1alpha1.

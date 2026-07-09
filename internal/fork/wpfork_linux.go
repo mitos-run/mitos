@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,8 +47,21 @@ const (
 	// 1<<0). Mode 0 removes write-protection and wakes any blocked writer.
 	writeprotectModeWP = 0x1
 	// uffdPagefaultFlagWP (UFFD_PAGEFAULT_FLAG_WP, 1<<1) tags a delivered fault as
-	// a write-protect fault (vs a MISSING fault). The handler only services these.
+	// a write-protect fault (vs a MISSING fault). A handler without a mem source
+	// services only these; the live-cow LAZY restore also services MISSING faults.
 	uffdPagefaultFlagWP = 0x2
+
+	// UFFDIO_COPY (uffdioCopy, uffd_linux.go) installs pages into the FAULTING
+	// process's mapping (the uffd's owner, i.e. Firecracker) from a buffer in THIS
+	// process, and wakes any thread blocked on that range.
+	//
+	// copyModeDontwake (UFFDIO_COPY_MODE_DONTWAKE, 1<<0): install without waking,
+	// used to pre-populate pages that no thread is currently blocked on.
+	copyModeDontwake = 0x1
+	// copyModeWP (UFFDIO_COPY_MODE_WP, 1<<1): install the page already
+	// write-protected. Required once the region is frozen, so a page that arrives
+	// AFTER the freeze cannot be written by the parent without a WP fault first.
+	copyModeWP = 0x2
 )
 
 // uffdioWriteprotectArg mirrors struct uffdio_writeprotect: a {start,len} range
@@ -58,12 +72,40 @@ type uffdioWriteprotectArg struct {
 	Mode  uint64
 }
 
+// frozenEpoch is the per-fork frozen state: one FROZEN image plus its 1-bit-per-page
+// source selector, created FRESH at each Freeze (each ForkSnapshot). A co-located
+// child of that fork reads its point-in-time guest memory from THIS epoch's memfds,
+// so repeated forks of one source never share frozen state: fork B's child can never
+// read a page frozen for fork A, and fork A's still-live children are never mutated
+// by fork B or by a source write that happens after fork B (the m2 inheritance
+// invariant across REPEATED forks). The handler keeps every epoch alive until Close,
+// because an earlier fork's children may still reference that epoch's memfds through
+// /proc while a later fork runs. The memfds are sparse (only clobbered pages consume
+// RAM), so the cost is bounded by the pages actually rewritten, not by guest RAM per
+// fork.
+type frozenEpoch struct {
+	frozenFd int
+	frozen   []byte // private FROZEN image for this fork, RW MAP_SHARED
+	// frozenBM is the 1-bit-per-page selector (set bit = a child of THIS fork must
+	// read that page from this epoch's FROZEN image). It is a MAP_SHARED view of
+	// frozenBMFd, a memfd, so a co-located child can reopen the SAME region through
+	// /proc and read the CURRENT bits at attach time instead of a stale snapshot (the
+	// m2 no-leak invariant end to end: a page frozen after the import is assembled but
+	// before the child attaches is still sourced from FROZEN).
+	frozenBMFd int
+	frozenBM   []byte
+}
+
 // wpForkHandler owns the parent-side write-protect fork engine for one live-cow
-// fork. Lifecycle: newWPForkHandler (bind the UDS) -> receive (accept the patched
-// Firecracker's uffd + region layout, mmap the parent's live memfd, create the
-// frozen memfd) -> Freeze (arm WP at the fork point, then the caller resumes the
-// parent) -> Serve (goroutine, copy-before-unprotect for the life of the fork) ->
-// Close.
+// PARENT VM, ACROSS every fork of that parent. Lifecycle: newWPForkHandler (bind the
+// UDS) -> Receive (accept the patched Firecracker's uffd + region layout, mmap the
+// parent's live memfd) -> Freeze (allocate a FRESH frozenEpoch and arm WP at the fork
+// point, then the caller resumes the parent; called once PER fork) -> Serve
+// (goroutine, copy-before-unprotect for the life of the parent, fanning each fault
+// into every live epoch) -> Close. The uffd is created once by Firecracker over the
+// parent's live mapping and delivered once at Receive, so a fork does NOT get a fresh
+// handler; instead each Freeze starts a fresh epoch so per-fork frozen state is
+// independent while the single uffd + Serve loop is shared.
 type wpForkHandler struct {
 	cfg WPForkConfig
 	ln  *net.UnixListener
@@ -73,9 +115,10 @@ type wpForkHandler struct {
 	regions  []uffdMapping
 	live     []byte // parent guest memory, read-only MAP_SHARED via /proc
 	liveSize uint64
-	frozenFd int
-	frozen   []byte // private FROZEN image, RW MAP_SHARED
-	frozenBM []byte // 1 bit/page: which pages a child must read from FROZEN
+	// epochs holds one frozenEpoch per Freeze (per fork), in fork order. The CURRENT
+	// (last) epoch is the one a just-forked child imports; earlier epochs stay live so
+	// prior forks' children keep reading their own point-in-time pages. Guarded by mu.
+	epochs   []*frozenEpoch
 	pageSize uint64
 	closed   bool
 
@@ -92,6 +135,31 @@ type wpForkHandler struct {
 	// freezeNanos records how long the fork-point UFFDIO_WRITEPROTECT-all took
 	// (the parent-pause contributor the m2 design measures).
 	freezeNanos int64
+
+	// --- live-cow LAZY restore (populate guest RAM on demand) ---
+	// memSrc is the snapshot mem file a lazily restored source's guest RAM is pulled
+	// from. Nil for a BOOTED source (its pages are freshly allocated and resident, so
+	// Firecracker registers WP only and no MISSING fault is ever delivered).
+	memSrc *os.File
+	// populatedBM is a 1-bit-per-lazyChunkBytes map of which chunks have been
+	// installed into the guest mapping. UFFDIO_COPY on an already-present page fails
+	// with EEXIST, and Freeze needs to know what is left to fill, so track it.
+	populatedBM []byte
+	// memMap is the snapshot mem file mmap'd read-only. UFFDIO_COPY reads its source
+	// straight out of this mapping (i.e. out of the file's page cache), so a faulting
+	// page costs ONE copy into the guest memfd instead of a pread into a staging
+	// buffer followed by a second copy out of it.
+	memMap []byte
+	// frozen is set once Freeze has write-protected the region. A page installed
+	// after that MUST land write-protected (copyModeWP) or the parent could write it
+	// without the copy-before-unprotect handler ever seeing the write.
+	frozen bool
+	// missingServed counts MISSING faults populated from the mem file.
+	missingServed int64
+	// residualNanos records how long populate-on-freeze took at the last fork point,
+	// kept separate from freezeNanos (the UFFDIO_WRITEPROTECT-all cost) because the
+	// two scale with different things.
+	residualNanos int64
 }
 
 // newWPForkHandler binds the write-protect handshake unix socket the caller
@@ -114,7 +182,7 @@ func newWPForkHandler(cfg WPForkConfig) (*wpForkHandler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("wpfork: listen %s: %w", cfg.UDSPath, err)
 	}
-	return &wpForkHandler{cfg: cfg, ln: ln, uffd: -1, frozenFd: -1}, nil
+	return &wpForkHandler{cfg: cfg, ln: ln, uffd: -1}, nil
 }
 
 // StartWPForkHandler binds the write-protect handshake socket for a live-cow fork
@@ -128,11 +196,12 @@ func StartWPForkHandler(cfg WPForkConfig) (WPForkHandle, error) {
 // Receive accepts the patched Firecracker's connection and completes the m2
 // handshake: it reads the region layout (JSON body) and the userfaultfd
 // (SCM_RIGHTS), then mmaps the parent's live guest memfd read-only (from the
-// FIRECRACKER_MITOS_SHARED_MEM_EXPORT coordinates the parent published) and
-// creates the private FROZEN memfd the copy-before-unprotect loop writes into.
-// It must be running concurrently with the parent Firecracker startup, which is
-// what drives Firecracker to connect. After it returns the handler holds the
-// uffd, the region table, and both memory views.
+// FIRECRACKER_MITOS_SHARED_MEM_EXPORT coordinates the parent published). It must be
+// running concurrently with the parent Firecracker startup, which is what drives
+// Firecracker to connect. After it returns the handler holds the uffd, the region
+// table, and the parent's live memory view. The per-fork FROZEN image + bitmap are
+// NOT created here: each Freeze (each fork) allocates its OWN epoch (newEpoch), so
+// repeated forks of one source never share frozen state.
 func (h *wpForkHandler) Receive() error {
 	conn, err := h.ln.AcceptUnix()
 	if err != nil {
@@ -164,34 +233,6 @@ func (h *wpForkHandler) Receive() error {
 	}
 
 	pageSize := regions[0].pageSizeBytes()
-	frozenFd, err := unix.MemfdCreate("mitos-frozen", unix.MFD_CLOEXEC)
-	if err != nil {
-		_ = unix.Close(uffdFD)
-		_ = unix.Munmap(live)
-		return fmt.Errorf("wpfork: memfd_create frozen: %w", err)
-	}
-	if err := unix.Ftruncate(frozenFd, int64(exp.bytes)); err != nil {
-		_ = unix.Close(uffdFD)
-		_ = unix.Munmap(live)
-		_ = unix.Close(frozenFd)
-		return fmt.Errorf("wpfork: ftruncate frozen: %w", err)
-	}
-	frozen, err := unix.Mmap(frozenFd, 0, int(exp.bytes), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
-	if err != nil {
-		_ = unix.Close(uffdFD)
-		_ = unix.Munmap(live)
-		_ = unix.Close(frozenFd)
-		return fmt.Errorf("wpfork: mmap frozen: %w", err)
-	}
-	bmBytes := frozenBitmapBytes(exp.bytes, pageSize)
-	frozenBM, err := unix.Mmap(-1, 0, int(bmBytes), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED|unix.MAP_ANONYMOUS)
-	if err != nil {
-		_ = unix.Close(uffdFD)
-		_ = unix.Munmap(live)
-		_ = unix.Munmap(frozen)
-		_ = unix.Close(frozenFd)
-		return fmt.Errorf("wpfork: mmap frozen bitmap: %w", err)
-	}
 
 	// Wrap the uffd in an *os.File so Serve's read runs on the Go runtime poller:
 	// it delivers fault messages the same as a blocking read but, unlike a raw
@@ -206,12 +247,79 @@ func (h *wpForkHandler) Receive() error {
 	h.regions = regions
 	h.live = live
 	h.liveSize = exp.bytes
-	h.frozenFd = frozenFd
-	h.frozen = frozen
-	h.frozenBM = frozenBM
 	h.pageSize = pageSize
+	// One bit per lazyChunkBytes of guest RAM, used by the lazy restore to know which
+	// chunks are already installed (UFFDIO_COPY on a present page returns EEXIST) and
+	// which the fork point still has to fill. Sized from the live memfd, so it covers
+	// every region's mem-file offset. Harmless (and unread) for a booted source.
+	numChunks := (exp.bytes + lazyChunkBytes - 1) / lazyChunkBytes
+	h.populatedBM = make([]byte, (numChunks+7)/8)
 	h.mu.Unlock()
 	return nil
+}
+
+// newEpoch allocates a FRESH per-fork frozen state: a private FROZEN memfd sized to
+// the guest RAM and its 1-bit-per-page selector memfd, both zeroed. Freeze calls it
+// once per fork, so each fork's children read that fork's point-in-time pages and an
+// earlier fork's frozen bytes are never overwritten by a later fork or by a source
+// write after the later fork (the m2 inheritance invariant across repeated forks).
+// The memfds are sparse: only pages the source actually clobbers after this fork's
+// freeze consume RAM.
+func (h *wpForkHandler) newEpoch() (*frozenEpoch, error) {
+	h.mu.Lock()
+	bytes := h.liveSize
+	pageSize := h.pageSize
+	h.mu.Unlock()
+	if bytes == 0 || pageSize == 0 {
+		return nil, fmt.Errorf("wpfork: newEpoch before handshake")
+	}
+	frozenFd, err := unix.MemfdCreate(frozenMemfdName, unix.MFD_CLOEXEC)
+	if err != nil {
+		return nil, fmt.Errorf("wpfork: memfd_create frozen: %w", err)
+	}
+	if err := unix.Ftruncate(frozenFd, int64(bytes)); err != nil {
+		_ = unix.Close(frozenFd)
+		return nil, fmt.Errorf("wpfork: ftruncate frozen: %w", err)
+	}
+	frozen, err := unix.Mmap(frozenFd, 0, int(bytes), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		_ = unix.Close(frozenFd)
+		return nil, fmt.Errorf("wpfork: mmap frozen: %w", err)
+	}
+	// The frozen bitmap is backed by a memfd (not MAP_SHARED|MAP_ANONYMOUS) so a
+	// co-located child can reopen the SAME region through /proc/<pid>/fd and read the
+	// CURRENT per-page selector at attach time. frozenBitmapName is the identity the
+	// child verifies on reopen.
+	bmBytes := frozenBitmapBytes(bytes, pageSize)
+	frozenBMFd, err := unix.MemfdCreate(frozenBitmapName, unix.MFD_CLOEXEC)
+	if err != nil {
+		_ = unix.Munmap(frozen)
+		_ = unix.Close(frozenFd)
+		return nil, fmt.Errorf("wpfork: memfd_create frozen bitmap: %w", err)
+	}
+	if err := unix.Ftruncate(frozenBMFd, int64(bmBytes)); err != nil {
+		_ = unix.Munmap(frozen)
+		_ = unix.Close(frozenFd)
+		_ = unix.Close(frozenBMFd)
+		return nil, fmt.Errorf("wpfork: ftruncate frozen bitmap: %w", err)
+	}
+	frozenBM, err := unix.Mmap(frozenBMFd, 0, int(bmBytes), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		_ = unix.Munmap(frozen)
+		_ = unix.Close(frozenFd)
+		_ = unix.Close(frozenBMFd)
+		return nil, fmt.Errorf("wpfork: mmap frozen bitmap: %w", err)
+	}
+	return &frozenEpoch{frozenFd: frozenFd, frozen: frozen, frozenBMFd: frozenBMFd, frozenBM: frozenBM}, nil
+}
+
+// currentEpoch returns the latest fork's frozen state (the one a just-forked child
+// imports), or nil before the first Freeze. Caller must hold h.mu.
+func (h *wpForkHandler) currentEpoch() *frozenEpoch {
+	if len(h.epochs) == 0 {
+		return nil
+	}
+	return h.epochs[len(h.epochs)-1]
 }
 
 // recvUffdHandshake reads the single SCM_RIGHTS message the patched Firecracker
@@ -228,6 +336,16 @@ func recvUffdHandshake(conn *net.UnixConn) (int, []uffdMapping, error) {
 	var rerr error
 	if cerr := raw.Read(func(fd uintptr) bool {
 		n, oobn, _, _, rerr = unix.Recvmsg(int(fd), buf, oob, 0)
+		// The socket is non-blocking (the Go runtime sets fds so). The parent
+		// Firecracker connects and then sends the userfaultfd, so an accept can win
+		// the race and recvmsg returns EAGAIN before the send lands. Returning true
+		// here would surface that EAGAIN as "handshake not received" and close the
+		// conn, which then breaks the parent's send (EPIPE): the intermittent
+		// arm-handshake failure. Return false on EAGAIN so the runtime poller waits
+		// for readability and calls back once the send has arrived.
+		if rerr == unix.EAGAIN || rerr == unix.EWOULDBLOCK {
+			return false
+		}
 		return true
 	}); cerr != nil {
 		return -1, nil, fmt.Errorf("wpfork: rawconn read: %w", cerr)
@@ -282,11 +400,14 @@ func mmapLiveMemfd(exp memfdExport) ([]byte, error) {
 	return live, nil
 }
 
-// Freeze arms write-protection over the whole guest region at the fork point.
-// After it returns every guest page is write-protected in the parent's mapping,
-// so the caller may RESUME the parent: any page the parent then writes takes a WP
-// fault that Serve resolves copy-before-unprotect. This is the m2 parent-pause
-// contributor; its duration is recorded and returned.
+// Freeze starts a NEW fork: it allocates a fresh per-fork frozen epoch (so this
+// fork's children never inherit a page frozen for an earlier fork) and arms
+// write-protection over the whole guest region at the fork point. After it returns
+// every guest page is write-protected in the parent's mapping, so the caller may
+// RESUME the parent: any page the parent then writes takes a WP fault that Serve
+// resolves copy-before-unprotect, fanning the fork-time bytes into every live epoch
+// that has not yet captured that page. Called once per ForkSnapshot; its duration is
+// recorded and returned (the m2 parent-pause contributor).
 func (h *wpForkHandler) Freeze() (time.Duration, error) {
 	h.mu.Lock()
 	uffd := h.uffd
@@ -295,15 +416,74 @@ func (h *wpForkHandler) Freeze() (time.Duration, error) {
 	if uffd < 0 {
 		return 0, fmt.Errorf("wpfork: Freeze before handshake")
 	}
+	// Allocate the fresh epoch BEFORE arming WP, but publish it (append) only after
+	// the region is protected: no fault can fire during the freeze (the source is
+	// paused across the fork window), and a WP failure then leaves no dangling epoch.
+	ep, err := h.newEpoch()
+	if err != nil {
+		return 0, err
+	}
+	// POPULATE-ON-FREEZE. A lazily restored source's memfd is sparse: any page the
+	// guest never touched is a hole. The co-located child MAP_PRIVATEs this memfd, so
+	// it would read those holes as zeros instead of the snapshot's bytes. Fill them
+	// before the fork point captures the memory. Runs with the source paused, so no
+	// fault can race it. A booted source has no mem source and this is a no-op.
+	//
+	// Timed SEPARATELY from the write-protect arm below. Both happen inside the fork
+	// window with the source paused, so both are parent-pause contributors, but they
+	// scale with completely different things: the WP arm is O(regions) and takes
+	// microseconds, while the residual fill is O(guest RAM the source never touched)
+	// and is largest for a fork that happens right after activate. Folding the fill
+	// into freezeNanos would make the "UFFDIO_WRITEPROTECT-all took" number silently
+	// balloon back toward the pre-lazy-restore eager-copy cost.
+	residualStart := time.Now()
+	h.mu.Lock()
+	perr := h.populateResidual()
+	h.mu.Unlock()
+	if perr != nil {
+		ep.close()
+		return 0, perr
+	}
+	residual := time.Since(residualStart)
+	atomic.StoreInt64(&h.residualNanos, residual.Nanoseconds())
+
 	start := time.Now()
 	for _, r := range regions {
 		if err := h.writeprotect(r.BaseHostVirtAddr, r.Size, true); err != nil {
+			ep.close()
 			return 0, fmt.Errorf("wpfork: freeze region [%#x,+%#x): %w", r.BaseHostVirtAddr, r.Size, err)
 		}
 	}
-	d := time.Since(start)
-	atomic.StoreInt64(&h.freezeNanos, d.Nanoseconds())
-	return d, nil
+	wp := time.Since(start)
+	h.mu.Lock()
+	// Any chunk installed from here on must land write-protected.
+	h.frozen = true
+	h.epochs = append(h.epochs, ep)
+	h.mu.Unlock()
+	atomic.StoreInt64(&h.freezeNanos, wp.Nanoseconds())
+	// The caller measures the parent pause, which is BOTH contributors.
+	return residual + wp, nil
+}
+
+// close munmaps and closes the epoch's memfds. Idempotent-ish: called on Freeze
+// rollback and on handler Close.
+func (e *frozenEpoch) close() {
+	if e.frozen != nil {
+		_ = unix.Munmap(e.frozen)
+		e.frozen = nil
+	}
+	if e.frozenBM != nil {
+		_ = unix.Munmap(e.frozenBM)
+		e.frozenBM = nil
+	}
+	if e.frozenBMFd >= 0 {
+		_ = unix.Close(e.frozenBMFd)
+		e.frozenBMFd = -1
+	}
+	if e.frozenFd >= 0 {
+		_ = unix.Close(e.frozenFd)
+		e.frozenFd = -1
+	}
 }
 
 // writeprotect arms (protect=true) or removes (protect=false) write-protection
@@ -333,6 +513,7 @@ func (h *wpForkHandler) Serve() error {
 	if uffdFile == nil {
 		return fmt.Errorf("wpfork: Serve before handshake")
 	}
+	lazy := h.lazyEnabled()
 	var msg uffdMsg
 	msgBuf := (*[unsafe.Sizeof(msg)]byte)(unsafe.Pointer(&msg))[:]
 	for {
@@ -355,8 +536,17 @@ func (h *wpForkHandler) Serve() error {
 			continue
 		}
 		if msg.PfFlags&uffdPagefaultFlagWP == 0 {
-			// Not a write-protect fault: nothing was registered MISSING, so this
-			// should not happen. Ignore rather than mis-serve.
+			// A MISSING fault. On a LAZILY restored source this is the normal path:
+			// populate the chunk out of the snapshot mem file, which unblocks the
+			// faulting vCPU. On a booted source nothing is registered MISSING, so a
+			// fault here means the kernel and our registration disagree; ignoring it
+			// would hang the faulting thread, so surface it.
+			if !lazy {
+				return fmt.Errorf("wpfork: MISSING fault at %#x on a handler with no mem source", msg.PfAddress)
+			}
+			if err := h.serveMissing(msg.PfAddress); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := h.serveFault(msg.PfAddress); err != nil {
@@ -365,14 +555,32 @@ func (h *wpForkHandler) Serve() error {
 	}
 }
 
-// serveFault handles one write-protect fault at host address addr: copy the
-// page's fork-time bytes into FROZEN, mark it, then unprotect + wake the writer.
+// serveFault handles one write-protect fault at host address addr: copy the page's
+// fork-time bytes into EVERY live epoch that has not yet captured that page, mark it
+// in each, then unprotect + wake the writer. Fanning into every uncaptured epoch is
+// what keeps concurrent forks independent: the page's pre-write value is the
+// fork-time value for every epoch whose freeze happened before this write and that
+// has not seen a write to this page since (bit clear). An epoch that already froze
+// the page (bit set) is skipped, so an earlier fork's frozen bytes are never
+// overwritten by a write that happens after a later fork.
+// dumpRegions renders the registered region layout compactly for diagnostics: the
+// base host virtual address, size, and mem-file offset of every region the WP
+// handshake advertised. It is used only in error context, so it never runs on the
+// hot fault path.
+func dumpRegions(regions []uffdMapping) string {
+	parts := make([]string, 0, len(regions))
+	for i, r := range regions {
+		parts = append(parts, fmt.Sprintf("[%d base=%#x size=%#x off=%#x]", i, r.BaseHostVirtAddr, r.Size, r.Offset))
+	}
+	return strings.Join(parts, " ")
+}
+
 func (h *wpForkHandler) serveFault(addr uint64) error {
 	h.mu.Lock()
 	regions := h.regions
 	live := h.live
-	frozen := h.frozen
-	bm := h.frozenBM
+	epochs := make([]*frozenEpoch, len(h.epochs))
+	copy(epochs, h.epochs)
 	pageSize := h.pageSize
 	h.mu.Unlock()
 
@@ -381,14 +589,25 @@ func (h *wpForkHandler) serveFault(addr uint64) error {
 		// A fault outside the registered range: skip it (defensive).
 		return nil
 	}
-	if fileOffset+pageSize > uint64(len(live)) || fileOffset+pageSize > uint64(len(frozen)) {
-		return fmt.Errorf("wpfork: fault page [%#x,+%#x) past mapped memory", fileOffset, pageSize)
+	if fileOffset+pageSize > uint64(len(live)) {
+		return fmt.Errorf("wpfork: fault page [%#x,+%#x) past mapped memory (addr=%#x live=%d regions=%s)", fileOffset, pageSize, addr, len(live), dumpRegions(regions))
 	}
-	// COPY-BEFORE-WRITE: the writer is blocked on this WP fault, so live[fileOffset]
-	// still holds the fork-time bytes. Preserve them for the children, mark the
-	// page, THEN unprotect so the parent's write may land.
-	copy(frozen[fileOffset:fileOffset+pageSize], live[fileOffset:fileOffset+pageSize])
-	setFrozenBit(bm, fileOffset/pageSize)
+	pageIdx := fileOffset / pageSize
+	// COPY-BEFORE-UNPROTECT: the writer is blocked on this WP fault, so live[fileOffset]
+	// still holds the fork-time bytes. Preserve them for the children of every fork
+	// that still needs this page, mark it, THEN unprotect so the parent's write may
+	// land. All copies complete before the single unprotect, so no epoch can observe
+	// the parent's new value while a fork-time value is still owed to it.
+	for _, ep := range epochs {
+		if fileOffset+pageSize > uint64(len(ep.frozen)) {
+			return fmt.Errorf("wpfork: fault page [%#x,+%#x) past frozen image (frozen=%d)", fileOffset, pageSize, len(ep.frozen))
+		}
+		if testFrozenBit(ep.frozenBM, pageIdx) {
+			continue // this fork already captured the page's fork-time bytes
+		}
+		copy(ep.frozen[fileOffset:fileOffset+pageSize], live[fileOffset:fileOffset+pageSize])
+		setFrozenBit(ep.frozenBM, pageIdx)
+	}
 	if err := h.writeprotect(pageBase, pageSize, false); err != nil {
 		return fmt.Errorf("wpfork: unprotect+wake: %w", err)
 	}
@@ -396,19 +615,113 @@ func (h *wpForkHandler) serveFault(addr uint64) error {
 	return nil
 }
 
-// FrozenFd returns the descriptor of the private FROZEN memfd. -1 before Receive.
+// FrozenFd returns the descriptor of the CURRENT fork's private FROZEN memfd. -1
+// before the first Freeze (each Freeze starts a fresh epoch).
 func (h *wpForkHandler) FrozenFd() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.frozenFd
+	ep := h.currentEpoch()
+	if ep == nil {
+		return -1
+	}
+	return ep.frozenFd
 }
 
-// FrozenPage reports whether page pageIndex has been copied into the FROZEN
-// image (the per-page source selector a co-located child consults).
+// FrozenPage reports whether page pageIndex has been copied into the CURRENT fork's
+// FROZEN image (the per-page source selector a co-located child of this fork
+// consults). False before the first Freeze.
 func (h *wpForkHandler) FrozenPage(pageIndex uint64) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return testFrozenBit(h.frozenBM, pageIndex)
+	ep := h.currentEpoch()
+	if ep == nil {
+		return false
+	}
+	return testFrozenBit(ep.frozenBM, pageIndex)
+}
+
+// FrozenBitmap returns a copy of the CURRENT fork's frozen bitmap at the instant of
+// the call, so a co-located child reads a stable per-page source selector while
+// Serve keeps marking pages. Nil before the first Freeze.
+func (h *wpForkHandler) FrozenBitmap() []byte {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ep := h.currentEpoch()
+	if ep == nil || ep.frozenBM == nil {
+		return nil
+	}
+	out := make([]byte, len(ep.frozenBM))
+	copy(out, ep.frozenBM)
+	return out
+}
+
+// ChildImport assembles the coordinates a co-located fork child needs to boot from
+// the parent's live memory (see ChildImportProvider). It reads the parent's m1
+// export to reach the parent shared memfd, and points the child at this handler's
+// FROZEN memfd and its LIVE frozen bitmap memfd (both owned by THIS process). The
+// bitmap is passed as a live memfd, NOT a static file copy, so the child reads the
+// CURRENT per-page selector at attach time: a page this handler freezes AFTER
+// ChildImport runs but BEFORE the child attaches is still sourced from FROZEN, so
+// the resumed parent's post-fork write can never leak into the child.
+//
+// Each descriptor's identity (st_ino, st_dev) is captured here (the parent owns the
+// FROZEN and bitmap memfds directly; the guest memfd it reaches once through /proc)
+// so the child can verify on reopen that a recycled PID has not handed it a foreign
+// fd. dir is the child's node-local snapshot dir; it is validated as the trust
+// boundary but the import no longer writes any file there.
+func (h *wpForkHandler) ChildImport(dir string) (ChildMemfdImport, error) {
+	h.mu.Lock()
+	ep := h.currentEpoch()
+	frozenFd, frozenBMFd := -1, -1
+	if ep != nil {
+		frozenFd = ep.frozenFd
+		frozenBMFd = ep.frozenBMFd
+	}
+	liveSize := h.liveSize
+	pageSize := h.pageSize
+	h.mu.Unlock()
+	if frozenFd < 0 || frozenBMFd < 0 || liveSize == 0 || pageSize == 0 {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport before Freeze")
+	}
+	if dir == "" {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport empty dir")
+	}
+	exportRaw, err := os.ReadFile(h.cfg.MemExportPath)
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport read memfd export %s: %w", h.cfg.MemExportPath, err)
+	}
+	exp, err := parseMemfdExport(string(exportRaw))
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport %w", err)
+	}
+	parentIno, parentDev, err := procFdIdentity(exp.pid, exp.fd)
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport identify parent memfd: %w", err)
+	}
+	frozenIno, frozenDev, err := fdIdentity(frozenFd)
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport identify frozen memfd: %w", err)
+	}
+	bmIno, bmDev, err := fdIdentity(frozenBMFd)
+	if err != nil {
+		return ChildMemfdImport{}, fmt.Errorf("wpfork: ChildImport identify frozen bitmap memfd: %w", err)
+	}
+	return ChildMemfdImport{
+		ParentPID: exp.pid,
+		ParentFD:  exp.fd,
+		ParentIno: parentIno,
+		ParentDev: parentDev,
+		Bytes:     exp.bytes,
+		FrozenPID: os.Getpid(),
+		FrozenFD:  frozenFd,
+		FrozenIno: frozenIno,
+		FrozenDev: frozenDev,
+		BitmapPID: os.Getpid(),
+		BitmapFD:  frozenBMFd,
+		BitmapIno: bmIno,
+		BitmapDev: bmDev,
+		PageSize:  pageSize,
+	}, nil
 }
 
 // FaultCount returns the number of write-protect faults Serve has resolved.
@@ -441,22 +754,180 @@ func (h *wpForkHandler) Close() error {
 		_ = unix.Close(h.uffd)
 		h.uffd = -1
 	}
+	if h.memMap != nil {
+		_ = unix.Munmap(h.memMap)
+		h.memMap = nil
+	}
+	if h.memSrc != nil {
+		_ = h.memSrc.Close()
+		h.memSrc = nil
+	}
 	if h.live != nil {
 		_ = unix.Munmap(h.live)
 		h.live = nil
 	}
-	if h.frozen != nil {
-		_ = unix.Munmap(h.frozen)
-		h.frozen = nil
+	// Tear down every fork's epoch: an earlier fork's children may have referenced
+	// its memfds through /proc, but Close means the whole parent path is going away.
+	for _, ep := range h.epochs {
+		ep.close()
 	}
-	if h.frozenBM != nil {
-		_ = unix.Munmap(h.frozenBM)
-		h.frozenBM = nil
-	}
-	if h.frozenFd >= 0 {
-		_ = unix.Close(h.frozenFd)
-		h.frozenFd = -1
-	}
+	h.epochs = nil
 	_ = os.Remove(h.cfg.UDSPath)
 	return nil
+}
+
+// SetMemSource points the handler at the snapshot mem file a LAZILY restored source
+// pulls its guest RAM from. It MUST be called before the parent Firecracker loads
+// the snapshot (the patched binary connects during guest-memory setup and starts
+// faulting immediately), and it is what makes the husk pass
+// FIRECRACKER_MITOS_LAZY_RESTORE so Firecracker skips the eager memfd copy.
+//
+// A BOOTED source never calls this: its pages are resident, Firecracker registers
+// WRITE_PROTECT only, and no MISSING fault is delivered.
+func (h *wpForkHandler) SetMemSource(path string) error {
+	if path == "" {
+		return fmt.Errorf("wpfork: empty mem source path")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("wpfork: open mem source %s: %w", path, err)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("wpfork: stat mem source %s: %w", path, err)
+	}
+	if st.Size() == 0 {
+		_ = f.Close()
+		return fmt.Errorf("wpfork: empty mem source %s", path)
+	}
+	// Read-only private mapping of the mem file: the UFFDIO_COPY source. The kernel
+	// copies from these page-cache pages directly into the guest memfd.
+	m, err := unix.Mmap(int(f.Fd()), 0, int(st.Size()), unix.PROT_READ, unix.MAP_PRIVATE)
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("wpfork: mmap mem source %s: %w", path, err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.memMap != nil {
+		_ = unix.Munmap(h.memMap)
+	}
+	if h.memSrc != nil {
+		_ = h.memSrc.Close()
+	}
+	h.memSrc = f
+	h.memMap = m
+	return nil
+}
+
+// lazyEnabled reports whether this handler populates guest RAM on demand.
+func (h *wpForkHandler) lazyEnabled() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.memSrc != nil
+}
+
+// uffdCopy installs len bytes from src (this process) at dst (Firecracker's mapping)
+// through the uffd, with the given UFFDIO_COPY mode. EEXIST means the page raced in
+// already, which is benign: the content is identical (both come from the mem file).
+func (h *wpForkHandler) uffdCopy(uffd int, dst uint64, src []byte, mode uint64) error {
+	arg := uffdioCopyArg{
+		Dst:  dst,
+		Src:  uint64(uintptr(unsafe.Pointer(&src[0]))),
+		Len:  uint64(len(src)),
+		Mode: mode,
+	}
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(uffd), uintptr(uffdioCopy), uintptr(unsafe.Pointer(&arg)))
+	if errno != 0 && errno != unix.EEXIST {
+		return fmt.Errorf("wpfork: UFFDIO_COPY dst=%#x len=%d mode=%#x: %w", dst, len(src), mode, errno)
+	}
+	return nil
+}
+
+// populateChunk reads one chunk out of the mem file and installs it. Caller holds mu.
+func (h *wpForkHandler) populateChunk(dst, fileOffset, length uint64, extraMode uint64) error {
+	if h.memSrc == nil {
+		return fmt.Errorf("wpfork: MISSING fault with no mem source")
+	}
+	if fileOffset+length > uint64(len(h.memMap)) {
+		return fmt.Errorf("wpfork: chunk [%#x,+%#x) past mem source (%d bytes)", fileOffset, length, len(h.memMap))
+	}
+	buf := h.memMap[fileOffset : fileOffset+length]
+	mode := extraMode
+	if h.frozen {
+		// Installed after the fork point: land it write-protected so the parent's
+		// next write to it still takes a WP fault and is copied before it lands.
+		mode |= copyModeWP
+	}
+	if err := h.uffdCopy(h.uffd, dst, buf, mode); err != nil {
+		return err
+	}
+	setBit(h.populatedBM, fileOffset/lazyChunkBytes)
+	return nil
+}
+
+// serveMissing populates the chunk containing a MISSING fault from the snapshot mem
+// file, which unblocks the faulting vCPU (or the vmstate restore) at that address.
+func (h *wpForkHandler) serveMissing(addr uint64) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	dst, fileOffset, length, ok := lazyChunkForAddr(h.regions, addr)
+	if !ok {
+		// A MISSING fault outside every registered region cannot be resolved, and
+		// ignoring it would hang the faulting thread forever. Fail loudly.
+		return fmt.Errorf("wpfork: MISSING fault at %#x outside regions %s", addr, dumpRegions(h.regions))
+	}
+	if testBit(h.populatedBM, fileOffset/lazyChunkBytes) {
+		// Already installed (a concurrent chunk covered it); nothing to do, and the
+		// kernel will not re-deliver.
+		return nil
+	}
+	if err := h.populateChunk(dst, fileOffset, length, 0); err != nil {
+		return err
+	}
+	atomic.AddInt64(&h.missingServed, 1)
+	return nil
+}
+
+// populateResidual fills every chunk the guest never faulted in, straight from the
+// mem file. Caller holds mu.
+//
+// This is the correctness gate for the lazy restore. A co-located fork child maps the
+// parent's memfd MAP_PRIVATE, so a page the parent never touched is a HOLE in that
+// memfd and the child would read it as zeros instead of as the snapshot's contents.
+// Filling the residual at the fork point (rather than at restore) keeps warm-claim
+// activate O(1) and charges the fill only to the forks that actually need it.
+//
+// DONTWAKE: nothing is blocked on these addresses (the source is paused across the
+// fork window), so there is no waiter to wake.
+func (h *wpForkHandler) populateResidual() error {
+	if h.memSrc == nil {
+		return nil // booted source: pages are already resident
+	}
+	for _, r := range h.regions {
+		for start := uint64(0); start < r.Size; start += lazyChunkBytes {
+			length := uint64(lazyChunkBytes)
+			if start+length > r.Size {
+				length = r.Size - start
+			}
+			fileOffset := r.Offset + start
+			if testBit(h.populatedBM, fileOffset/lazyChunkBytes) {
+				continue
+			}
+			if err := h.populateChunk(r.BaseHostVirtAddr+start, fileOffset, length, copyModeDontwake); err != nil {
+				return fmt.Errorf("wpfork: populate residual: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// MissingFaultCount reports how many MISSING faults the lazy restore has served.
+func (h *wpForkHandler) MissingFaultCount() int64 { return atomic.LoadInt64(&h.missingServed) }
+
+// ResidualFillDuration reports how long the last fork point spent filling the chunks
+// the source never demand-faulted. Zero on a booted source (nothing to fill).
+func (h *wpForkHandler) ResidualFillDuration() time.Duration {
+	return time.Duration(atomic.LoadInt64(&h.residualNanos))
 }

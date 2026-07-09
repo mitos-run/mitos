@@ -624,12 +624,24 @@ func (k *K8sControlPlane) getOwned(ctx context.Context, orgID, name string) (*v1
 // carries the token. The endpoint is fork-aware (runtimeEndpoint), so a live
 // fork's status names the child endpoint runtime traffic actually targets.
 func sandboxSummary(sb *v1.Sandbox) map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"id":        sb.Name,
 		"phase":     string(sb.Status.Phase),
 		"endpoint":  runtimeEndpoint(sb),
 		"createdAt": sb.CreationTimestamp.UTC().Format(time.RFC3339),
+		// How many times this sandbox's VM was destroyed and replaced by a fresh one
+		// from the pool template (a husk pod loss under DrainPolicy Kill). Non-zero
+		// means the guest the caller created is GONE: its processes, memory, and
+		// filesystem writes went with it. The Ready condition flips only transiently
+		// during the replacement, so without this a client polling status sees an
+		// unbroken healthy sandbox and keeps working against state that no longer
+		// exists (#870). Zero on a sandbox that still holds its original VM.
+		"restarts": sb.Status.Restarts,
 	}
+	if sb.Status.LastRestartTime != nil {
+		out["lastRestartTime"] = sb.Status.LastRestartTime.UTC().Format(time.RFC3339)
+	}
+	return out
 }
 
 // failureReason extracts the rejection message from a Failed sandbox's Ready

@@ -72,6 +72,9 @@ func TestActivateResultRoundTrip(t *testing.T) {
 		OK:        true,
 		VsockPath: "/run/husk/vsock.sock",
 		LatencyMs: 4.275,
+		Stages: map[string]float64{
+			"vmstate_restore": 5.0, "guest_ready": 18.0, "handshake": 2.0,
+		},
 	}
 
 	var buf bytes.Buffer
@@ -121,7 +124,9 @@ func TestForkSnapshotRequestRoundTrip(t *testing.T) {
 
 func TestForkSnapshotResultRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
-	want := ForkSnapshotResult{OK: true, SnapshotDir: "/var/lib/mitos/forks/fork-1", LatencyMs: 12.5}
+	want := ForkSnapshotResult{OK: true, SnapshotDir: "/var/lib/mitos/forks/fork-1", LatencyMs: 12.5, Stages: map[string]float64{
+		"pause": 0.4, "create_snapshot": 9.0, "rootfs_freeze": 2.0, "resume": 0.6,
+	}}
 	if err := WriteForkSnapshotResult(&buf, want); err != nil {
 		t.Fatalf("WriteForkSnapshotResult: %v", err)
 	}
@@ -129,7 +134,7 @@ func TestForkSnapshotResultRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadForkSnapshotResult: %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip mismatch: got %+v want %+v", got, want)
 	}
 }
@@ -178,6 +183,10 @@ func TestSpawnVMResultRoundTrip(t *testing.T) {
 		VMID:      "fork-7",
 		VsockPath: "/run/husk/fork-7/vsock.sock",
 		LatencyMs: 6.25,
+		Stages: map[string]float64{
+			"fc_boot": 42.0, "rootfs_clone": 3.0, "prepare_total": 46.0,
+			"vmstate_restore": 5.0, "guest_ready": 18.0, "handshake": 2.0,
+		},
 	}
 	var buf bytes.Buffer
 	if err := WriteSpawnVMResult(&buf, want); err != nil {
@@ -187,7 +196,7 @@ func TestSpawnVMResultRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadSpawnVMResult: %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip mismatch: got %+v want %+v", got, want)
 	}
 }

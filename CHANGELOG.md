@@ -1,5 +1,113 @@
 # Changelog
 
+## [1.38.1](https://github.com/mitos-run/mitos/compare/v1.38.0...v1.38.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* **controller:** surface a durable restart signal when a sandbox's VM is destroyed and replaced ([#875](https://github.com/mitos-run/mitos/issues/875)) ([5a3c054](https://github.com/mitos-run/mitos/commit/5a3c0542cda08b16151d64fe8185b9d6515db78e)), closes [#870](https://github.com/mitos-run/mitos/issues/870)
+* **controller:** write the fork mem file when a child will spill, so fork(n) stops hanging ([#874](https://github.com/mitos-run/mitos/issues/874)) ([dcd4187](https://github.com/mitos-run/mitos/commit/dcd41875dc530ec1cd49d1785c12ce650f744fca))
+* **husk:** stop copying 512 MiB into the live-cow guest memfd on every warm-claim activate ([#869](https://github.com/mitos-run/mitos/issues/869)) ([8fef611](https://github.com/mitos-run/mitos/commit/8fef6118cd66d863a88404dd6c9ebf55b58f4686))
+
+## [1.38.0](https://github.com/mitos-run/mitos/compare/v1.37.2...v1.38.0) (2026-07-08)
+
+
+### Features
+
+* **cli:** shell completion for bash, zsh, and fish ([#811](https://github.com/mitos-run/mitos/issues/811)) ([68c8e55](https://github.com/mitos-run/mitos/commit/68c8e550e74f51887dcb116ad371e073c6a44e0f))
+* **controller:** reuse the husk control-plane connection across RPCs ([#865](https://github.com/mitos-run/mitos/issues/865)) ([cf0a073](https://github.com/mitos-run/mitos/commit/cf0a07303b379b216cc5fc5b808bb15f3e6a6f19))
+
+## [1.37.2](https://github.com/mitos-run/mitos/compare/v1.37.1...v1.37.2) (2026-07-08)
+
+
+### Bug Fixes
+
+* **husk:** await dormant slot in the prewarm KVM test (eager warm races it) ([#861](https://github.com/mitos-run/mitos/issues/861)) ([ffe96fe](https://github.com/mitos-run/mitos/commit/ffe96fe2345bed5845d1e9ccb185b6b9d0ab167d))
+
+## [1.37.1](https://github.com/mitos-run/mitos/compare/v1.37.0...v1.37.1) (2026-07-08)
+
+
+### Bug Fixes
+
+* **husk:** eagerly prewarm the child slot at startup so the first fork adopts it ([#855](https://github.com/mitos-run/mitos/issues/855)) ([718b1ce](https://github.com/mitos-run/mitos/commit/718b1cef3b28cbf2923a1338f06675e4cb4eb91e))
+
+## [1.37.0](https://github.com/mitos-run/mitos/compare/v1.36.0...v1.37.0) (2026-07-08)
+
+
+### Features
+
+* **controller:** wire --prewarm-child so the pre-warmed fork slot engages ([#853](https://github.com/mitos-run/mitos/issues/853)) ([63eb53a](https://github.com/mitos-run/mitos/commit/63eb53a912bb88fce14b8e443a1f51eb2a38cac1))
+
+## [1.36.0](https://github.com/mitos-run/mitos/compare/v1.35.0...v1.36.0) (2026-07-08)
+
+
+### Features
+
+* **husk:** pre-warm a dormant child VMM to cut the fork spawn latency ([#851](https://github.com/mitos-run/mitos/issues/851)) ([ca09c90](https://github.com/mitos-run/mitos/commit/ca09c90b5425c00d789aad2eee637c5871cd3fda))
+
+## [1.35.0](https://github.com/mitos-run/mitos/compare/v1.34.0...v1.35.0) (2026-07-08)
+
+
+### Features
+
+* **husk:** lazy UFFD child import so the vmstate-only fork actually drops fork latency ([#848](https://github.com/mitos-run/mitos/issues/848)) ([a8946ff](https://github.com/mitos-run/mitos/commit/a8946ffeadd50e0649a880da86cd7f656cbd4a6d))
+
+## [1.34.0](https://github.com/mitos-run/mitos/compare/v1.33.0...v1.34.0) (2026-07-08)
+
+
+### Features
+
+* **controller:** wire --live-cow-child-import so the vmstate-only fork engages ([#845](https://github.com/mitos-run/mitos/issues/845)) ([bb59f09](https://github.com/mitos-run/mitos/commit/bb59f0927c1cd8897868e9c6430eea2b6b364bd6))
+
+## [1.33.0](https://github.com/mitos-run/mitos/compare/v1.32.2...v1.33.0) (2026-07-08)
+
+
+### Features
+
+* **husk:** child-side memfd import so the live-cow vmstate-only fork drops create_snapshot ([#844](https://github.com/mitos-run/mitos/issues/844)) ([28fa4b2](https://github.com/mitos-run/mitos/commit/28fa4b2a9abfa72dcb1e04ca398df902c2ab376d))
+
+
+### Bug Fixes
+
+* **husk:** gate the vmstate-only fork mem-skip on child import so co-located forks never hang ([#832](https://github.com/mitos-run/mitos/issues/832)) ([#842](https://github.com/mitos-run/mitos/issues/842)) ([eecb0a8](https://github.com/mitos-run/mitos/commit/eecb0a867a96cb3aaa73377ed72da933916e4fb0))
+
+## [1.32.2](https://github.com/mitos-run/mitos/compare/v1.32.1...v1.32.2) (2026-07-08)
+
+
+### Bug Fixes
+
+* **husk:** inject /dev/userfaultfd so the live-cow write-protect fork arms on prod ([#832](https://github.com/mitos-run/mitos/issues/832)) ([#840](https://github.com/mitos-run/mitos/issues/840)) ([1d9b607](https://github.com/mitos-run/mitos/commit/1d9b607b2bb23ef65e63b9ac3d3dfad98b906351))
+
+## [1.32.1](https://github.com/mitos-run/mitos/compare/v1.32.0...v1.32.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **husk:** arm the restored source VM so the live-cow vmstate-only fork engages ([#832](https://github.com/mitos-run/mitos/issues/832)) ([#837](https://github.com/mitos-run/mitos/issues/837)) ([8e9d78a](https://github.com/mitos-run/mitos/commit/8e9d78a3173af788aa09b06023ce2949d31637f6))
+
+## [1.32.0](https://github.com/mitos-run/mitos/compare/v1.31.0...v1.32.0) (2026-07-07)
+
+
+### Features
+
+* **husk:** install the vmstate-only-capable patched Firecracker ([#834](https://github.com/mitos-run/mitos/issues/834)) ([8972d36](https://github.com/mitos-run/mitos/commit/8972d3642f3d6fd6691f35002716f8ea6512b84b))
+* **husk:** live-cow fork snapshots vmstate only, skips the 364ms mem-file write ([#833](https://github.com/mitos-run/mitos/issues/833)) ([0c26249](https://github.com/mitos-run/mitos/commit/0c262493d4e59dc57bb00b9cf83ae4e9d53c61a0))
+* **husk:** wire live-cow fork to the vmstate-only snapshot (drops the 364ms mem write) ([#836](https://github.com/mitos-run/mitos/issues/836)) ([778ee7c](https://github.com/mitos-run/mitos/commit/778ee7c5094304fafd7fdde6bd8d3da37c4369a9))
+
+## [1.31.0](https://github.com/mitos-run/mitos/compare/v1.30.0...v1.31.0) (2026-07-07)
+
+
+### Features
+
+* **fork:** per-stage timing for the co-location fork to find the latency bottleneck ([#830](https://github.com/mitos-run/mitos/issues/830)) ([cf3091a](https://github.com/mitos-run/mitos/commit/cf3091aea7ecdefcf58516b2e6f2444324f84d80))
+
+## [1.30.0](https://github.com/mitos-run/mitos/compare/v1.29.0...v1.30.0) (2026-07-07)
+
+
+### Features
+
+* **husk:** live-cow child boots from the shared parent memfd (sub-100ms, KVM-tested) ([#827](https://github.com/mitos-run/mitos/issues/827)) ([4abdc6c](https://github.com/mitos-run/mitos/commit/4abdc6ccd18ed5e5853be6c4b79e4abf5c217b78))
+
 ## [1.29.0](https://github.com/mitos-run/mitos/compare/v1.28.0...v1.29.0) (2026-07-07)
 
 

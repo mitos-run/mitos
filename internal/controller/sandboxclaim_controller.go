@@ -141,9 +141,30 @@ type SandboxReconciler struct {
 	// child-side memfd import lands, so turning it on never breaks a fork.
 	LiveCowFork bool
 
+	// LiveCowChildImport mirrors the husk-stub --live-cow-child-import capability so
+	// fork routing is consistent with the pod flag. DEFAULT OFF; requires LiveCowFork.
+	LiveCowChildImport bool
+	// PrewarmChild passes --prewarm-child to warm husk pods so a fork adopts a
+	// pre-warmed dormant child. DEFAULT OFF; requires MultiVMFork.
+	PrewarmChild bool
+
 	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
 	// Nil defaults to SpawnVMOnHusk; tests inject a fake.
 	spawnVM huskVMSpawner
+
+	// HuskConns, when non-nil, is the husk control-plane CONNECTION POOL: the
+	// activate, fork-snapshot, spawn-vm, and remove-fork-snapshot seams REUSE one
+	// authenticated mTLS connection per husk pod across RPCs instead of dialing a
+	// fresh TCP+TLS handshake per call, so a co-located fork (fork-snapshot then
+	// spawn-vm to the SAME source pod) pays one handshake instead of two. It is
+	// used ONLY when the explicitly-injected seam (forkSnapshot/spawnVM/Activate/
+	// removeForkSnapshot, set by tests) is nil, so a test fake still wins and the
+	// nil-pool default stays byte-for-byte the one-shot huskclient.go path.
+	// EXPERIMENTAL, DEFAULT OFF (wired only behind --husk-conn-reuse) so it can be
+	// canaried and rolled back. The reused connection is the SAME authenticated
+	// peer the husk verified at dial time (mTLS identity is enforced on every
+	// dial); see internal/controller/huskconnpool.go and docs/threat-model.md.
+	HuskConns *HuskConnPool
 
 	// multiVMForkGate, when non-nil, overrides MultiVMFork so a test can toggle the
 	// routing race-safely on the shared reconciler (the field itself is never
@@ -826,6 +847,9 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 	activate := r.Activate
 	if activate == nil {
 		activate = ActivateHuskPod
+		if r.HuskConns != nil {
+			activate = r.HuskConns.ActivateHuskPod
+		}
 	}
 
 	// Claim the dormant pod BEFORE activating it: stamp the mitos.run/claim
