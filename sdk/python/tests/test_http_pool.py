@@ -118,3 +118,53 @@ def test_pool_bounds_its_connections():
     pool = _pool_of(client)
     assert pool._max_keepalive_connections is not None
     assert pool._max_connections is not None
+
+
+def test_clients_with_different_timeouts_share_one_connection():
+    """The create path uses a 60 s client and the first exec a 30 s client.
+
+    They must remain distinct clients (each enforces its own timeout) yet hand each
+    other warm sockets, otherwise the first exec of every sandbox re-handshakes TLS.
+    Counting TCP accepts is the only observation that proves reuse.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"  # else the server closes every connection
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *a):
+            pass
+
+    class _S(ThreadingHTTPServer):
+        accepts = 0
+
+        def get_request(self):
+            self.accepts += 1
+            return super().get_request()
+
+    srv = _S(("127.0.0.1", 0), _H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        base = "http://127.0.0.1:%d" % srv.server_address[1]
+        server_client = direct._http_for(base, timeout=60.0)
+        sandbox_client = direct._http_for(base, timeout=30.0)
+
+        assert server_client is not sandbox_client
+        assert server_client.timeout.read == 60.0
+        assert sandbox_client.timeout.read == 30.0
+
+        server_client.get(base + "/")
+        sandbox_client.get(base + "/")
+        server_client.get(base + "/")
+
+        assert srv.accepts == 1, "the two pooled clients did not share a connection"
+    finally:
+        srv.shutdown()
+        srv.server_close()

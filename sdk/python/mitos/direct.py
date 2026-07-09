@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import uuid
@@ -261,38 +262,58 @@ def _json(resp: httpx.Response, api_key: Optional[str] = None) -> Any:
 # httpx.Client is thread-safe, so one pooled client is safe to share across threads.
 _HTTP_POOLS: dict[tuple[str, float], httpx.Client] = {}
 _HTTP_POOL_LOCK = threading.Lock()
+_HTTP_TRANSPORT: Optional[httpx.HTTPTransport] = None
+
+# keepalive_expiry: httpx's default is 5 seconds, which silently defeats the pool for
+# any caller that goes more than 5 s between requests (an agent thinking between tool
+# calls does, constantly). Measured same-region, iterations 13 s apart re-handshook TLS
+# every time. 60 s covers a thinking pause; the server side keeps them longer.
+_HTTP_LIMITS = httpx.Limits(
+    max_keepalive_connections=20,
+    max_connections=100,
+    keepalive_expiry=60.0,
+)
+
+
+def _transport() -> httpx.HTTPTransport:
+    """The single connection pool this process uses. Caller must hold the pool lock.
+
+    In httpx the connections live in the TRANSPORT, not in the Client. Sharing one
+    transport is what lets clients with different timeouts hand each other warm
+    sockets, while each client still enforces its own timeout (httpx passes the
+    per-request timeout down to the transport).
+    """
+    global _HTTP_TRANSPORT
+    if _HTTP_TRANSPORT is None:
+        _HTTP_TRANSPORT = httpx.HTTPTransport(limits=_HTTP_LIMITS)
+    return _HTTP_TRANSPORT
 
 
 def _http_for(base_url: str, timeout: float = 60.0) -> httpx.Client:
-    """Return the pooled client for base_url, creating it on first use.
+    """Return the pooled client for (base_url, timeout), creating it on first use.
 
-    Keyed by timeout as well as URL: the sandbox path uses 30 s and the server path
-    60 s, and collapsing them onto one client would silently change one of them.
+    Clients stay keyed by timeout because the sandbox path uses 30 s and the server
+    path 60 s, and collapsing them onto one client would silently change one of them.
+    They all share ONE transport, so the create call (60 s client) and the first exec
+    (30 s client) reuse the same TCP and TLS session instead of handshaking twice.
+    Measured against the hosted API, that second handshake cost about 70 ms on the
+    first exec of every sandbox, the call that defines time-to-interactive.
     """
     key = (base_url.rstrip("/"), float(timeout))
     with _HTTP_POOL_LOCK:
         client = _HTTP_POOLS.get(key)
         if client is None or client.is_closed:
-            client = httpx.Client(
-                timeout=timeout,
-                # keepalive_expiry: httpx's default is 5 seconds, which silently
-                # defeats the pool for any caller that goes more than 5 s between
-                # requests (an agent thinking between tool calls does, constantly).
-                # Measured same-region: iterations 13 s apart re-handshook TLS every
-                # time and TTI regressed from 374 ms back to 495 ms P50. 60 s covers
-                # a thinking pause; the server side keeps connections longer.
-                limits=httpx.Limits(
-                    max_keepalive_connections=20,
-                    max_connections=100,
-                    keepalive_expiry=60.0,
-                ),
-            )
+            client = httpx.Client(timeout=timeout, transport=_transport())
             _HTTP_POOLS[key] = client
         return client
 
 
 def close_http_pools() -> None:
-    """Close every pooled client. For process shutdown and tests; not needed per sandbox."""
+    """Drop this process's cached connections and template lookups.
+
+    For process shutdown and tests; never needed per sandbox.
+    """
+    global _HTTP_TRANSPORT
     with _HTTP_POOL_LOCK:
         for client in _HTTP_POOLS.values():
             try:
@@ -300,6 +321,29 @@ def close_http_pools() -> None:
             except Exception:
                 pass
         _HTTP_POOLS.clear()
+        # Closing a client closes the transport it was handed, so the shared transport
+        # is already dead here. Drop it so the next _http_for builds a live one.
+        _HTTP_TRANSPORT = None
+    with _TEMPLATE_LOCK:
+        _TEMPLATES_ENSURED.clear()
+
+
+# --- per-process template cache ---------------------------------------------------
+#
+# create() calls ensure_template (a get-or-create) before every fork, which resolved
+# the identical template on every call: ~50 ms of a ~300 ms create, measured on a warm
+# connection against the hosted API. Remember that we already ensured it.
+#
+# Keyed by API KEY as well as URL and image: two orgs share a base URL, and one org's
+# create must never skip its ensure because another org warmed the cache. The key is
+# hashed so the secret VALUE is not held in a container that a traceback could print.
+_TEMPLATES_ENSURED: set[tuple[str, str, str]] = set()
+_TEMPLATE_LOCK = threading.Lock()
+
+
+def _template_key(base_url: str, image: str, api_key: Optional[str]) -> tuple[str, str, str]:
+    digest = hashlib.sha256((api_key or "").encode()).hexdigest()[:16]
+    return (base_url.rstrip("/"), image, digest)
 
 
 class DirectSandboxFiles:
@@ -434,8 +478,37 @@ class DirectSandbox:
         region, so region is never a parameter on the fork path.
         """
         server = SandboxServer.from_auth(api_key=api_key, base_url=base_url)
-        server.ensure_template(image, network=network, workload=workload, resources=resources)
-        return server.fork(image, id=id, idempotency_key=idempotency_key, region=region)
+
+        # network / workload / resources change WHAT gets created, so a template
+        # shaped by them is never served from the cache.
+        shaped = network is not None or workload is not None or resources is not None
+        cache_key = None if shaped else _template_key(server.url, image, server._api_key)
+
+        def _ensure() -> None:
+            server.ensure_template(
+                image, network=network, workload=workload, resources=resources
+            )
+
+        if cache_key is None or cache_key not in _TEMPLATES_ENSURED:
+            _ensure()
+            if cache_key is not None:
+                with _TEMPLATE_LOCK:
+                    _TEMPLATES_ENSURED.add(cache_key)
+
+        try:
+            return server.fork(image, id=id, idempotency_key=idempotency_key, region=region)
+        except AgentRunError as exc:
+            # The cache is a bet that the template still exists. A 404 says it does
+            # not (it was deleted, or the org was moved), so drop the entry, create
+            # it again, and retry the fork once. Any other failure is the caller's.
+            if cache_key is None or exc.status != 404:
+                raise
+            with _TEMPLATE_LOCK:
+                _TEMPLATES_ENSURED.discard(cache_key)
+            _ensure()
+            with _TEMPLATE_LOCK:
+                _TEMPLATES_ENSURED.add(cache_key)
+            return server.fork(image, id=id, idempotency_key=idempotency_key, region=region)
 
     def _auth_headers(self) -> dict[str, str]:
         """Bearer auth for the sandbox API; empty when no key is configured.
