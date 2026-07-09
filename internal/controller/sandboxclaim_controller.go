@@ -758,7 +758,7 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 // pod-claim label patch, the token Secret, the Ready status write) were invisible.
 // Measured end to end they cost about as much as the microVM restore itself.
 func logClaimStage(logger logr.Logger, claim string, stage string, d time.Duration) {
-	observeForkStage("claim_"+stage, d.Seconds())
+	observeClaimStage(stage, d.Seconds())
 	logger.Info("claim stage timing",
 		"claim", claim,
 		"stage", stage,
@@ -955,10 +955,17 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 	// that then fails leaves a Secret for a not-Ready claim; that is harmless (it is
 	// owner-ref'd to the claim, so it is garbage-collected with it, and the next pass
 	// re-mints and overwrites it before the claim can ever be served).
+	//
+	// The goroutine gets its OWN copy of the claim and a precomputed Secret name. The
+	// activate-failure path below mutates claim.Status and returns WITHOUT joining, so
+	// handing the live object to a still-running writer would share mutable state
+	// across goroutines with no synchronization.
 	tokenErrCh := make(chan error, 1)
 	tokenStart := time.Now()
+	tokenOwner := claim.DeepCopy()
+	tokenSecretName := claim.Name + tokenSecretSuffix
 	go func() {
-		tokenErrCh <- ensureSandboxTokenSecret(ctx, r.Client, claim, claim.Name+tokenSecretSuffix, apiToken, endpoint)
+		tokenErrCh <- ensureSandboxTokenSecret(ctx, r.Client, tokenOwner, tokenSecretName, apiToken, endpoint)
 	}()
 
 	mark = time.Now()
