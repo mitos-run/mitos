@@ -803,6 +803,12 @@ spec:
                   behavior. NEW field.
                 format: date-time
                 type: string
+              lastRestartTime:
+                description: |-
+                  LastRestartTime is when the backing VM was most recently destroyed and replaced.
+                  Nil while Restarts is zero.
+                format: date-time
+                type: string
               node:
                 description: |-
                   Node is the node the sandbox VM runs on. Unchanged from v1alpha1. It is the
@@ -833,6 +839,23 @@ spec:
                 description: |-
                   ReadyReplicas is the ready child count for a replicas > 1 Sandbox. Maps
                   from SandboxForkStatus.readyForks.
+                format: int32
+                type: integer
+              restarts:
+                description: |-
+                  Restarts counts how many times this sandbox's backing VM was destroyed and
+                  replaced by a fresh one (a husk pod loss re-pended under DrainPolicy Kill).
+
+                  It is the DURABLE signal that the sandbox a caller is holding is no longer the
+                  sandbox it created: the replacement re-activates from the POOL TEMPLATE, so every
+                  process, every write to the guest filesystem, and the whole guest memory of the
+                  previous instance are gone. The Ready condition also flips, but only transiently
+                  (the next reconcile re-activates and sets Ready=True again), so a caller polling
+                  the API would otherwise see an unbroken healthy sandbox and keep issuing calls
+                  against state that no longer exists (mitos-run/mitos#870).
+
+                  Monotonic for the lifetime of the sandbox. Zero means the caller still holds the
+                  original VM.
                 format: int32
                 type: integer
               revision:

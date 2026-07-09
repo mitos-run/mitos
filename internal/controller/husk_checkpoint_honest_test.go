@@ -161,3 +161,70 @@ func TestKillDrainUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// TestKillDrainRecordsADurableRestartSignal is the fix for the silent state loss
+// (mitos-run/mitos#870).
+//
+// A Kill pool re-pends a Ready sandbox onto a replacement dormant slot and
+// re-activates it FROM THE POOL TEMPLATE. That is the documented behavior, but the
+// tenant's VM is destroyed and replaced: every process, every /tmp write, and the
+// whole guest memory is gone. Before this, the only trace was a Ready=False condition
+// that the very next reconcile overwrote with Ready=True, so a caller polling the API
+// saw an unbroken healthy sandbox and its next run_code silently executed on a fresh
+// guest (observed: `x = 12345` then `NameError: name 'x' is not defined`, with no
+// exception raised).
+//
+// The condition is transient by design, so the durable signal has to live in status:
+// a Restarts counter plus LastRestartTime, and a Warning event, exactly the way the
+// Checkpoint degrade already surfaces itself.
+func TestKillDrainRecordsADurableRestartSignal(t *testing.T) {
+	r, rec, claim, pool, pod := activeRependFixture(t, v1.DrainKill)
+	ctx := context.Background()
+
+	if claim.Status.Restarts != 0 {
+		t.Fatalf("fixture starts with Restarts = %d, want 0", claim.Status.Restarts)
+	}
+
+	if _, err := r.rependOnHuskPodLost(ctx, claim, pool, pod); err != nil {
+		t.Fatalf("rependOnHuskPodLost: %v", err)
+	}
+
+	// DURABLE: survives the Ready=True the re-activation writes right after.
+	if claim.Status.Restarts != 1 {
+		t.Errorf("Restarts = %d after one pod loss, want 1: a caller must be able to detect that its guest was replaced", claim.Status.Restarts)
+	}
+	if claim.Status.LastRestartTime == nil {
+		t.Error("LastRestartTime must be stamped so a caller can tell WHEN its guest was replaced")
+	}
+
+	// The message must say the state is GONE, not merely that we are re-pending.
+	cond := readyCondition(claim)
+	if cond == nil {
+		t.Fatal("no Ready condition set on re-pend")
+	}
+	if cond.Reason != "HuskPodLost" {
+		t.Errorf("Ready reason = %q, want HuskPodLost", cond.Reason)
+	}
+	if !strings.Contains(cond.Message, "in-guest state") {
+		t.Errorf("Kill re-pend message must state that in-guest state was lost; got %q", cond.Message)
+	}
+
+	// LOUD: a Warning event, the durable operator-visible signal.
+	var found bool
+	for _, e := range drainEvents(rec) {
+		if strings.Contains(e, "Warning") && strings.Contains(e, "SandboxRestarted") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no Warning SandboxRestarted event recorded; got %v", drainEvents(rec))
+	}
+
+	// A second loss increments again: the counter is monotonic, not a boolean.
+	if _, err := r.rependOnHuskPodLost(ctx, claim, pool, pod); err != nil {
+		t.Fatalf("second rependOnHuskPodLost: %v", err)
+	}
+	if claim.Status.Restarts != 2 {
+		t.Errorf("Restarts = %d after two pod losses, want 2", claim.Status.Restarts)
+	}
+}
