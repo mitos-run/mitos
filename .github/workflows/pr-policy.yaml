@@ -35,6 +35,7 @@ jobs:
           # Exclude vendored and binary-ish paths the punctuation rule does not govern.
           added=$(git diff --unified=0 "${BASE_SHA}...${HEAD_SHA}" -- \
             ':(exclude)vendor/**' \
+            ':(exclude)internal/atr/data/**' \
             ':(exclude)**/*.svg' \
             ':(exclude)**/*.png' \
             ':(exclude)**/*.jpg' \
