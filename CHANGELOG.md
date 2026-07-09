@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.38.1](https://github.com/mitos-run/mitos/compare/v1.38.0...v1.38.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* **controller:** surface a durable restart signal when a sandbox's VM is destroyed and replaced ([#875](https://github.com/mitos-run/mitos/issues/875)) ([5a3c054](https://github.com/mitos-run/mitos/commit/5a3c0542cda08b16151d64fe8185b9d6515db78e)), closes [#870](https://github.com/mitos-run/mitos/issues/870)
+* **controller:** write the fork mem file when a child will spill, so fork(n) stops hanging ([#874](https://github.com/mitos-run/mitos/issues/874)) ([dcd4187](https://github.com/mitos-run/mitos/commit/dcd41875dc530ec1cd49d1785c12ce650f744fca))
+* **husk:** stop copying 512 MiB into the live-cow guest memfd on every warm-claim activate ([#869](https://github.com/mitos-run/mitos/issues/869)) ([8fef611](https://github.com/mitos-run/mitos/commit/8fef6118cd66d863a88404dd6c9ebf55b58f4686))
+
 ## [1.38.0](https://github.com/mitos-run/mitos/compare/v1.37.2...v1.38.0) (2026-07-08)
 
 
