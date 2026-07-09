@@ -41,6 +41,8 @@ import (
 	"mitos.run/mitos/internal/vsock"
 	sandboxv1 "mitos.run/mitos/proto/sandbox/v1"
 	"mitos.run/mitos/proto/sandbox/v1/sandboxv1connect"
+
+	"mitos.run/mitos/internal/guestgrpc"
 )
 
 // huskFakeGuest is a minimal sandbox.v1.SandboxServer that returns a fixed
@@ -391,8 +393,8 @@ func TestActivateServesTokenGatedSandboxAPI(t *testing.T) {
 		vm := &pathVMM{vsockPath: sockPath}
 		stub := New(firecracker.VMConfig{ID: sandboxID}, Options{
 			Start:       func(firecracker.VMConfig) (vmm, error) { return vm, nil },
-			Ready:       func(context.Context, string, time.Duration) error { return nil },
-			Notify:      func(string, uint64, []byte, ActivateRequest) error { return nil },
+			Ready:       func(context.Context, string, time.Duration) (*guestgrpc.Client, error) { return nil, nil },
+			Notify:      func(*guestgrpc.Client, string, uint64, []byte, ActivateRequest) error { return nil },
 			Verify:      verifyOK,
 			OnActivated: onActivated,
 		})
@@ -478,8 +480,8 @@ func TestActivateSingleSandboxAcceptsSDKPodID(t *testing.T) {
 		vm := &pathVMM{vsockPath: sockPath}
 		stub := New(firecracker.VMConfig{ID: localID}, Options{
 			Start:       func(firecracker.VMConfig) (vmm, error) { return vm, nil },
-			Ready:       func(context.Context, string, time.Duration) error { return nil },
-			Notify:      func(string, uint64, []byte, ActivateRequest) error { return nil },
+			Ready:       func(context.Context, string, time.Duration) (*guestgrpc.Client, error) { return nil, nil },
+			Notify:      func(*guestgrpc.Client, string, uint64, []byte, ActivateRequest) error { return nil },
 			Verify:      verifyOK,
 			OnActivated: onActivated,
 		})

@@ -575,9 +575,15 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	mark = time.Now()
 
 	vsockPath := inst.vm.VsockHostPath(firecracker.VsockRelPath)
-	if err := s.ready(ctx, vsockPath, s.readyTimeout); err != nil {
+	guestConn, err := s.ready(ctx, vsockPath, s.readyTimeout)
+	if err != nil {
 		werr := fmt.Errorf("husk: guest not ready after activate for vm %q: %w", id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
+	// Reuse the connection the readiness probe proved healthy for the handshake below,
+	// instead of dialing the guest over vsock a second time. We own the Close.
+	if guestConn != nil {
+		defer guestConn.Close() //nolint:errcheck // best-effort on close
 	}
 	recordStage(stages, "guest_ready", mark)
 	mark = time.Now()
@@ -596,7 +602,7 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	// keeping the guest address and the tap/masquerade in agreement per instance.
 	notifyReq := req
 	notifyReq.Network = perNet
-	if err := s.notify(vsockPath, inst.generation, entropy, notifyReq); err != nil {
+	if err := s.notify(guestConn, vsockPath, inst.generation, entropy, notifyReq); err != nil {
 		werr := fmt.Errorf("husk: fork-correctness handshake failed for vm %q: %w", id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
