@@ -1230,7 +1230,12 @@ func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapsh
 	// `mem`) unless child import is enabled; the freeze is only worthwhile when the
 	// child actually consumes the frozen memfd. This keeps a re-enabled live-cow
 	// source's forks fast and RESTORABLE (the proven disk path) instead of hung.
-	if freezer := s.liveCowSnapshotFreezer(); freezer != nil && s.liveCowChildImport {
+	// SPILL GATE (see ForkSnapshotRequest.RequireMemFile): child import only makes the
+	// mem-skip safe for a child CO-LOCATED in this pod, which is the only child that
+	// can reach this source's shared memfd. When the controller tells us a child will
+	// land in its OWN pod, that child can restore only from disk, so the Full path must
+	// write the mem file or the fork hangs with the spilled children stuck Restoring.
+	if freezer := s.liveCowSnapshotFreezer(); freezer != nil && s.liveCowChildImport && !req.RequireMemFile {
 		if _, err := freezer.Freeze(); err != nil {
 			_ = s.resumeInstanceAfterFork(id, inst)
 			werr := fmt.Errorf("husk: freeze source guest for live-cow fork snapshot vm %q: %w", id, err)
