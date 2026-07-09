@@ -116,6 +116,29 @@ below (a fork of a running source is still `ForkRunning`), and it still pairs wi
 the frozen source rootfs so the disk-half invariant of "Husk fork children" above
 holds unchanged. Live-cow is a memory-SOURCE optimization, not a new fork policy.
 
+**Spill gate: a vmstate-only fork snapshot is only restorable by a CO-LOCATED child.**
+When an armed live-cow source with child import on takes its one-time fork snapshot it
+writes no `mem` file, on the promise that each child boots its guest RAM from the source
+pod's shared memfd. Only a child co-located INSIDE that pod can keep that promise. A fork
+whose replica count exceeds the pod's co-location budget spills the remaining children
+into their own husk pods, and such a child has no path to the source's memfd: it can
+restore only from disk. With no `mem` file it has nothing to restore, never activates,
+and the fork wedges at "<budget>/<replicas> husk forks ready" with no error. The
+controller therefore decides `ForkSnapshotRequest.RequireMemFile` from the SAME
+co-location budget the fan-out uses, BEFORE the snapshot is taken, and the source falls
+back to the Full `CreateSnapshot(mem, vmstate)` whenever any child will spill. A fully
+co-located fork keeps the fast vmstate-only path.
+
+Since m7 the restored source's memfd is populated LAZILY: it is created empty and the
+write-protect handler serves userfaultfd MISSING faults out of the snapshot mem file.
+This does not touch any re-seed either, but it adds one obligation to the fork point.
+A co-located child maps the parent memfd `MAP_PRIVATE`, so a page the parent never
+faulted in is a HOLE the child would read as zeros instead of the snapshot's bytes.
+`Freeze` therefore fills every unpopulated chunk from the mem file BEFORE it
+write-protects the region (populate-on-freeze), which keeps warm-claim activate O(1)
+and charges the fill only to the forks that need it. Pages installed after the freeze
+land write-protected, so copy-before-unprotect still sees every parent write.
+
 The hazard this path introduces, and closes, is the RESUMED-PARENT LEAK. Sharing
 the parent's memfd with `MAP_PRIVATE` alone is NOT sufficient: if the parent
 RESUMES and writes a page a child has not yet copied, that post-fork write would

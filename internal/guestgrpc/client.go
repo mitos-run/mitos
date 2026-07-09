@@ -105,9 +105,11 @@ func DialUnix(sockPath string) (*Client, error) {
 	return buildClient(cc), nil
 }
 
-// retryInterval is the fixed sleep between connection attempts. Mirrors the
-// 20 ms interval used by cmd/bench connectGRPCWithRetry and
-// internal/husk productionGuestReady.
+// retryInterval is the fixed sleep between connection attempts. Mirrors the 20 ms
+// interval used by cmd/bench connectGRPCWithRetry. NOT the husk activate path:
+// internal/husk guestReadyGRPC backs off geometrically (500 us to a 5 ms cap)
+// because its first dial after Resume nearly always fails and a fixed 20 ms landed
+// straight in the warm-claim activate latency.
 const retryInterval = 20 * time.Millisecond
 
 // WaitReady dials the guest agent gRPC service over vsock at vsockPath,

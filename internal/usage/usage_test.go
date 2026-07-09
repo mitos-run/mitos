@@ -535,6 +535,143 @@ func TestCounterResetNoNegativeBill(t *testing.T) {
 	}
 }
 
+// TestCounterDeltaAcrossWindowBoundary proves a cumulative counter step that
+// spans a window boundary is billed, not dropped. Before the fix the integrator
+// summed counter steps only between consecutive samples WITHIN a window, so the
+// step from the last sample of one window to the first sample of the next was
+// silently lost: a customer-favorable undercount (issue #755).
+func TestCounterDeltaAcrossWindowBoundary(t *testing.T) {
+	// Two scrapes, one per 60s window, the cumulative counters climbing across
+	// the boundary. No two samples share a window, so the old intra-window-only
+	// sum billed nothing at all for the whole 400-byte / 15-second step.
+	samples := []Sample{
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 30), EgressBytes: 100, GPUSeconds: 5},
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 90), EgressBytes: 500, GPUSeconds: 20},
+	}
+	recs := Integrate(samples, DefaultConfig())
+	var egress, gpu int64
+	for _, r := range recs {
+		egress += r.EgressBytes
+		gpu += r.GPUSeconds
+	}
+	if egress != 400 {
+		t.Errorf("total EgressBytes across windows = %d, want 400 (100 -> 500 across the boundary, not dropped)", egress)
+	}
+	if gpu != 15 {
+		t.Errorf("total GPUSeconds across windows = %d, want 15 (5 -> 20 across the boundary, not dropped)", gpu)
+	}
+}
+
+// TestCounterTelescopesAcrossWindows proves a monotonic counter sampled across
+// many windows bills exactly last-minus-first in aggregate (every consecutive
+// step, including the boundary-crossing ones, counted once and only once), and
+// that a reset across a boundary stays reset-aware (never a negative bill).
+func TestCounterTelescopesAcrossWindows(t *testing.T) {
+	// Monotonic egress sampled every 40s across three 60s windows: boundaries at
+	// 60 and 120 are both straddled by a sample step.
+	monotonic := []Sample{
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 0), EgressBytes: 0},
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 40), EgressBytes: 400},
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 80), EgressBytes: 800},
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 120), EgressBytes: 1200},
+		{OrgID: "orgA", SandboxID: "sbx1", Timestamp: at(baseTime, 160), EgressBytes: 1600},
+	}
+	recs := Integrate(monotonic, DefaultConfig())
+	var total int64
+	for _, r := range recs {
+		total += r.EgressBytes
+	}
+	if total != 1600 {
+		t.Errorf("monotonic counter total = %d, want 1600 (last minus first, billed once)", total)
+	}
+
+	// A reset that straddles the boundary. Window one has two samples climbing
+	// 100 -> 300 (200 of observed in-window progress; the first 100 is the
+	// unbillable baseline, as for any first sample). The counter then resets and
+	// reads 50 in window two, so the boundary step counterStep(300, 50) bills a
+	// fresh 50, never a negative. Total observed progress = 200 + 50 = 250.
+	reset := []Sample{
+		{OrgID: "orgA", SandboxID: "sbx2", Timestamp: at(baseTime, 10), EgressBytes: 100},
+		{OrgID: "orgA", SandboxID: "sbx2", Timestamp: at(baseTime, 30), EgressBytes: 300},
+		{OrgID: "orgA", SandboxID: "sbx2", Timestamp: at(baseTime, 90), EgressBytes: 50},
+	}
+	recs = Integrate(reset, DefaultConfig())
+	var resetTotal int64
+	for _, r := range recs {
+		resetTotal += r.EgressBytes
+		if r.EgressBytes < 0 {
+			t.Errorf("reset across a boundary billed negative: %d", r.EgressBytes)
+		}
+	}
+	if resetTotal != 250 {
+		t.Errorf("reset-across-boundary total = %d, want 250 (200 in-window then a fresh 50 across the boundary)", resetTotal)
+	}
+}
+
+// scriptedSource returns one scripted scrape per Collect call, in order, then
+// repeats the last scrape. It models the live collector feeding one instant's
+// samples per cycle into the rolling buffer.
+type scriptedSource struct {
+	batches [][]Sample
+	call    int
+}
+
+func (s *scriptedSource) Collect(_ context.Context) ([]Sample, error) {
+	i := s.call
+	if i >= len(s.batches) {
+		i = len(s.batches) - 1
+	}
+	s.call++
+	return s.batches[i], nil
+}
+
+// TestBoundaryDeltaSurvivesBufferPruning is the load-bearing stability property
+// for the #755 fix: when the collector integrates a ROLLING, PRUNED buffer one
+// scrape per cycle, the counter step that straddles a window boundary must stay
+// billed even after the earlier window's sample is pruned out of the buffer.
+// Attributing the boundary step to the EARLIER sample's window is what makes this
+// hold: the later sample is newer, so it is always still buffered when the
+// earlier one is, and once the earlier sample is pruned its window is long
+// settled and never re-walked to a lower value. The cumulative egress the bill
+// rolls up must therefore equal the full observed counter progress, last minus
+// first, with no boundary delta lost across the many pruning cycles.
+func TestBoundaryDeltaSurvivesBufferPruning(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemUsageStore()
+	cfg := DefaultConfig() // 60s window, 120s MaxHold => 180s buffer retention.
+
+	// One scrape per 60s window, so every window holds exactly one sample and
+	// every counter step straddles a boundary. vCPUs are set so each window also
+	// materializes a rate record: this is the case where a naive fix that bills
+	// the boundary step to the NEWER window silently drops it once the earlier
+	// sample is pruned, because the newer window keeps being re-integrated (now
+	// without its predecessor) and re-upserted to a lower value.
+	var batches [][]Sample
+	for i := 0; i <= 5; i++ { // egress 0, 1000, 2000, ... 5000
+		batches = append(batches, []Sample{{
+			OrgID:       "orgA",
+			SandboxID:   "sbx1",
+			Timestamp:   at(baseTime, 60*i),
+			VCPUs:       1,
+			EgressBytes: int64(1000 * i),
+		}})
+	}
+	c := NewCollector(&scriptedSource{batches: batches}, store, cfg)
+
+	for range batches {
+		if _, err := c.CollectOnce(ctx); err != nil {
+			t.Fatalf("CollectOnce: %v", err)
+		}
+	}
+
+	// The cumulative egress must be the full observed progress 5000 - 0 = 5000.
+	// The old drop-the-boundary-delta behavior bills 0 (every step straddles a
+	// boundary); a newer-window fix bills less than 5000 once pruning kicks in.
+	if got := store.TotalsByOrg()["orgA"].EgressBytes; got != 5000 {
+		t.Errorf("cumulative EgressBytes = %d, want 5000 (every boundary step billed once, and surviving buffer pruning)", got)
+	}
+}
+
 // TestOutOfOrderSamplesFold proves late/out-of-order samples integrate to the
 // same result as in-order delivery (the integrator sorts by timestamp), so a
 // delayed scrape is not lost or mis-bucketed.

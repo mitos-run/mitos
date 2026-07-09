@@ -1695,6 +1695,31 @@ func huskPodOwnedByPool(pod *corev1.Pod, pool *v1.SandboxPool) bool {
 // huskPodReady reports whether a husk pod is a usable dormant slot: Running,
 // with a Ready condition True, and a non-empty PodIP (so the controller can
 // dial its control channel and set a reachable endpoint).
+// huskPodNotReadyReason renders, in one short phrase, why a husk pod is not usable
+// yet. The fan-out and claim paths skip such a pod and retry; without a reason a
+// permanently stuck pod is indistinguishable from one that is still coming up.
+// Returns "" for a pod that IS ready.
+func huskPodNotReadyReason(p *corev1.Pod) string {
+	if p.Status.Phase != corev1.PodRunning {
+		return fmt.Sprintf("pod phase %s", p.Status.Phase)
+	}
+	if p.Status.PodIP == "" {
+		return "pod has no IP yet"
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			if c.Status == corev1.ConditionTrue {
+				return ""
+			}
+			if c.Reason != "" {
+				return "pod not ready: " + c.Reason
+			}
+			return "pod not ready"
+		}
+	}
+	return "pod has no Ready condition"
+}
+
 func huskPodReady(p *corev1.Pod) bool {
 	if p.Status.Phase != corev1.PodRunning || p.Status.PodIP == "" {
 		return false

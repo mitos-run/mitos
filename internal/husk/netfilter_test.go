@@ -288,3 +288,56 @@ func TestApplyEgressFilterDoesNotTearDownOnSuccess(t *testing.T) {
 		t.Fatalf("want exactly 1 tap delete (the idempotent pre-create delete), got %d; calls: %+v", got, rr.calls)
 	}
 }
+
+// TestApplyEgressFilterBatchesNftIntoOneTransaction pins that the egress filter
+// installs its whole nftables ruleset in a SINGLE `nft -f -` invocation.
+//
+// Two reasons. Latency: every nft call is a fork/exec, and applyEgressFilter runs on
+// the warm-claim activate critical path (it was ~13 ms of a ~68 ms activate, most of
+// it process startup). Correctness: nft applies one -f payload as ONE transaction, so
+// batching removes the window in which a sandbox's tap exists with only part of its
+// egress policy installed.
+//
+// The rendered ruleset must still be the same rules in the same order, so the test
+// asserts the concatenated payload contains each section and that the shared tables
+// precede the per-sandbox chains that jump into them.
+func TestApplyEgressFilterBatchesNftIntoOneTransaction(t *testing.T) {
+	r := &recordingRunner{}
+	cfg := NetfilterConfig{
+		Tap:     "sbtest0",
+		GuestIP: net.ParseIP("10.200.0.2"),
+		HostIP:  net.ParseIP("10.200.0.1"),
+		Egress:  v1.EgressDeny,
+	}
+	if err := applyEgressFilter(context.Background(), r.run, nil, cfg); err != nil {
+		t.Fatalf("applyEgressFilter: %v", err)
+	}
+
+	var nftCalls []recordedCall
+	for _, c := range r.calls {
+		if len(c.argv) > 0 && c.argv[0] == "nft" {
+			nftCalls = append(nftCalls, c)
+		}
+	}
+	if len(nftCalls) != 1 {
+		var argvs []string
+		for _, c := range nftCalls {
+			argvs = append(argvs, strings.Join(c.argv, " ")+" <<"+c.stdin[:min(24, len(c.stdin))])
+		}
+		t.Fatalf("want exactly 1 nft invocation, got %d:\n  %s", len(nftCalls), strings.Join(argvs, "\n  "))
+	}
+
+	payload := nftCalls[0].stdin
+	for _, want := range []string{"table", cfg.Tap} {
+		if !strings.Contains(payload, want) {
+			t.Errorf("batched nft payload missing %q:\n%s", want, payload)
+		}
+	}
+	// The per-sandbox chain jumps into the shared table, so the shared table must be
+	// declared before it within the single transaction.
+	sharedIdx := strings.Index(payload, netconf.RenderSharedTable()[:20])
+	chainIdx := strings.Index(payload, cfg.Tap)
+	if sharedIdx < 0 || chainIdx < 0 || sharedIdx > chainIdx {
+		t.Errorf("shared table must precede the per-sandbox chain in the batched payload (shared=%d chain=%d)", sharedIdx, chainIdx)
+	}
+}

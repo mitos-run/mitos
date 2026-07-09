@@ -589,6 +589,34 @@ Firecracker binary is behavior-identical to stock UNLESS the `FIRECRACKER_MITOS_
 env is set, and only the live-cow path sets it, so a pod with the flag off runs the
 stock VMM.
 
+**m7 lazy restore (guest memory is populated on demand).** A restored source used to
+get its guest RAM by COPYING the whole snapshot mem file into the shared memfd inside
+`PUT /snapshot/load`. The memfd is now created EMPTY and the same WP handler serves
+userfaultfd MISSING faults out of the mem file, so only the pages a guest touches are
+ever materialized. Three properties keep this from widening the surface:
+
+- The mem file the handler reads is the SAME snapshot the verify-on-activate gate
+  already checked (digest + snapcompat) before the load, so a MISSING fault can only
+  ever install bytes from an already-trusted image. The handler opens it read-only.
+- A page installed AFTER the freeze lands write-protected (`UFFDIO_COPY_MODE_WP`), so
+  the copy-before-unprotect invariant holds for pages that arrive late. The residual
+  chunks a parent never faulted in are filled AT the fork point (populate-on-freeze),
+  before the region is write-protected, so a co-located child never reads a hole (which
+  would be zeros, not the snapshot's bytes) through its `MAP_PRIVATE` view of the memfd.
+- FAIL CLOSED both ways: the patched VMM takes the lazy path only when the husk sets
+  BOTH `FIRECRACKER_MITOS_LAZY_RESTORE` and `FIRECRACKER_MITOS_WP_UDS`, and it ABORTS
+  the restore (`MitosLazyArmFailed`) rather than resuming vCPUs on all-zero guest RAM
+  if the handler does not arm. The stub likewise fails the activate if it cannot open
+  the mem source before the load. An older husk paired with the patched binary keeps
+  the eager copy.
+
+The kernel permits ONE userfaultfd per VMA, so MISSING and WRITE_PROTECT are registered
+on the SAME uffd (negotiating `UFFD_FEATURE_MISSING_SHMEM`, without which the kernel
+silently never delivers a MISSING fault on a shmem mapping and the guest would read the
+zero page). No new capability, socket, or file is introduced: it reuses the existing
+per-VM `FIRECRACKER_MITOS_WP_UDS` handshake and the `/dev/userfaultfd` device the kvm
+device plugin already injects on a live-cow pool.
+
 The new component is the parent-side write-protect fork handler on the forkd/husk
 side (`internal/fork/wpfork*.go`, a Go port of the m2 reference C handler). At a
 fork point the patched parent Firecracker creates a userfaultfd over ITS OWN live
@@ -1698,6 +1726,42 @@ defense-in-depth gap, not a live vulnerability.
 - No external security review has been performed. The README must continue to
   say so until one has.
 - Side-channel resistance between forks of the same snapshot is not claimed.
+
+## 9. Agent-application threat detection (ATR, issue #474)
+
+Everything above this section is the ISOLATION surface: the microVM boundary and
+the defense-in-depth around it. Agent Threat Rules (ATR) is a DIFFERENT layer.
+It is agent-application-threat detection: content heuristics over the tool calls
+and outputs that flow through an agent, mapped to OWASP Agentic, SAFE-MCP, MITRE
+ATLAS, and NIST AI RMF. The two are complementary and are not substitutes.
+
+**Honest layering.** Mitos isolates; ATR detects. ATR is observability and
+defense-in-depth ON TOP of the isolation boundary, never a replacement for it.
+Mitos does not see the LLM prompts (those live in the agent harness, outside the
+sandbox), so Mitos is not a general ATR host. It owns one clean agent-event
+chokepoint: the mitos-mcp `tools/call` dispatch, where every `sandbox_exec`
+command and `sandbox_write_file` content passes through.
+
+**What ships in this slice (report mode only).** A native Go evaluator for the
+regex-condition subset of ATR-SPEC-v1 (`internal/atr`), with the MIT-licensed
+ruleset vendored as a committed, compiled artifact under `internal/atr/data`,
+pinned to an exact upstream SHA recorded in `internal/atr/data/manifest.json`.
+Behind the `--enable-atr` flag (default off), mitos-mcp screens the two
+tool-call chokepoints above and LOGS any rule match to stderr. It does not deny,
+does not alter the tool result, and does not touch the isolation path. Deny mode,
+the server-side exec/audit detection feed, and a detection CloudEvent type are
+deliberate follow-ups, not this change.
+
+| Property | Status | Detail |
+|---|---|---|
+| Detection vs isolation | by design | ATR flags patterns in the traffic mitos routes. It is NOT a control that blocks prompt injection, and the copy must never imply so. The microVM boundary remains the only isolation guarantee. |
+| Enforcement | report only | `--enable-atr` logs detections; there is no deny path in this slice. Default off, so the shipped default surface is unchanged. |
+| Rule engine | Go RE2 | Go's `regexp` (RE2, linear time, no lookahead/lookbehind/backreference). Patterns needing PCRE-only features are dropped at vendor time and listed in `internal/atr/data/skipped.json`; they never reach runtime. The exact drop count is recorded in `manifest.json` rather than prose, so it cannot drift. |
+| Scan-path scoping | scan_target filter | Only the MCP scan path (scan_target `mcp`, `tool_args`, `tool_response`, `both`, and absent) is loaded and run at dispatch, per ATR-SPEC-v1 section 3.3.2, so a skill-only or user-input rule cannot fire on tool-call traffic. |
+| Coverage loss | documented | The RE2 subset and the MCP-path scoping both narrow coverage vs the full corpus. The vendored/skipped/corpus counts and the true-positive and true-negative fixture tallies are all in `manifest.json`, reproducible by regenerating from the pinned SHA. Regex heuristics also carry false positives, which is why enforcement is opt-in and report-first. |
+| Sampling limit | documented | `--atr-scan-max-bytes` (default 256 KiB) scans only the head of a payload; a capped scan is logged as `truncated=true`. A pattern that appears only past the cap is not seen. This is acceptable while report-only and off the enforcement path. |
+| Secret hygiene | mitigated | A detection log line names the rule id, severity, category, and which event fields fired; it NEVER logs the screened command or file content. |
+| Provenance | pinned | The ruleset is vendored from a single pinned upstream SHA recorded in `manifest.json`; bump it deliberately, like the Firecracker version pin, and regenerate with `go run ./internal/atr/gen -src <checkout>`. |
 
 ## Supply chain and artifact provenance (issue #35)
 
