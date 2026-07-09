@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -467,6 +468,28 @@ func main() {
 			return controller.HuskDialTLSConfig(dialCtx, mgr.GetClient(), discoveryNamespace, poolNamespace)
 		}
 		sandboxReconciler.HuskTLSFor = huskDial
+
+		// Pre-warm the mTLS dial config once the manager cache is up, so the FIRST
+		// warm claim after a controller start or a leader handover does not pay the
+		// cold path. Measured on prod: the first claim's dial_tls stage was 301 ms
+		// (the lazy Secret informer cache fill for the controller namespace) against
+		// ~1 ms for every claim after it. That 300 ms landed squarely on one user's
+		// create, every rollout.
+		//
+		// Best effort by construction: a failure here is not fatal (the reconciler
+		// resolves the config itself on demand exactly as before), so a controller
+		// whose PKI is not ready yet still starts and converges.
+		if err := mgr.Add(manager.RunnableFunc(func(runCtx context.Context) error {
+			if _, werr := huskDial(runCtx, discoveryNamespace); werr != nil {
+				logger.Info("husk mTLS pre-warm skipped; the first claim will resolve it on demand", "detail", werr.Error())
+				return nil
+			}
+			logger.Info("husk mTLS dial config pre-warmed", "namespace", discoveryNamespace)
+			return nil
+		})); err != nil {
+			logger.Error(err, "unable to add husk mTLS pre-warm")
+			os.Exit(1)
+		}
 		logger.Info("PKI bootstrap complete; dialing forkd with mTLS and husk pods with per-namespace identity", "namespace", discoveryNamespace)
 	}
 
