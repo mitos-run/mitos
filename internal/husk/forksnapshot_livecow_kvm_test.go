@@ -191,14 +191,33 @@ func TestForkSnapshotLiveCowSourceArmedVmstateOnlyKVM(t *testing.T) {
 	}
 
 	// (SUB-MS CAPTURE) the paused-window freeze + create_snapshot stages are recorded,
-	// and create_snapshot is far below the ~364ms Full mem write it replaces.
+	// and create_snapshot is far below the Full mem write it replaces.
 	for _, stage := range []string{"pause", "freeze", "create_snapshot", "resume"} {
 		if _, ok := fres.Stages[stage]; !ok {
 			t.Errorf("armed live-cow fork result missing stage %q; got %v", stage, fres.Stages)
 		}
 	}
-	if capMs := fres.Stages["create_snapshot"]; capMs >= 100 {
-		t.Errorf("create_snapshot stage = %.3fms, want far below the ~364ms Full mem write (vmstate-only capture)", capMs)
+
+	// Boot the FULL-snapshot control now, unconditionally. It serves two purposes: it
+	// measures what writing the mem file ACTUALLY costs on this host right now, and it
+	// is the #838 isolation control consulted further down.
+	//
+	// This assertion used to be an absolute "create_snapshot < 100ms". That is a
+	// property of the machine, not of the code: shared CI runners measured 103.8ms and
+	// 177.4ms for the same capture and failed a check whose intent is only that the
+	// capture is far cheaper than writing guest RAM. The same runners took 1469ms for
+	// the Full mem write, so the ratio is ~10x and a same-host baseline expresses the
+	// invariant without pinning it to any particular disk.
+	fullSurvives, fullCaptureMs := fullPathRestoredSourceSurvivesFork(ctx, t, snapDir, templateRootfs, fcBin, memMiB)
+	capMs := fres.Stages["create_snapshot"]
+	switch {
+	case fullCaptureMs <= 0:
+		// Never silently skip: say so. The no-mem-file assertion above stays the hard gate.
+		t.Logf("no FULL-path capture baseline on this host (control did not reach its fork); skipping the capture-cost ratio check, create_snapshot = %.3fms", capMs)
+	case capMs >= fullCaptureMs/3:
+		t.Errorf("create_snapshot stage = %.3fms, want far below the %.3fms the FULL mem write costs on this same host (the vmstate-only capture must skip the %dMiB mem write)", capMs, fullCaptureMs, memMiB)
+	default:
+		t.Logf("vmstate-only capture %.3fms vs FULL mem write %.3fms on this host (%.1fx cheaper)", capMs, fullCaptureMs, fullCaptureMs/capMs)
 	}
 
 	// (SOURCE SAFE) the resumed source still execs (never left frozen) and dirties
@@ -224,7 +243,7 @@ func TestForkSnapshotLiveCowSourceArmedVmstateOnlyKVM(t *testing.T) {
 	defer execCancel()
 	if _, err := kvmExecOKCtx(execCtx, srcAgent, "printf source-alive-after-fork"); err != nil {
 		srcAlive = false
-		if fullPathRestoredSourceSurvivesFork(ctx, t, snapDir, templateRootfs, fcBin, memMiB) {
+		if fullSurvives {
 			t.Fatalf("armed live-cow source must still exec after the fork, but a FULL-snapshot restored source DOES survive its fork on this harness: the write-protect freeze is the regression: %v", err)
 		}
 		t.Logf("known issue #838 (NOT a live-cow regression): a restored source is unreachable after its own fork on BOTH the live-cow AND the FULL-snapshot path (guest-agent vsock resets at restore-resume, before any freeze); scoping the source-exec assertion, the live-cow arm + vmstate-only + child-import assertions stay hard: %v", err)
@@ -680,7 +699,11 @@ func TestForkSnapshotLiveCowChildImportColocatedBootsFromSourceMemfdKVM(t *testi
 // so the live-cow write-protect path must not be blamed for it. Any setup failure is
 // treated as "did not survive" (returns false), biasing toward attributing a shared
 // failure to the pre-existing bug rather than hard-failing the live-cow gate on a flake.
-func fullPathRestoredSourceSurvivesFork(ctx context.Context, t *testing.T, snapDir, templateRootfs, fcBin string, memMiB int) bool {
+// It returns whether the FULL-path source survives its own fork (the #838 control) and
+// the create_snapshot cost of that FULL fork, which is the real ~memMiB mem-file write
+// measured on THIS host. The caller uses the cost as the baseline the vmstate-only
+// capture must come in far below; 0 means no baseline could be captured.
+func fullPathRestoredSourceSurvivesFork(ctx context.Context, t *testing.T, snapDir, templateRootfs, fcBin string, memMiB int) (bool, float64) {
 	t.Helper()
 	base := New(firecracker.VMConfig{
 		ID:             "husk-fullpath-src",
@@ -700,25 +723,29 @@ func fullPathRestoredSourceSurvivesFork(ctx context.Context, t *testing.T, snapD
 
 	if err := base.Prepare(ctx); err != nil {
 		t.Logf("#838 control: FULL-path source Prepare failed (treating as not-survived): %v", err)
-		return false
+		return false, 0
 	}
 	bres, err := base.Activate(ctx, ActivateRequest{SnapshotDir: snapDir})
 	if err != nil || !bres.OK {
 		t.Logf("#838 control: FULL-path source Activate failed (treating as not-survived): err=%v res=%+v", err, bres)
-		return false
+		return false, 0
 	}
 	agent, err := kvmConnectAgent(bres.VsockPath)
 	if err != nil {
 		t.Logf("#838 control: FULL-path source agent connect failed (treating as not-survived): %v", err)
-		return false
+		return false, 0
 	}
 	defer agent.Close() //nolint:errcheck // best-effort teardown
 
 	forkDir := filepath.Join(t.TempDir(), "fullpath-fork")
 	fres, err := base.ForkSnapshot(ctx, ForkSnapshotRequest{ForkID: "fullpath-child", SnapshotDir: forkDir})
+	fullCaptureMs := 0.0
+	if err == nil && fres.OK {
+		fullCaptureMs = fres.Stages["create_snapshot"]
+	}
 	if err != nil || !fres.OK {
 		t.Logf("#838 control: FULL-path ForkSnapshot failed (treating as not-survived): err=%v res=%+v", err, fres)
-		return false
+		return false, 0
 	}
 	// Bound the control exec too: the Full-path source's vsock can hang exactly like
 	// the armed one, and this probe must never hang the test to its package timeout.
@@ -726,10 +753,10 @@ func fullPathRestoredSourceSurvivesFork(ctx context.Context, t *testing.T, snapD
 	defer execCancel()
 	if _, err := kvmExecOKCtx(execCtx, agent, "printf fullpath-source-alive-after-fork"); err != nil {
 		t.Logf("#838 control: FULL-path restored source ALSO cannot exec after its fork (confirms pre-existing #838): %v", err)
-		return false
+		return false, fullCaptureMs
 	}
 	t.Logf("#838 control: FULL-path restored source SURVIVES its fork and execs (so the live-cow freeze, not #838, would be the cause)")
-	return true
+	return true, fullCaptureMs
 }
 
 // TestPrewarmedLiveCowChildImportNoLeakKVM is the gate that the pre-warm does NOT
