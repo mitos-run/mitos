@@ -149,7 +149,7 @@ func TestProductionNotifierGRPC_NotifyForkedFields(t *testing.T) {
 		entropy[i] = byte(i + 1) // deterministic, non-zero
 	}
 
-	if err := notifierGRPC(sockPath, 7, entropy, req, dialUnix); err != nil {
+	if err := notifierGRPC(nil, sockPath, 7, entropy, req, dialUnix); err != nil {
 		t.Fatalf("notifierGRPC: %v", err)
 	}
 
@@ -251,7 +251,7 @@ func TestProductionNotifierGRPC_SkipsConfigureWhenEmpty(t *testing.T) {
 		// No Env or Secrets.
 	}
 
-	if err := notifierGRPC(sockPath, 1, entropy, req, dialUnix); err != nil {
+	if err := notifierGRPC(nil, sockPath, 1, entropy, req, dialUnix); err != nil {
 		t.Fatalf("notifierGRPC: %v", err)
 	}
 
@@ -274,7 +274,7 @@ func TestProductionNotifierGRPC_FailsClosedOnNotReseeded(t *testing.T) {
 	entropy := make([]byte, entropySize)
 	req := ActivateRequest{}
 
-	if err := notifierGRPC(sockPath, 1, entropy, req, dialUnix); err == nil {
+	if err := notifierGRPC(nil, sockPath, 1, entropy, req, dialUnix); err == nil {
 		t.Fatal("expected error when guest did not reseed its RNG; got nil")
 	}
 }
@@ -288,7 +288,7 @@ func TestProductionGuestReadyGRPC_PingRoundTrip(t *testing.T) {
 	defer cleanup()
 
 	ctx := context.Background()
-	if err := guestReadyGRPC(ctx, sockPath, 5*time.Second, dialUnix); err != nil {
+	if _, err := guestReadyGRPC(ctx, sockPath, 5*time.Second, dialUnix); err != nil {
 		t.Fatalf("guestReadyGRPC: %v", err)
 	}
 
@@ -313,7 +313,7 @@ func TestProductionGuestReadyGRPC_Timeout(t *testing.T) {
 	ctx := context.Background()
 	start := time.Now()
 	timeout := 150 * time.Millisecond
-	if err := guestReadyGRPC(ctx, noSock, timeout, dialUnix); err == nil {
+	if _, err := guestReadyGRPC(ctx, noSock, timeout, dialUnix); err == nil {
 		t.Fatal("expected error for unreachable server, got nil")
 	}
 	elapsed := time.Since(start)
@@ -349,8 +349,12 @@ func TestProductionGuestReadyGRPC_RetryBackoffIsTight(t *testing.T) {
 	}
 
 	start := time.Now()
-	if err := guestReadyGRPC(context.Background(), sockPath, 5*time.Second, flaky); err != nil {
+	c, err := guestReadyGRPC(context.Background(), sockPath, 5*time.Second, flaky)
+	if err != nil {
 		t.Fatalf("guestReadyGRPC: %v", err)
+	}
+	if c != nil {
+		defer c.Close() //nolint:errcheck // test cleanup
 	}
 	elapsed := time.Since(start)
 
@@ -362,5 +366,78 @@ func TestProductionGuestReadyGRPC_RetryBackoffIsTight(t *testing.T) {
 	// under the 20ms regression this pins, but with room for CI scheduler noise.
 	if elapsed >= 15*time.Millisecond {
 		t.Errorf("first-retry backoff too slow: guestReadyGRPC took %v after one failed dial; want < 15ms", elapsed)
+	}
+}
+
+// TestActivateHandshakeReusesTheReadinessConnection pins that the warm-claim activate
+// opens exactly ONE guest connection.
+//
+// guestReadyGRPC dials the guest agent over vsock, Pings it, and then closed the
+// connection it had just proved healthy; notifierGRPC immediately dialled a fresh one
+// for the fork-correctness handshake. That second connect plus HTTP/2 setup sits
+// squarely on the activate critical path (the handshake stage measured ~16 ms of a
+// ~68 ms activate on the reference node), and it buys nothing: the readiness probe
+// only succeeds when the guest is already answering on that exact connection.
+//
+// The seam therefore hands the proven client to the notifier. A nil client (the unit
+// and mock paths, which inject fakes) still makes the notifier dial for itself, so the
+// fallback is preserved.
+func TestActivateHandshakeReusesTheReadinessConnection(t *testing.T) {
+	rcs := &recordingControlServer{notifyReseeded: true}
+	sockPath, cleanup := startRecordingGRPC(t, rcs)
+	defer cleanup()
+
+	var dials int
+	counting := func(p string) (*guestgrpc.Client, error) {
+		dials++
+		return dialUnix(p)
+	}
+
+	client, err := guestReadyGRPC(context.Background(), sockPath, 5*time.Second, counting)
+	if err != nil {
+		t.Fatalf("guestReadyGRPC: %v", err)
+	}
+	if client == nil {
+		t.Fatal("guestReadyGRPC must hand back the connection it proved healthy, not nil")
+	}
+	defer client.Close() //nolint:errcheck // test cleanup
+	if dials != 1 {
+		t.Fatalf("readiness probe made %d dials, want 1", dials)
+	}
+
+	entropy := make([]byte, entropySize)
+	if err := notifierGRPC(client, sockPath, 1, entropy, ActivateRequest{}, counting); err != nil {
+		t.Fatalf("notifierGRPC with a reused client: %v", err)
+	}
+	if dials != 1 {
+		t.Errorf("the handshake dialled again (%d total dials): it must reuse the readiness connection", dials)
+	}
+
+	rcs.mu.Lock()
+	notified := rcs.notifyCalls
+	rcs.mu.Unlock()
+	if notified != 1 {
+		t.Errorf("guest received %d NotifyForked calls over the reused connection, want 1", notified)
+	}
+}
+
+// TestNotifierDialsWhenGivenNoConnection preserves the fallback: a nil client (the unit
+// and mock paths) makes the notifier open its own connection.
+func TestNotifierDialsWhenGivenNoConnection(t *testing.T) {
+	rcs := &recordingControlServer{notifyReseeded: true}
+	sockPath, cleanup := startRecordingGRPC(t, rcs)
+	defer cleanup()
+
+	var dials int
+	counting := func(p string) (*guestgrpc.Client, error) {
+		dials++
+		return dialUnix(p)
+	}
+	entropy := make([]byte, entropySize)
+	if err := notifierGRPC(nil, sockPath, 1, entropy, ActivateRequest{}, counting); err != nil {
+		t.Fatalf("notifierGRPC with a nil client must dial for itself: %v", err)
+	}
+	if dials != 1 {
+		t.Errorf("notifier made %d dials with a nil client, want 1", dials)
 	}
 }

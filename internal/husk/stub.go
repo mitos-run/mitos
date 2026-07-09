@@ -204,7 +204,11 @@ type starter func(cfg firecracker.VMConfig) (vmm, error)
 // vsockPath, or the timeout elapses. The production seam dials the gRPC Control
 // service and calls Ping; tests inject a fake. ctx is forwarded so a cancelled
 // activate context also cancels the readiness wait.
-type guestReady func(ctx context.Context, vsockPath string, timeout time.Duration) error
+// guestReady waits for the guest agent and returns the connection it proved healthy,
+// so the fork-correctness handshake can run on that same connection instead of dialing
+// the guest again. A nil client is legal (the unit and mock seams return one), and
+// makes the notifier open its own connection.
+type guestReady func(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error)
 
 // notifier runs the post-restore fork-correctness handshake against the guest
 // agent at vsockPath: it delivers the fresh generation + entropy via
@@ -215,7 +219,9 @@ type guestReady func(ctx context.Context, vsockPath string, timeout time.Duratio
 // siblings' CRNG state is never served. The production seam connects via
 // internal/vsock; tests inject a fake. The entropy and secret VALUES are never
 // logged by any implementation.
-type notifier func(vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error
+// notifier runs the post-restore fork-correctness handshake. client is the connection
+// guestReady already proved healthy; when it is nil the notifier dials vsockPath itself.
+type notifier func(client *guestgrpc.Client, vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error
 
 // dialFunc is the injectable gRPC dial seam used by notifierGRPC and
 // guestReadyGRPC. The production seam uses guestgrpc.Dial (vsock); tests inject
@@ -231,12 +237,17 @@ type dialFunc func(vsockPath string) (*guestgrpc.Client, error)
 //
 // Entropy and secret VALUES are never logged or included in any error text:
 // errors carry only the operation name and the underlying transport error.
-func notifierGRPC(vsockPath string, generation uint64, entropy []byte, req ActivateRequest, dial dialFunc) error {
-	client, err := dial(vsockPath)
-	if err != nil {
-		return fmt.Errorf("connect guest agent gRPC for fork handshake: %w", err)
+func notifierGRPC(client *guestgrpc.Client, vsockPath string, generation uint64, entropy []byte, req ActivateRequest, dial dialFunc) error {
+	// Reuse the readiness connection when the caller has one. It owns the Close then;
+	// only a connection we opened here is ours to close.
+	if client == nil {
+		dialed, err := dial(vsockPath)
+		if err != nil {
+			return fmt.Errorf("connect guest agent gRPC for fork handshake: %w", err)
+		}
+		defer dialed.Close() //nolint:errcheck // best-effort on close
+		client = dialed
 	}
-	defer client.Close() //nolint:errcheck // best-effort on close
 
 	// Build the network sub-message from the vsock type. Nil network is valid
 	// (no per-fork re-addressing needed for this activation).
@@ -302,8 +313,8 @@ func notifierGRPC(vsockPath string, generation uint64, entropy []byte, req Activ
 // on AgentPort 52 is no longer used for this path.
 //
 // Entropy and secret VALUES are never logged or included in any error text.
-func productionNotifier(vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error {
-	return notifierGRPC(vsockPath, generation, entropy, req, guestgrpc.Dial)
+func productionNotifier(client *guestgrpc.Client, vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error {
+	return notifierGRPC(client, vsockPath, generation, entropy, req, guestgrpc.Dial)
 }
 
 // guestReadyGRPC waits for the guest agent's gRPC Control service to answer a
@@ -323,7 +334,7 @@ const (
 	guestReadyBackoffMax     = 5 * time.Millisecond
 )
 
-func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration, dial dialFunc) error {
+func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration, dial dialFunc) (*guestgrpc.Client, error) {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	backoff := guestReadyBackoffInitial
@@ -342,7 +353,7 @@ func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration
 	}
 	for {
 		if ctx.Err() != nil {
-			return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
+			return nil, fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
 		}
 		if time.Now().After(deadline) {
 			break
@@ -352,7 +363,7 @@ func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration
 		if err != nil {
 			lastErr = err
 			if !wait() {
-				return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
+				return nil, fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
 			}
 			continue
 		}
@@ -360,19 +371,23 @@ func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration
 		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		_, pingErr := client.Control.Ping(pingCtx, &internalv1.PingRequest{})
 		cancel()
-		client.Close() //nolint:errcheck // best-effort; conn closed after check
 		if pingErr == nil {
-			return nil
+			// Hand the caller the connection we just proved healthy. It runs the
+			// fork-correctness handshake on it instead of dialing the guest a second
+			// time, which put a whole vsock connect plus HTTP/2 setup on the activate
+			// critical path for nothing. The caller owns the Close.
+			return client, nil
 		}
+		client.Close() //nolint:errcheck // best-effort; the ping failed, drop the conn
 		lastErr = pingErr
 		if !wait() {
-			return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
+			return nil, fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
 		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("timeout")
 	}
-	return fmt.Errorf("guest agent gRPC not ready within %s: %w", timeout, lastErr)
+	return nil, fmt.Errorf("guest agent gRPC not ready within %s: %w", timeout, lastErr)
 }
 
 // reflinker copies a source file to a destination with copy-on-write semantics
@@ -457,7 +472,7 @@ func (c *clientVMM) Close() error {
 // to answer a Ping RPC on vsock.AgentGRPCPort (53). The Rust agent is the sole
 // guest agent and serves gRPC only (#310). The retry semantics mirror the
 // removed JSON poll.
-func productionGuestReady(ctx context.Context, vsockPath string, timeout time.Duration) error {
+func productionGuestReady(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error) {
 	return guestReadyGRPC(ctx, vsockPath, timeout, guestgrpc.Dial)
 }
 
@@ -1115,11 +1130,18 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	}
 
 	vsockPath := s.vm.VsockHostPath(firecracker.VsockRelPath)
-	if err := s.ready(ctx, vsockPath, s.readyTimeout); err != nil {
+	guestConn, err := s.ready(ctx, vsockPath, s.readyTimeout)
+	if err != nil {
 		// Fail closed: the snapshot loaded but the guest never answered, so we
 		// cannot vouch for the VM. Do NOT mark active or report a usable VM.
 		werr := fmt.Errorf("husk: guest not ready after activate: %w", err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
+	// The readiness probe hands us its proven connection so the handshake below can
+	// reuse it. We own the Close. Nil on the unit and mock seams, which make the
+	// notifier dial for itself.
+	if guestConn != nil {
+		defer guestConn.Close() //nolint:errcheck // best-effort on close
 	}
 
 	// Fork-correctness handshake. The restored guest is a byte-for-byte copy of
@@ -1135,7 +1157,7 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
 	s.generation++
-	if err := s.notify(vsockPath, s.generation, entropy, req); err != nil {
+	if err := s.notify(guestConn, vsockPath, s.generation, entropy, req); err != nil {
 		// Fail closed: the guest did not complete the reseed handshake, so it may
 		// still share its siblings' CRNG state. Leave the VM NOT active. The
 		// error carries no entropy or secret values.

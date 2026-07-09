@@ -10,6 +10,8 @@ import (
 
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
+
+	"mitos.run/mitos/internal/guestgrpc"
 )
 
 // newMultiVMTestStub builds a stub with the multi-VM execution mode ON, using a
@@ -441,10 +443,10 @@ func TestMultiVMActivateRunsConcurrentlyPerInstance(t *testing.T) {
 		vms[cfg.ID] = vm
 		return vm, nil
 	}
-	ready := func(context.Context, string, time.Duration) error {
+	ready := func(context.Context, string, time.Duration) (*guestgrpc.Client, error) {
 		entered <- struct{}{}
 		<-release
-		return nil
+		return nil, nil
 	}
 	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
 		Start:   start,
