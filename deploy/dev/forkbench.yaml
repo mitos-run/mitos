@@ -55,11 +55,10 @@ spec:
             limits: { cpu: "2", memory: 3200Mi, mitos.run/kvm: "1" }
             requests: { cpu: 100m, memory: 2560Mi, mitos.run/kvm: "1" }
           securityContext:
-            allowPrivilegeEscalation: false
-            capabilities: { add: ["NET_ADMIN"], drop: ["ALL"] }
-            privileged: false
+            # DEV pod: privileged so the reflink proof can losetup + mkfs.xfs + mount
+            # a loopback XFS(reflink=1) image to measure the CoW clone-time win.
+            privileged: true
             runAsNonRoot: false
-            seccompProfile: { type: RuntimeDefault }
           volumeMounts:
             - { name: fc, mountPath: /fc, readOnly: true }
             - { name: data, mountPath: /var/lib/mitos }
