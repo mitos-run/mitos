@@ -275,7 +275,17 @@ def _http_for(base_url: str, timeout: float = 60.0) -> httpx.Client:
         if client is None or client.is_closed:
             client = httpx.Client(
                 timeout=timeout,
-                limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+                # keepalive_expiry: httpx's default is 5 seconds, which silently
+                # defeats the pool for any caller that goes more than 5 s between
+                # requests (an agent thinking between tool calls does, constantly).
+                # Measured same-region: iterations 13 s apart re-handshook TLS every
+                # time and TTI regressed from 374 ms back to 495 ms P50. 60 s covers
+                # a thinking pause; the server side keeps connections longer.
+                limits=httpx.Limits(
+                    max_keepalive_connections=20,
+                    max_connections=100,
+                    keepalive_expiry=60.0,
+                ),
             )
             _HTTP_POOLS[key] = client
         return client

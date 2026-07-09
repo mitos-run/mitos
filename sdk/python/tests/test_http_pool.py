@@ -81,3 +81,40 @@ def test_terminate_does_not_close_the_shared_pool():
     )
     # And the pool is still the one handed to the next sandbox.
     assert direct._http_for("https://api.example.test", timeout=30.0) is pooled
+
+
+def _pool_of(client):
+    """Reach the underlying httpcore pool. Private attrs, so assert they exist rather
+    than silently pass if httpx renames them."""
+    transport = getattr(client, "_transport", None)
+    pool = getattr(transport, "_pool", None)
+    assert pool is not None, "httpx internals moved; update this accessor"
+    return pool
+
+
+def test_pool_keepalive_outlives_a_thinking_pause():
+    """httpx's default keepalive_expiry is 5 s, which silently defeats the pool.
+
+    An agent pauses between tool calls (model latency, its own reasoning), so the gap
+    between two SDK requests is routinely longer than 5 seconds. With the default, the
+    connection is evicted and the next request pays a full TLS handshake, which is the
+    exact cost this pool exists to remove. Measured same-region against the hosted API:
+    after a 13 s idle gap, expiry=5 s cost 101.5 ms (re-handshake) and expiry=60 s cost
+    8.6 ms (reused).
+
+    So the expiry must comfortably exceed a thinking pause, not merely be non-zero.
+    """
+    client = direct._http_for("https://api.example.test")
+    expiry = _pool_of(client)._keepalive_expiry
+    assert expiry >= 60.0, (
+        "pooled client keepalive_expiry is %r; httpx's 5 s default evicts the "
+        "connection across a normal agent pause and re-handshakes TLS" % expiry
+    )
+
+
+def test_pool_bounds_its_connections():
+    """A shared, never-closed pool must stay bounded or a long-lived process leaks sockets."""
+    client = direct._http_for("https://api.example.test")
+    pool = _pool_of(client)
+    assert pool._max_keepalive_connections is not None
+    assert pool._max_connections is not None
