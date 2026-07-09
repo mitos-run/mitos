@@ -89,3 +89,42 @@ func hostAddrForFileOffset(regions []uffdMapping, fileOffset uint64) (hostAddr u
 	}
 	return 0, false
 }
+
+// lazyChunkBytes is the granularity the live-cow lazy restore populates guest RAM at.
+//
+// It trades round trips against write amplification. A MISSING fault costs a
+// userspace round trip (~6 us), so serving one 4 KiB page per fault would take ~131k
+// round trips to fill a 512 MiB guest. But a restoring guest touches pages
+// SCATTERED across its address space, not sequentially, so a chunk that is too large
+// copies the whole chunk to satisfy a single page: at 2 MiB the prod activate spent
+// ~88 ms faulting in ~194 MiB for a far smaller working set, which merely moved the
+// eager copy's cost out of vmstate_restore and into guest_ready + handshake.
+//
+// Measured on the reference node against the real python template: 2 MiB chunks
+// faulted in ~194 MiB and cost ~88 ms; 256 KiB faulted in ~125 MiB and cost ~54 ms.
+// 64 KiB (16 pages) trims amplification further while keeping the per-fault copy
+// (~14 us) close to the round-trip cost.
+const lazyChunkBytes = 64 << 10
+
+// lazyChunkForAddr expands a faulting host address into the chunk the handler should
+// populate: the lazyChunkBytes-aligned span (in the CONTAINING region's coordinates)
+// that covers addr, clipped to the region end so a chunk never straddles two regions
+// or reads past the mem file's mapping of that region.
+//
+// It returns the host address to UFFDIO_COPY into, the mem-file offset to read from,
+// and the length. ok is false when addr lies outside every registered region.
+func lazyChunkForAddr(regions []uffdMapping, addr uint64) (dst uint64, fileOffset uint64, length uint64, ok bool) {
+	for _, r := range regions {
+		if r.Size == 0 || addr < r.BaseHostVirtAddr || addr >= r.BaseHostVirtAddr+r.Size {
+			continue
+		}
+		inRegion := addr - r.BaseHostVirtAddr
+		start := (inRegion / lazyChunkBytes) * lazyChunkBytes
+		length = lazyChunkBytes
+		if start+length > r.Size {
+			length = r.Size - start
+		}
+		return r.BaseHostVirtAddr + start, r.Offset + start, length, true
+	}
+	return 0, 0, 0, false
+}

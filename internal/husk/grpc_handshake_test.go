@@ -17,6 +17,7 @@ package husk
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -319,5 +320,46 @@ func TestProductionGuestReadyGRPC_Timeout(t *testing.T) {
 	// Must NOT block indefinitely. Allow 3x the timeout for CI headroom.
 	if elapsed > 3*time.Second {
 		t.Errorf("guestReadyGRPC took %v; should bound to roughly the timeout", elapsed)
+	}
+}
+
+// TestProductionGuestReadyGRPC_RetryBackoffIsTight pins the retry backoff of the
+// post-resume readiness probe. The guest agent's vsock listener is not accepting
+// the instant Firecracker resumes the VM, so the FIRST dial almost always fails
+// and the retry delay lands directly in the claim's activate latency. A fixed
+// 20ms backoff therefore charged ~20ms to every warm claim even though the guest
+// answers within a millisecond of the first failure.
+//
+// The dial seam here fails exactly once and then succeeds against a live server,
+// so the elapsed time is the backoff and nothing else: no server-startup race,
+// no sleep to tune. A 20ms fixed backoff fails this; a sub-millisecond first
+// retry passes it.
+func TestProductionGuestReadyGRPC_RetryBackoffIsTight(t *testing.T) {
+	rcs := &recordingControlServer{}
+	sockPath, cleanup := startRecordingGRPC(t, rcs)
+	defer cleanup()
+
+	var attempts int
+	flaky := func(p string) (*guestgrpc.Client, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, fmt.Errorf("simulated: guest vsock listener not up yet")
+		}
+		return dialUnix(p)
+	}
+
+	start := time.Now()
+	if err := guestReadyGRPC(context.Background(), sockPath, 5*time.Second, flaky); err != nil {
+		t.Fatalf("guestReadyGRPC: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if attempts < 2 {
+		t.Fatalf("expected the seam to retry after the forced failure, got %d attempt(s)", attempts)
+	}
+	// The old fixed 20ms backoff lands at ~20ms. Anything at or above 10ms means
+	// the first retry is still charging the claim tens of milliseconds.
+	if elapsed >= 10*time.Millisecond {
+		t.Errorf("first-retry backoff too slow: guestReadyGRPC took %v after one failed dial; want < 10ms", elapsed)
 	}
 }

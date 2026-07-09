@@ -47,8 +47,21 @@ const (
 	// 1<<0). Mode 0 removes write-protection and wakes any blocked writer.
 	writeprotectModeWP = 0x1
 	// uffdPagefaultFlagWP (UFFD_PAGEFAULT_FLAG_WP, 1<<1) tags a delivered fault as
-	// a write-protect fault (vs a MISSING fault). The handler only services these.
+	// a write-protect fault (vs a MISSING fault). A handler without a mem source
+	// services only these; the live-cow LAZY restore also services MISSING faults.
 	uffdPagefaultFlagWP = 0x2
+
+	// UFFDIO_COPY (uffdioCopy, uffd_linux.go) installs pages into the FAULTING
+	// process's mapping (the uffd's owner, i.e. Firecracker) from a buffer in THIS
+	// process, and wakes any thread blocked on that range.
+	//
+	// copyModeDontwake (UFFDIO_COPY_MODE_DONTWAKE, 1<<0): install without waking,
+	// used to pre-populate pages that no thread is currently blocked on.
+	copyModeDontwake = 0x1
+	// copyModeWP (UFFDIO_COPY_MODE_WP, 1<<1): install the page already
+	// write-protected. Required once the region is frozen, so a page that arrives
+	// AFTER the freeze cannot be written by the parent without a WP fault first.
+	copyModeWP = 0x2
 )
 
 // uffdioWriteprotectArg mirrors struct uffdio_writeprotect: a {start,len} range
@@ -122,6 +135,27 @@ type wpForkHandler struct {
 	// freezeNanos records how long the fork-point UFFDIO_WRITEPROTECT-all took
 	// (the parent-pause contributor the m2 design measures).
 	freezeNanos int64
+
+	// --- live-cow LAZY restore (populate guest RAM on demand) ---
+	// memSrc is the snapshot mem file a lazily restored source's guest RAM is pulled
+	// from. Nil for a BOOTED source (its pages are freshly allocated and resident, so
+	// Firecracker registers WP only and no MISSING fault is ever delivered).
+	memSrc *os.File
+	// populatedBM is a 1-bit-per-lazyChunkBytes map of which chunks have been
+	// installed into the guest mapping. UFFDIO_COPY on an already-present page fails
+	// with EEXIST, and Freeze needs to know what is left to fill, so track it.
+	populatedBM []byte
+	// memMap is the snapshot mem file mmap'd read-only. UFFDIO_COPY reads its source
+	// straight out of this mapping (i.e. out of the file's page cache), so a faulting
+	// page costs ONE copy into the guest memfd instead of a pread into a staging
+	// buffer followed by a second copy out of it.
+	memMap []byte
+	// frozen is set once Freeze has write-protected the region. A page installed
+	// after that MUST land write-protected (copyModeWP) or the parent could write it
+	// without the copy-before-unprotect handler ever seeing the write.
+	frozen bool
+	// missingServed counts MISSING faults populated from the mem file.
+	missingServed int64
 }
 
 // newWPForkHandler binds the write-protect handshake unix socket the caller
@@ -210,6 +244,11 @@ func (h *wpForkHandler) Receive() error {
 	h.live = live
 	h.liveSize = exp.bytes
 	h.pageSize = pageSize
+	// One bit per lazyChunkBytes of guest RAM, used by the lazy restore to know which
+	// chunks are already installed (UFFDIO_COPY on a present page returns EEXIST) and
+	// which the fork point still has to fill. Sized from the live memfd, so it covers
+	// every region's mem-file offset. Harmless (and unread) for a booted source.
+	h.populatedBM = make([]byte, (exp.bytes/lazyChunkBytes+8)/8+1)
 	h.mu.Unlock()
 	return nil
 }
@@ -380,6 +419,18 @@ func (h *wpForkHandler) Freeze() (time.Duration, error) {
 		return 0, err
 	}
 	start := time.Now()
+	// POPULATE-ON-FREEZE. A lazily restored source's memfd is sparse: any page the
+	// guest never touched is a hole. The co-located child MAP_PRIVATEs this memfd, so
+	// it would read those holes as zeros instead of the snapshot's bytes. Fill them
+	// before the fork point captures the memory. Runs with the source paused, so no
+	// fault can race it. A booted source has no mem source and this is a no-op.
+	h.mu.Lock()
+	perr := h.populateResidual()
+	h.mu.Unlock()
+	if perr != nil {
+		ep.close()
+		return 0, perr
+	}
 	for _, r := range regions {
 		if err := h.writeprotect(r.BaseHostVirtAddr, r.Size, true); err != nil {
 			ep.close()
@@ -388,6 +439,8 @@ func (h *wpForkHandler) Freeze() (time.Duration, error) {
 	}
 	d := time.Since(start)
 	h.mu.Lock()
+	// Any chunk installed from here on must land write-protected.
+	h.frozen = true
 	h.epochs = append(h.epochs, ep)
 	h.mu.Unlock()
 	atomic.StoreInt64(&h.freezeNanos, d.Nanoseconds())
@@ -442,6 +495,7 @@ func (h *wpForkHandler) Serve() error {
 	if uffdFile == nil {
 		return fmt.Errorf("wpfork: Serve before handshake")
 	}
+	lazy := h.lazyEnabled()
 	var msg uffdMsg
 	msgBuf := (*[unsafe.Sizeof(msg)]byte)(unsafe.Pointer(&msg))[:]
 	for {
@@ -464,8 +518,17 @@ func (h *wpForkHandler) Serve() error {
 			continue
 		}
 		if msg.PfFlags&uffdPagefaultFlagWP == 0 {
-			// Not a write-protect fault: nothing was registered MISSING, so this
-			// should not happen. Ignore rather than mis-serve.
+			// A MISSING fault. On a LAZILY restored source this is the normal path:
+			// populate the chunk out of the snapshot mem file, which unblocks the
+			// faulting vCPU. On a booted source nothing is registered MISSING, so a
+			// fault here means the kernel and our registration disagree; ignoring it
+			// would hang the faulting thread, so surface it.
+			if !lazy {
+				return fmt.Errorf("wpfork: MISSING fault at %#x on a handler with no mem source", msg.PfAddress)
+			}
+			if err := h.serveMissing(msg.PfAddress); err != nil {
+				return err
+			}
 			continue
 		}
 		if err := h.serveFault(msg.PfAddress); err != nil {
@@ -673,6 +736,14 @@ func (h *wpForkHandler) Close() error {
 		_ = unix.Close(h.uffd)
 		h.uffd = -1
 	}
+	if h.memMap != nil {
+		_ = unix.Munmap(h.memMap)
+		h.memMap = nil
+	}
+	if h.memSrc != nil {
+		_ = h.memSrc.Close()
+		h.memSrc = nil
+	}
 	if h.live != nil {
 		_ = unix.Munmap(h.live)
 		h.live = nil
@@ -686,3 +757,153 @@ func (h *wpForkHandler) Close() error {
 	_ = os.Remove(h.cfg.UDSPath)
 	return nil
 }
+
+// SetMemSource points the handler at the snapshot mem file a LAZILY restored source
+// pulls its guest RAM from. It MUST be called before the parent Firecracker loads
+// the snapshot (the patched binary connects during guest-memory setup and starts
+// faulting immediately), and it is what makes the husk pass
+// FIRECRACKER_MITOS_LAZY_RESTORE so Firecracker skips the eager memfd copy.
+//
+// A BOOTED source never calls this: its pages are resident, Firecracker registers
+// WRITE_PROTECT only, and no MISSING fault is delivered.
+func (h *wpForkHandler) SetMemSource(path string) error {
+	if path == "" {
+		return fmt.Errorf("wpfork: empty mem source path")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("wpfork: open mem source %s: %w", path, err)
+	}
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("wpfork: stat mem source %s: %w", path, err)
+	}
+	if st.Size() == 0 {
+		_ = f.Close()
+		return fmt.Errorf("wpfork: empty mem source %s", path)
+	}
+	// Read-only private mapping of the mem file: the UFFDIO_COPY source. The kernel
+	// copies from these page-cache pages directly into the guest memfd.
+	m, err := unix.Mmap(int(f.Fd()), 0, int(st.Size()), unix.PROT_READ, unix.MAP_PRIVATE)
+	if err != nil {
+		_ = f.Close()
+		return fmt.Errorf("wpfork: mmap mem source %s: %w", path, err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.memMap != nil {
+		_ = unix.Munmap(h.memMap)
+	}
+	if h.memSrc != nil {
+		_ = h.memSrc.Close()
+	}
+	h.memSrc = f
+	h.memMap = m
+	return nil
+}
+
+// lazyEnabled reports whether this handler populates guest RAM on demand.
+func (h *wpForkHandler) lazyEnabled() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.memSrc != nil
+}
+
+// uffdCopy installs len bytes from src (this process) at dst (Firecracker's mapping)
+// through the uffd, with the given UFFDIO_COPY mode. EEXIST means the page raced in
+// already, which is benign: the content is identical (both come from the mem file).
+func (h *wpForkHandler) uffdCopy(uffd int, dst uint64, src []byte, mode uint64) error {
+	arg := uffdioCopyArg{
+		Dst:  dst,
+		Src:  uint64(uintptr(unsafe.Pointer(&src[0]))),
+		Len:  uint64(len(src)),
+		Mode: mode,
+	}
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(uffd), uintptr(uffdioCopy), uintptr(unsafe.Pointer(&arg)))
+	if errno != 0 && errno != unix.EEXIST {
+		return fmt.Errorf("wpfork: UFFDIO_COPY dst=%#x len=%d mode=%#x: %w", dst, len(src), mode, errno)
+	}
+	return nil
+}
+
+// populateChunk reads one chunk out of the mem file and installs it. Caller holds mu.
+func (h *wpForkHandler) populateChunk(dst, fileOffset, length uint64, extraMode uint64) error {
+	if h.memSrc == nil {
+		return fmt.Errorf("wpfork: MISSING fault with no mem source")
+	}
+	if fileOffset+length > uint64(len(h.memMap)) {
+		return fmt.Errorf("wpfork: chunk [%#x,+%#x) past mem source (%d bytes)", fileOffset, length, len(h.memMap))
+	}
+	buf := h.memMap[fileOffset : fileOffset+length]
+	mode := extraMode
+	if h.frozen {
+		// Installed after the fork point: land it write-protected so the parent's
+		// next write to it still takes a WP fault and is copied before it lands.
+		mode |= copyModeWP
+	}
+	if err := h.uffdCopy(h.uffd, dst, buf, mode); err != nil {
+		return err
+	}
+	setFrozenBit(h.populatedBM, fileOffset/lazyChunkBytes)
+	return nil
+}
+
+// serveMissing populates the chunk containing a MISSING fault from the snapshot mem
+// file, which unblocks the faulting vCPU (or the vmstate restore) at that address.
+func (h *wpForkHandler) serveMissing(addr uint64) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	dst, fileOffset, length, ok := lazyChunkForAddr(h.regions, addr)
+	if !ok {
+		// A MISSING fault outside every registered region cannot be resolved, and
+		// ignoring it would hang the faulting thread forever. Fail loudly.
+		return fmt.Errorf("wpfork: MISSING fault at %#x outside regions %s", addr, dumpRegions(h.regions))
+	}
+	if testFrozenBit(h.populatedBM, fileOffset/lazyChunkBytes) {
+		// Already installed (a concurrent chunk covered it); nothing to do, and the
+		// kernel will not re-deliver.
+		return nil
+	}
+	if err := h.populateChunk(dst, fileOffset, length, 0); err != nil {
+		return err
+	}
+	atomic.AddInt64(&h.missingServed, 1)
+	return nil
+}
+
+// populateResidual fills every chunk the guest never faulted in, straight from the
+// mem file. Caller holds mu.
+//
+// This is the correctness gate for the lazy restore. A co-located fork child maps the
+// parent's memfd MAP_PRIVATE, so a page the parent never touched is a HOLE in that
+// memfd and the child would read it as zeros instead of as the snapshot's contents.
+// Filling the residual at the fork point (rather than at restore) keeps warm-claim
+// activate O(1) and charges the fill only to the forks that actually need it.
+//
+// DONTWAKE: nothing is blocked on these addresses (the source is paused across the
+// fork window), so there is no waiter to wake.
+func (h *wpForkHandler) populateResidual() error {
+	if h.memSrc == nil {
+		return nil // booted source: pages are already resident
+	}
+	for _, r := range h.regions {
+		for start := uint64(0); start < r.Size; start += lazyChunkBytes {
+			length := uint64(lazyChunkBytes)
+			if start+length > r.Size {
+				length = r.Size - start
+			}
+			fileOffset := r.Offset + start
+			if testFrozenBit(h.populatedBM, fileOffset/lazyChunkBytes) {
+				continue
+			}
+			if err := h.populateChunk(r.BaseHostVirtAddr+start, fileOffset, length, copyModeDontwake); err != nil {
+				return fmt.Errorf("wpfork: populate residual: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// MissingFaultCount reports how many MISSING faults the lazy restore has served.
+func (h *wpForkHandler) MissingFaultCount() int64 { return atomic.LoadInt64(&h.missingServed) }

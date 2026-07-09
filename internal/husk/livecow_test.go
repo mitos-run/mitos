@@ -64,6 +64,12 @@ func TestLiveCowForkGateOn(t *testing.T) {
 		"FIRECRACKER_MITOS_SHARED_MEM=1",
 		"FIRECRACKER_MITOS_SHARED_MEM_EXPORT=/run/vm/mitos-memfd.export",
 		"FIRECRACKER_MITOS_WP_UDS=/run/vm/mitos-wp.sock",
+		// LAZY restore: the patched Firecracker maps guest RAM as an EMPTY shared
+		// memfd and takes a MISSING fault per chunk instead of copying the whole mem
+		// file inside PUT /snapshot/load. It requires BOTH this and the WP UDS, and
+		// the stub fails the activate if it cannot open the mem source first, so a
+		// source is never resumed on zeroed memory.
+		"FIRECRACKER_MITOS_LAZY_RESTORE=1",
 	}
 	if len(env) != len(want) {
 		t.Fatalf("parent env = %v, want %d entries", env, len(want))

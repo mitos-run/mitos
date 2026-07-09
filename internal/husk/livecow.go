@@ -285,6 +285,28 @@ func (s *Stub) armLiveCowSource(workDir string) []string {
 	return fork.LiveCowParentEnv(wpUDS, memExport)
 }
 
+// setLiveCowMemSource points the armed WP handler at the snapshot mem file this
+// activation restores from, so it can serve the userfaultfd MISSING faults the LAZY
+// live-cow restore takes (fork.EnvLazyRestore). It MUST run BEFORE the source
+// Firecracker loads the snapshot: the patched binary maps guest RAM as an EMPTY
+// shared memfd and every page arrives through the handler.
+//
+// FAIL CLOSED: the source Firecracker was launched with EnvLazyRestore (armLiveCowSource
+// emits it), so if the handler cannot open the mem file there is nothing to populate
+// guest RAM and the VM would run on zeros. The caller aborts the activate.
+//
+// Returns nil when live-cow is not armed for this pod (no handler): the source then
+// launched stock and restores through the ordinary file-backed path.
+func (s *Stub) setLiveCowMemSource(memFile string) error {
+	s.mu.Lock()
+	handle := s.liveCowHandle
+	s.mu.Unlock()
+	if handle == nil {
+		return nil
+	}
+	return handle.SetMemSource(memFile)
+}
+
 // serveLiveCowSource completes the write-protect handshake with the patched source
 // Firecracker and, on success, arms the freezer and runs the fault loop for the life
 // of the source VM. It runs in its own goroutine (armLiveCowSource starts it) so the

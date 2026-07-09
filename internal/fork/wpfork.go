@@ -28,8 +28,14 @@ type WPForkHandle interface {
 	// Freeze write-protects the whole guest region at the fork point and returns
 	// how long that took (the parent-pause contributor). Resume the parent after.
 	Freeze() (time.Duration, error)
-	// Serve runs the write-protect fault loop until Close.
+	// Serve runs the write-protect fault loop until Close. On a lazily restored
+	// source it also serves MISSING faults out of the mem source.
 	Serve() error
+	// SetMemSource points the handler at the snapshot mem file a LAZILY restored
+	// source pulls its guest RAM from. It MUST be called before the source loads the
+	// snapshot. Failing to call it while Firecracker was launched with
+	// EnvLazyRestore leaves the guest with empty RAM, so callers fail closed.
+	SetMemSource(path string) error
 	// FrozenFd returns the descriptor of the private FROZEN memfd a co-located
 	// child MAP_PRIVATEs (with the frozen bitmap) to read clobbered pages at their
 	// fork-time value. -1 before Receive.
@@ -131,6 +137,13 @@ const (
 	// Firecracker CONNECTS to, over which Firecracker sends the uffd + region
 	// layout via SCM_RIGHTS (m2).
 	EnvWPUDS = "FIRECRACKER_MITOS_WP_UDS"
+	// EnvLazyRestore opts the patched Firecracker into the LAZY live-cow restore:
+	// guest RAM comes back as an EMPTY shared memfd and every page is pulled from the
+	// snapshot mem file on a userfaultfd MISSING fault, instead of the eager
+	// O(guest RAM) copy that ran inside PUT /snapshot/load. Firecracker requires BOTH
+	// this and EnvWPUDS, so a husk that cannot serve MISSING faults (an older build,
+	// or one that failed to open the mem source) keeps the eager copy.
+	EnvLazyRestore = "FIRECRACKER_MITOS_LAZY_RESTORE"
 )
 
 // WPForkConfig configures the parent-side live-cow fork handler. UDSPath is the
@@ -157,6 +170,9 @@ func LiveCowParentEnv(wpUDS, memExport string) []string {
 		EnvSharedMem + "=1",
 		EnvSharedMemExport + "=" + memExport,
 		EnvWPUDS + "=" + wpUDS,
+		// The stub calls WPForkHandle.SetMemSource before it loads the snapshot, and
+		// fails the activate if it cannot, so the handler can always serve MISSING.
+		EnvLazyRestore + "=1",
 	}
 }
 
