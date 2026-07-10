@@ -200,6 +200,11 @@ type HuskPodOptions struct {
 	// one dormant generic co-located child Firecracker pre-prepared and a fork adopts
 	// it (fc_boot off the hot path). DEFAULT OFF; requires MultiVM.
 	PrewarmChild bool
+	// PrepareEgressLink starts the husk stub with --prepare-egress-link (plus the
+	// in-pod link addresses it needs before an activate request arrives), so a warm
+	// pod brings its tap up while dormant and a claim pays only the nft transaction
+	// that installs the tenant's policy. Requires MultiVM. Default off.
+	PrepareEgressLink bool
 	// MultiVMForkVMs is the number of ADDITIONAL fork-child VMs a multi-VM pod
 	// reserves node memory for up front (beyond the source VM), so the co-location
 	// routing has room to co-locate that many children before a fork spills to a new
@@ -562,6 +567,20 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 	}
 	if opts.PrewarmChild {
 		args = append(args, "--prewarm-child")
+	}
+	// Gated on MultiVM as documented: the stub only brings the tap up on the multi-VM
+	// Prepare path, so emitting these to a single-VM stub would produce an unsupported
+	// pod shape whose flags do nothing. main rejects the flag combination outright; this
+	// is the second gate, at the boundary that actually builds the pod.
+	if opts.PrepareEgressLink && opts.MultiVM {
+		// The stub needs the in-pod link BEFORE a claim arrives, because the tap name
+		// derives from the guest IP. These are the same fixed values huskNotifyNetwork
+		// sends in the activate request; they are config, not secrets.
+		args = append(args,
+			"--prepare-egress-link",
+			"--in-pod-guest-ip", huskGuestIP,
+			"--in-pod-gateway-ip", huskGatewayIP,
+		)
 	}
 
 	// Live-cow write-protect needs a KERNEL-MODE userfaultfd over the guest RAM: the
@@ -1396,6 +1415,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 			LiveCowFork:        r.LiveCowFork,
 			LiveCowChildImport: r.LiveCowChildImport,
 			PrewarmChild:       r.PrewarmChild,
+			PrepareEgressLink:  r.PrepareEgressLink,
 			MultiVMForkVMs:     r.MultiVMForkVMs,
 			StubImage:          r.HuskStubImage,
 			DNSUpstream:        r.HuskDNSUpstream,
