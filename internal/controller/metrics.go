@@ -178,6 +178,15 @@ var (
 		Help:    "Per-stage duration of a hosted co-location fork, by stage (controller RPC round-trips, husk sub-stages, and the end-to-end total).",
 		Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
 	}, []string{"stage"})
+
+	// Kept separate from forkStageDurationSeconds: that histogram documents a fixed
+	// fork-stage vocabulary, and mixing claim labels into it would make any
+	// aggregation over "all fork stages" quietly include warm-claim work.
+	claimStageDurationSeconds = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "mitos_claim_stage_duration_seconds",
+		Help:    "Per-stage duration of a warm-claim activate, by stage (Kubernetes round-trips around the microVM restore, the mTLS dial, the activate RPC, and the end-to-end total).",
+		Buckets: []float64{0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5},
+	}, []string{"stage"})
 )
 
 func init() {
@@ -200,6 +209,7 @@ func init() {
 		claimWaitForWarmSeconds,
 		snapshotDistributionLagSeconds,
 		forkStageDurationSeconds,
+		claimStageDurationSeconds,
 	)
 }
 
@@ -302,4 +312,9 @@ func observeClaimWaitForWarm(seconds float64) { claimWaitForWarmSeconds.Observe(
 // "total"), never error text, an id, or a secret.
 func observeForkStage(stage string, seconds float64) {
 	forkStageDurationSeconds.WithLabelValues(stage).Observe(seconds)
+}
+
+// observeClaimStage records one stage of a warm-claim activate.
+func observeClaimStage(stage string, seconds float64) {
+	claimStageDurationSeconds.WithLabelValues(stage).Observe(seconds)
 }

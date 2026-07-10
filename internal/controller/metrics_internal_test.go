@@ -172,3 +172,23 @@ func TestForkStageTimingMetric(t *testing.T) {
 		t.Errorf("total stage count = %d, want %d", got, beforeTotal+1)
 	}
 }
+
+// TestClaimStageTimingMetricIsSeparateFromForkStages asserts that warm-claim stage
+// timings land on their own histogram. mitos_fork_stage_duration_seconds documents a
+// fixed fork-stage vocabulary; folding claim_* labels into it would make any
+// whole-metric aggregation over fork stages silently include claim work.
+func TestClaimStageTimingMetricIsSeparateFromForkStages(t *testing.T) {
+	const stage = "activate_rpc"
+
+	forkBefore := histogramCountByLabel(t, "mitos_fork_stage_duration_seconds", map[string]string{"stage": "claim_" + stage})
+	claimBefore := histogramCountByLabel(t, "mitos_claim_stage_duration_seconds", map[string]string{"stage": stage})
+
+	observeClaimStage(stage, 0.061)
+
+	if got := histogramCountByLabel(t, "mitos_claim_stage_duration_seconds", map[string]string{"stage": stage}); got != claimBefore+1 {
+		t.Errorf("claim stage count = %d, want %d", got, claimBefore+1)
+	}
+	if got := histogramCountByLabel(t, "mitos_fork_stage_duration_seconds", map[string]string{"stage": "claim_" + stage}); got != forkBefore {
+		t.Errorf("claim timing leaked into the fork-stage histogram: count = %d, want %d", got, forkBefore)
+	}
+}
