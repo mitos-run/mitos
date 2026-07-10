@@ -444,6 +444,20 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 					return ctrl.Result{}, err
 				}
 			}
+			// Claim-time org attribution (pre-claimed checkout): the gateway
+			// stamps the org on a formerly buffered sandbox's CR labels, and
+			// the reconcile that very patch triggers propagates the org to the
+			// backing husk pod, whose TRUSTED label is what the usage scraper
+			// bills. Idempotent, and a no-op for classic claims whose pod was
+			// labeled at claim time.
+			if lostPod != nil {
+				beforeOrg := lostPod.DeepCopy()
+				if propagateOrgToHuskPod(claim, lostPod) {
+					if err := r.Patch(ctx, lostPod, client.MergeFrom(beforeOrg)); err != nil {
+						return ctrl.Result{}, err
+					}
+				}
+			}
 		}
 		// A Ready claim bound to a workspace hydrates its head into the sandbox
 		// exactly once (idempotent via the hydrated annotation). A transient

@@ -12,6 +12,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"mitos.run/mitos/internal/tenant"
 )
 
 // Husk pod loss and drain (issue #18, slice 4b).
@@ -298,4 +300,27 @@ func reflectHuskBackingReadiness(claim *v1.Sandbox, pod *corev1.Pod, now time.Ti
 		})
 	}
 	return false
+}
+
+// propagateOrgToHuskPod copies a Ready claim's org label onto its backing
+// husk pod when they differ, mutating pod and reporting whether it changed
+// anything (so the caller patches only when needed). This is the claim-time
+// org attribution leg of the pre-claimed checkout: the gateway's checkout
+// patch stamps the CR, and the reconcile it triggers lands the org on the
+// pod, whose TRUSTED label is what the usage scraper bills. An org-less
+// claim (a still-buffered sandbox) never stamps anything, and a nil pod
+// (lost, being repended) is a no-op.
+func propagateOrgToHuskPod(claim *v1.Sandbox, pod *corev1.Pod) bool {
+	if pod == nil {
+		return false
+	}
+	org := claim.Labels[tenant.OrgLabelKey]
+	if org == "" || pod.Labels[tenant.OrgLabelKey] == org {
+		return false
+	}
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	pod.Labels[tenant.OrgLabelKey] = org
+	return true
 }
