@@ -114,10 +114,16 @@ raw per-iteration data ComputeSDK publishes, run `2026-07-09T01:03:05Z`, from
 `results/sequential_tti/2026-07-09.json` in `computesdk/benchmarks`. They were produced
 on ComputeSDK's runner against each vendor's own hardware; we did not re-run them.
 
-Reproduce with `python3 bench/peer-tti.py --date 2026-07-09`. Note that
-`latest.json` on their default branch is MUTABLE, so a number published from it cannot
-be re-derived later; the harness takes `--ref <commit-sha>` for that reason, and this
-table names the frozen daily file it used.
+Reproduce EXACTLY, against the immutable commit this table was computed from:
+
+```
+python3 bench/peer-tti.py --date 2026-07-09 --ref 3eddee1a972bd49aea56fd6c16d238ca0a45dece
+```
+
+Even a dated file is only as stable as the branch it is read from, so the table pins the
+upstream commit rather than a branch. `latest.json` on their default branch is MUTABLE
+and a number published from it cannot be re-derived later; the harness warns when asked
+for it.
 
 `n` is the number of iterations that produced a valid sample and `err` the number that
 did not, so a percentile computed over fewer than 100 samples is visible rather than
