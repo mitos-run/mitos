@@ -16,7 +16,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
@@ -107,29 +106,30 @@ func (r *bufferingRecorder) snapshot() []string {
 	return append([]string(nil), r.events...)
 }
 
-// updateSandboxStatusWithRetry applies a Sandbox status mutation under
-// RetryOnConflict, re-Getting the object each attempt. A test that Creates a
-// sandbox and immediately stamps its status from the stale Create response
-// loses the optimistic-lock race intermittently: the claim reconciler writes
-// metadata (the pool-missing stamp) and status (a PoolNotFound pend) on a
-// sandbox whose referenced pool does not exist, bumping the resourceVersion in
-// between (issue #630).
+// updateSandboxStatusWithRetry applies a Sandbox status mutation from a test.
+//
+// It PATCHES rather than Updates, deliberately. A Get-mutate-Update takes an optimistic
+// lock on resourceVersion, and a source claim's reconciler churns the object
+// continuously (it re-reconciles while pending), so the write kept losing that race:
+// "the object has been modified; please apply your changes" (issue #630). The retry
+// budget here was widened from retry.DefaultRetry to ~3s, then to ~6.7s, and STILL
+// flaked in CI under -race (TestHuskForkChildInheritsSourceNetwork). Reproduced locally
+// on main at roughly one run in three.
+//
+// A merge patch carries no resourceVersion, so it CANNOT conflict, however long the
+// reconciler churns. It also states what these tests actually mean: stamp these status
+// fields, do not replace the object. RetryOnConflict is kept for the same reason a belt
+// is kept with braces; it should now never fire.
 func updateSandboxStatusWithRetry(t *testing.T, name, namespace string, mutate func(*v1.Sandbox)) {
 	t.Helper()
-	// retry.DefaultRetry is only ~5 short steps; a source claim whose reconciler
-	// churns the object continuously (it re-reconciles while pending) can conflict
-	// on every one of them, flaking the status write. A ~3s budget was measured to
-	// still flake (the churn outlasts it), so retry for about 6.7s worst case
-	// (20 steps, 40ms base, 1.3x, capped at 500ms), long enough to always catch a
-	// gap in the reconcile loop while still bounding a genuinely wedged write.
-	backoff := wait.Backoff{Steps: 20, Duration: 40 * time.Millisecond, Factor: 1.3, Cap: 500 * time.Millisecond}
-	if err := retry.RetryOnConflict(backoff, func() error {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var sb v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sb); err != nil {
 			return err
 		}
+		patch := client.MergeFrom(sb.DeepCopy())
 		mutate(&sb)
-		return k8sClient.Status().Update(ctx, &sb)
+		return k8sClient.Status().Patch(ctx, &sb, patch)
 	}); err != nil {
 		t.Fatalf("update sandbox %s/%s status: %v", namespace, name, err)
 	}
