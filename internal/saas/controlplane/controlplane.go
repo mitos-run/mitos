@@ -22,6 +22,7 @@ package controlplane
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,6 +57,13 @@ type K8sControlPlane struct {
 	// checks still apply.
 	singleTenantNamespace string
 	now                   func() time.Time
+
+	// poolSeen caches POSITIVE pool-existence pre-check results per
+	// namespace/name until the stored expiry, so a repeat create of a stable
+	// hosted pool skips the serialized apiserver Get (see poolCheckTTL in
+	// forward.go). Absence is never stored.
+	poolSeenMu sync.Mutex
+	poolSeen   map[string]time.Time
 }
 
 // Option configures a K8sControlPlane.

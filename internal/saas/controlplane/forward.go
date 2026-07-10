@@ -15,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1 "mitos.run/mitos/api/v1"
@@ -27,6 +28,13 @@ import (
 // (internal/controller/token_secret.go): <sandbox-name>-sandbox-token, with keys
 // token and endpoint.
 const tokenSecretSuffix = "-sandbox-token"
+
+// poolCheckTTL bounds the positive pool-existence cache feeding create's typo
+// fast-fail pre-check. Hosted pools are pre-provisioned and stable, so a pool
+// seen once is not re-read on every create; a pool deleted inside the window
+// falls through to the controller's bounded grace (#637), the same path a
+// direct create takes. Absence is NEVER cached.
+const poolCheckTTL = 30 * time.Second
 
 // maxCreateReplicas is the inclusive upper bound on the replicas a single create
 // request may ask for. It is a request-validation guard against a huge value
@@ -184,12 +192,22 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 	// would resolve the poolRef in. A transient (non-NotFound) read error is NOT
 	// treated as absent: the create proceeds and the controller's bounded grace
 	// still governs the direct and GitOps-race paths.
-	var poolObj v1.SandboxPool
-	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: pool}, &poolObj); err != nil && apierrors.IsNotFound(err) {
-		return errResp(apierr.Get(apierr.CodeNotFound).
-			WithMessage(fmt.Sprintf("no such pool %q", pool)).
-			WithCause(fmt.Sprintf("no SandboxPool named %q exists in namespace %q", pool, ns)).
-			WithRemediation("Check the pool name for a typo and use a pool listed by GET /v1/templates, or create the SandboxPool before launching a sandbox from it.")), nil
+	// A POSITIVE result from a previous create inside poolCheckTTL skips the
+	// round trip: hosted pools are stable, and the pre-check is a typo UX
+	// guard, not a correctness gate (a pool deleted inside the window falls
+	// through to the controller's bounded grace, #637). Absence is never
+	// cached, so a genuine typo re-reads authoritatively every time.
+	if !k.poolRecentlySeen(ns, pool) {
+		var poolObj v1.SandboxPool
+		switch err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: pool}, &poolObj); {
+		case err != nil && apierrors.IsNotFound(err):
+			return errResp(apierr.Get(apierr.CodeNotFound).
+				WithMessage(fmt.Sprintf("no such pool %q", pool)).
+				WithCause(fmt.Sprintf("no SandboxPool named %q exists in namespace %q", pool, ns)).
+				WithRemediation("Check the pool name for a typo and use a pool listed by GET /v1/templates, or create the SandboxPool before launching a sandbox from it.")), nil
+		case err == nil:
+			k.markPoolSeen(ns, pool)
+		}
 	}
 
 	name := generateName()
@@ -233,6 +251,26 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 		sb.Spec.Lifetime = &v1.SandboxLifetime{TTL: &metav1.Duration{Duration: d}}
 	}
 
+	// Establish the ready watch BEFORE the Create: the create event then
+	// arrives on the stream itself, which both closes the flip-before-watch
+	// window (no authoritative re-read needed) and takes one serialized
+	// apiserver round trip off the create hot path. On any establish failure
+	// the create proceeds and the wait falls back to the post-create watch or
+	// poll (pollReady), exactly as before.
+	var wi watch.Interface
+	if w, ok := k.c.(client.WithWatch); ok {
+		// A dedicated cancel bounds the watch stream's lifetime to this create.
+		watchCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		if established, werr := establishSandboxWatch(watchCtx, w, ns, name); werr == nil {
+			wi = established
+			defer wi.Stop()
+		} else {
+			slog.Warn("could not establish the sandbox ready watch before create; will wait post-create",
+				"namespace", ns, "sandbox", name, "error", werr.Error())
+		}
+	}
+
 	if err := k.c.Create(ctx, sb); err != nil {
 		switch {
 		case apierrors.IsAlreadyExists(err):
@@ -253,7 +291,45 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 		}
 	}
 
+	if wi != nil {
+		// The deadline starts where pollReady's would: after the Create.
+		deadline := k.now().Add(k.readyTimeout)
+		if resp, done := k.watchWait(ctx, wi, ns, name, startedAt, deadline, "Pending"); done {
+			return resp, nil
+		}
+		slog.Warn("sandbox ready watch closed before a terminal outcome; falling back to status polling",
+			"namespace", ns, "sandbox", name)
+		return k.pollReadyTicker(ctx, ns, name, startedAt, deadline)
+	}
 	return k.pollReady(ctx, ns, name, startedAt)
+}
+
+// poolRecentlySeen reports whether the ns/pool existence pre-check returned
+// POSITIVE within poolCheckTTL. Expired entries are deleted on read so the map
+// stays bounded by the set of live pools.
+func (k *K8sControlPlane) poolRecentlySeen(ns, pool string) bool {
+	key := ns + "/" + pool
+	k.poolSeenMu.Lock()
+	defer k.poolSeenMu.Unlock()
+	exp, ok := k.poolSeen[key]
+	if !ok {
+		return false
+	}
+	if k.now().After(exp) {
+		delete(k.poolSeen, key)
+		return false
+	}
+	return true
+}
+
+// markPoolSeen records a POSITIVE ns/pool existence result until now+poolCheckTTL.
+func (k *K8sControlPlane) markPoolSeen(ns, pool string) {
+	k.poolSeenMu.Lock()
+	defer k.poolSeenMu.Unlock()
+	if k.poolSeen == nil {
+		k.poolSeen = make(map[string]time.Time)
+	}
+	k.poolSeen[ns+"/"+pool] = k.now().Add(poolCheckTTL)
 }
 
 // pollReady blocks until the sandbox reaches Ready (returns 201 + token), Failed
