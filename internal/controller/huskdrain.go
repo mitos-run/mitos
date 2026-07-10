@@ -303,11 +303,16 @@ func reflectHuskBackingReadiness(claim *v1.Sandbox, pod *corev1.Pod, now time.Ti
 }
 
 // propagateOrgToHuskPod copies a Ready claim's org label onto its backing
-// husk pod when they differ, mutating pod and reporting whether it changed
-// anything (so the caller patches only when needed). This is the claim-time
-// org attribution leg of the pre-claimed checkout: the gateway's checkout
-// patch stamps the CR, and the reconcile it triggers lands the org on the
-// pod, whose TRUSTED label is what the usage scraper bills. An org-less
+// husk pod when the pod has NONE, mutating pod and reporting whether it
+// changed anything (so the caller patches only when needed). This is the
+// claim-time org attribution leg of the pre-claimed checkout: the gateway's
+// checkout patch stamps the CR, and the reconcile it triggers lands the org
+// on the pod, whose TRUSTED label is what the usage scraper bills.
+//
+// It ONLY fills an empty pod label, never rewrites one: an existing pod org
+// label is control-plane identity (namespace-derived, or stamped at claim
+// time), and the threat-model invariant is that a claim label can fill
+// attribution where none derives but can never override it. An org-less
 // claim (a still-buffered sandbox) never stamps anything, and a nil pod
 // (lost, being repended) is a no-op.
 func propagateOrgToHuskPod(claim *v1.Sandbox, pod *corev1.Pod) bool {
@@ -315,7 +320,7 @@ func propagateOrgToHuskPod(claim *v1.Sandbox, pod *corev1.Pod) bool {
 		return false
 	}
 	org := claim.Labels[tenant.OrgLabelKey]
-	if org == "" || pod.Labels[tenant.OrgLabelKey] == org {
+	if org == "" || pod.Labels[tenant.OrgLabelKey] != "" {
 		return false
 	}
 	if pod.Labels == nil {

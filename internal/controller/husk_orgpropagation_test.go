@@ -53,18 +53,18 @@ func TestPropagateOrgToHuskPod(t *testing.T) {
 		t.Error("nil pod must be a no-op")
 	}
 
-	// The pod org label is TRUSTED for billing: an existing DIFFERENT org on
-	// the pod is corrected to the claim's (the claim label is the authority
-	// the controller itself stamps and the gateway sets only at creation or
-	// checkout, both org-authenticated).
+	// The threat-model invariant: a claim label can FILL attribution where
+	// none derives, but can never OVERRIDE an existing pod org label (which
+	// is control-plane identity: namespace-derived or stamped at claim time).
+	// A tenant-set CR label must not rebill a pod to another org.
 	c4 := rdyClaim()
 	c4.Labels = tenant.OrgLabels("acme")
 	p4 := rdyPod(true)
 	p4.Labels = map[string]string{tenant.OrgLabelKey: "other"}
-	if !propagateOrgToHuskPod(c4, p4) {
-		t.Fatal("mismatched pod org must be corrected")
+	if propagateOrgToHuskPod(c4, p4) {
+		t.Fatal("an existing pod org label must never be rewritten")
 	}
-	if p4.Labels[tenant.OrgLabelKey] != "acme" {
-		t.Fatalf("pod org label = %q, want acme", p4.Labels[tenant.OrgLabelKey])
+	if p4.Labels[tenant.OrgLabelKey] != "other" {
+		t.Fatalf("pod org label = %q, want the original untouched", p4.Labels[tenant.OrgLabelKey])
 	}
 }
