@@ -766,6 +766,17 @@ gateway:
   # platform Secret or another tenant's object; GHSA-pgv2-9w24-j7wh). Use per-org
   # tenancy to enable secretRef and workspaces safely.
   singleTenantNamespace: ""
+  # Pre-claimed checkout: keep a small buffer of already-activated sandboxes
+  # per listed pool and serve eligible creates (no env, secrets, workspace,
+  # fan-out, or TTL) from it with a single attribution patch instead of the
+  # whole claim round trip. Requires singleTenantNamespace. Buffered sandboxes
+  # carry no org and bill nobody until claimed: deliberate platform cost,
+  # bounded by cap and maxAge. Default off (empty pools).
+  checkout:
+    pools: []
+    floor: 2
+    cap: 4
+    maxAge: 10m
   ingress:
     enabled: false
     className: ""

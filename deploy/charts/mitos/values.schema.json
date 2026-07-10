@@ -938,6 +938,34 @@
           "description": "When non-empty, pins all sandbox operations to this fixed namespace instead of per-org namespaces.",
           "type": "string"
         },
+        "checkout": {
+          "description": "Pre-claimed checkout: a buffer of already-activated sandboxes served to eligible creates with one attribution patch. Requires singleTenantNamespace; empty pools disables it.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pools": {
+              "description": "Pool names served by the checkout buffer; empty disables the feature.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "floor": {
+              "description": "Buffered sandboxes to keep ready per checkout pool.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "cap": {
+              "description": "Hard ceiling of buffered sandboxes per checkout pool.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxAge": {
+              "description": "Buffered sandboxes older than this are recycled (Go duration).",
+              "type": "string"
+            }
+          }
+        },
         "ingress": {
           "$ref": "#/definitions/ingress"
         }

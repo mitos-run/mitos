@@ -37,6 +37,12 @@ rules:
       - get
       - list
       - watch
+      # patch is the pre-claimed checkout's ONE hot-path write: the
+      # resourceVersion-guarded label patch that atomically drops the buffered
+      # label and stamps the org labels (attribution plus replica mutual
+      # exclusion). The gateway still gets no pod writes and no Secret writes;
+      # the controller propagates the org to the husk pod.
+      - patch
       - delete
   - apiGroups:
       - mitos.run

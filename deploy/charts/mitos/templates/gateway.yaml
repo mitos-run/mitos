@@ -40,6 +40,12 @@ spec:
             - --metrics-addr=:9100
             - --enforce-quota={{ .Values.gateway.enforce.enabled }}
             - --trusted-proxy-hops={{ int .Values.gateway.enforce.trustedProxyHops }}
+            {{- if .Values.gateway.checkout.pools }}
+            - --checkout-pools={{ join "," .Values.gateway.checkout.pools }}
+            - --checkout-floor={{ int .Values.gateway.checkout.floor }}
+            - --checkout-cap={{ int .Values.gateway.checkout.cap }}
+            - --checkout-max-age={{ .Values.gateway.checkout.maxAge }}
+            {{- end }}
           {{- if or .Values.database.dsnSecretRef.name (and .Values.telemetry.enabled .Values.telemetry.endpoint) .Values.gateway.singleTenantNamespace .Values.saas.apiKeyPepperSecret.name }}
           env:
             {{- include "mitos.database.env" . | nindent 12 }}

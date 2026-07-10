@@ -54,16 +54,21 @@ attribution patch.
    labels, so the usage scraper (trusted pod label) bills nobody and the console
    shows it to nobody; that unbilled window is deliberate platform cost. At
    checkout the CR patch stamps the org synchronously (runtime authz getOwned
-   needs it before the first exec arrives); the husk POD org label (billing) is
-   patched asynchronously with retry, and the janitor sweeps for org-labeled CRs
-   whose pod is still org-less so no claimed sandbox can dodge metering for more
-   than one sweep interval. Quota is checked before checkout, exactly where the
-   classic path checks it before the CR create.
-7. **Reaping: the buffered label exempts an entry from idle reap; the janitor
-   terminates buffered sandboxes older than maxAge.** A buffered sandbox is idle
-   by definition, so without the exemption the idle reaper would drain the
-   buffer. maxAge bounds staleness (clock and CRNG were stepped at activation;
-   the VM runs live while buffered) and bounds leak size if refill misbehaves.
+   needs it before the first exec arrives). (Amended during implementation:)
+   the husk POD org label (billing) is propagated by the CONTROLLER, not the
+   gateway: the reconcile the checkout patch itself triggers copies the claim's
+   org onto the pod (`propagateOrgToHuskPod`), which ONLY fills an empty pod
+   label so control-plane-derived attribution is never overridden. The gateway
+   therefore needs no pod RBAC at all, and the trusted-label chain (controller
+   writes pod labels) is unchanged. Quota is checked before checkout, exactly
+   where the classic path checks it before the CR create.
+7. **Reaping: the janitor terminates buffered sandboxes older than maxAge; no
+   idle-reap exemption is needed.** (Amended during implementation.) An idle or
+   lifetime reaper deleting a buffered sandbox is HARMLESS: the checkout patch
+   tolerates NotFound and moves to the next entry, the reconcile prunes the
+   cache, and the refill replaces the capacity. maxAge bounds staleness (clock
+   and CRNG were stepped at activation; the VM runs live while buffered) and
+   bounds leak size if refill misbehaves.
 8. **Health: the reconcile prunes non-Ready buffer entries.** A husk that dies
    while buffered is dropped from the buffer at the next 15 s pass; a pop that
    races a just-died sandbox surfaces to the tenant like any post-create death
@@ -158,7 +163,8 @@ feature is capability-neutral (no console surface change).
   prunes non-Ready, reaps over-age, re-patches org-less pods; refill respects
   floor/cap and backs off on failures; org labels land on CR before the
   response returns.
-- kind e2e: a checkout-enabled pool serves a create from the buffer (observable
-  via the buffered label lifecycle) and a create with env falls back classic.
+- (Amended during implementation:) no kind gateway job exists and standing one
+  up is out of scope; the hosted surface's proof is the unit suite plus prod
+  acceptance, matching how the rest of the gateway shipped.
 - Prod acceptance: bench/tti-latency.py before/after, plus one burst run to
   measure the fallback cost honestly.
