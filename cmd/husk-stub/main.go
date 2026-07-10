@@ -193,6 +193,9 @@ func run() error {
 		enableEgress       = flag.Bool("enable-egress-filter", true, "Program the in-pod nftables egress filter (default-deny + metadata block) for the activated VM. Requires NET_ADMIN in the pod netns. Default true (the husk isolation guarantee).")
 		multiVM            = flag.Bool("multi-vm", false, "EXPERIMENTAL, default false: opt into the multi-VM-per-pod execution mode (#764), running many same-tenant CoW forks inside ONE husk pod instead of one pod per VM. Increment 1 wires only a default-off scaffold; false (the default, and the only value the controller emits) keeps the single-VM behavior byte-for-byte. Not a secret.")
 		liveCowFork        = flag.Bool("live-cow-fork", false, "EXPERIMENTAL, default false: opt a CO-LOCATED fork child onto the live copy-on-write path (share the PARENT's resident guest memory via the patched Firecracker memfd + userfaultfd write-protect handler) instead of restoring from the disk fork snapshot (milestone m4b). SEPARATE from --multi-vm so it can be deployed off and canaried independently. Off (the default, and the only value the controller emits unless the operator opts in) keeps the co-located fork on the disk snapshot restore byte-for-byte. No-op off Linux (userfaultfd write-protect is Linux-only), failing closed to the disk restore. Not a secret.")
+		prepareEgressLink  = flag.Bool("prepare-egress-link", false, "EXPERIMENTAL, DEFAULT OFF: bring the pod's default-VM tap up while the pod is DORMANT, under a default-deny policy, so a claim pays only the atomic nft transaction that installs the tenant's policy instead of also paying the tap create (measured: the link half is about two thirds of the egress_filter stage). Requires --multi-vm and --in-pod-guest-ip. Off keeps the whole filter on the activate path byte-for-byte. Not a secret.")
+		inPodGuestIP       = flag.String("in-pod-guest-ip", "", "the fixed in-pod guest IP of this pod's default VM (the same value the controller sends in the activate request). Needed BEFORE that request arrives by --prepare-egress-link, because the tap name derives from it. Config, not a secret.")
+		inPodGatewayIP     = flag.String("in-pod-gateway-ip", "", "the fixed in-pod gateway IP paired with --in-pod-guest-ip. Config, not a secret.")
 		prewarmChild       = flag.Bool("prewarm-child", false, "EXPERIMENTAL, DEFAULT OFF: keep ONE dormant generic co-located child Firecracker pre-prepared per multi-vm pod so a fork ADOPTS the ready child (fc_boot=0, prepare off the hot path) instead of booting one at fork time. Requires --multi-vm; a fresh slot re-warms async, a miss falls back to the on-demand prepare. Not a secret.")
 		liveCowChildImport = flag.Bool("live-cow-child-import", false, "EXPERIMENTAL, default false: opt the live-cow fork onto the VMSTATE-ONLY capture (skip the ~364ms disk mem write). REQUIRES a shipped child-side memfd-import Firecracker patch: the co-located child boots its guest RAM from the source shared memfd instead of the disk fork snapshot. The currently shipped patched binary patches the SOURCE (restore) side only, so leave this OFF; with it off an armed --live-cow-fork source still writes the disk mem, so every co-located child restores from disk and the fork never hangs. Turn on ONLY once a child-side import binary is shipped. Not a secret.")
 	)
@@ -437,6 +440,9 @@ func run() error {
 		// the fork never hangs. Turn on ONLY once a child-side import binary ships.
 		LiveCowChildImport: *liveCowChildImport,
 		PrewarmChild:       *prewarmChild,
+		PrepareEgressLink:  *prepareEgressLink,
+		InPodGuestIP:       *inPodGuestIP,
+		InPodGatewayIP:     *inPodGatewayIP,
 	})
 	// Publish the constructed stub to the already-serving metering source.
 	publishedStub.Store(stub)

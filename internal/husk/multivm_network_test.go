@@ -208,3 +208,141 @@ func TestMultiVMActivateProgramsDistinctTapPerVMID(t *testing.T) {
 		t.Errorf("the two VMs must be handed distinct guest IPs, got %v", seen)
 	}
 }
+
+// --- prepare-time egress link ------------------------------------------------------
+
+// countIPBatch counts the ip -batch (tap create) invocations.
+func countIPBatch(calls []recordedCall) int {
+	n := 0
+	for _, c := range calls {
+		if len(c.argv) > 0 && strings.Contains(c.argv[0], "ip") && strings.Contains(strings.Join(c.argv, " "), "-batch") {
+			n++
+		}
+	}
+	return n
+}
+
+func countNft(calls []recordedCall) int {
+	n := 0
+	for _, c := range calls {
+		if len(c.argv) > 0 && strings.Contains(c.argv[0], "nft") {
+			n++
+		}
+	}
+	return n
+}
+
+// newPreparedLinkStub builds a multi-VM stub that brings its default VM's tap up while
+// dormant, over a recording net runner.
+func newPreparedLinkStub(t *testing.T, rr *recordingRunner) *Stub {
+	t.Helper()
+	start := func(_ firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil }
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:             start,
+		Ready:             readyOK,
+		Notify:            (&fakeNotifier{}).notify,
+		Verify:            verifyOK,
+		MultiVM:           true,
+		PrepareEgressLink: true,
+		InPodGuestIP:      "10.200.0.2",
+		InPodGatewayIP:    "10.200.0.1",
+	})
+	s.SetNetRunner(rr.run)
+	return s
+}
+
+// TestPrepareBringsTheTapUpDormantAndActivateOnlyInstallsThePolicy is the point of the
+// split. A pod that opted in pays the tap create while it is DORMANT, so the claim's
+// egress_filter stage is one atomic nft transaction and nothing else. The dormant tap
+// carries a default-deny policy, so the VM behind it is never unfiltered.
+func TestPrepareBringsTheTapUpDormantAndActivateOnlyInstallsThePolicy(t *testing.T) {
+	var rr recordingRunner
+	s := newPreparedLinkStub(t, &rr)
+	ctx := context.Background()
+
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if got := countIPBatch(rr.calls); got != 1 {
+		t.Errorf("Prepare ran %d tap creates, want exactly 1", got)
+	}
+	if got := countNft(rr.calls); got != 1 {
+		t.Errorf("Prepare installed %d policies, want exactly 1 (the dormant default-deny)", got)
+	}
+	tap := netconf.DeriveTapName("10.200.0.2")
+	if !strings.Contains(strings.Join(rr.calls[0].argv, " "), tap) {
+		t.Errorf("Prepare did not touch the pod's tap %q: %v", tap, rr.calls[0].argv)
+	}
+
+	prepared := len(rr.calls)
+	if _, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/snap", Network: baseNet()}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	claim := rr.calls[prepared:]
+	if got := countIPBatch(claim); got != 0 {
+		t.Errorf("the claim re-created the tap %d times; the dormant pod already brought it up", got)
+	}
+	if got := countNft(claim); got != 1 {
+		t.Errorf("the claim ran %d nft transactions, want exactly 1 (replace the policy): %v", got, claim)
+	}
+	if len(claim) != 1 {
+		t.Errorf("the claim ran %d commands, want exactly 1: %v", len(claim), claim)
+	}
+}
+
+// TestPrepareTimeLinkIsOptIn: a stub that did not opt in must behave byte-for-byte as
+// before, doing all of it at activate.
+func TestPrepareTimeLinkIsOptIn(t *testing.T) {
+	var rr recordingRunner
+	start := func(_ firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil }
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start: start, Ready: readyOK, Notify: (&fakeNotifier{}).notify, Verify: verifyOK,
+		MultiVM: true,
+	})
+	s.SetNetRunner(rr.run)
+	ctx := context.Background()
+
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(rr.calls) != 0 {
+		t.Fatalf("Prepare touched the network without opting in: %v", rr.calls)
+	}
+	if _, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/snap", Network: baseNet()}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if got := countIPBatch(rr.calls); got != 1 {
+		t.Errorf("activate ran %d tap creates, want 1", got)
+	}
+	if got := countNft(rr.calls); got != 1 {
+		t.Errorf("activate ran %d nft transactions, want 1", got)
+	}
+}
+
+// TestAFailedClaimPolicyRebuildsTheLinkOnRetry: applyEgressPolicy fails closed by
+// tearing the tap down, so the prepared marker must be cleared. Otherwise the retry
+// would install a policy on a tap that no longer exists and the pod would be poisoned.
+func TestAFailedClaimPolicyRebuildsTheLinkOnRetry(t *testing.T) {
+	var rr recordingRunner
+	s := newPreparedLinkStub(t, &rr)
+	ctx := context.Background()
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	inst := s.instanceFor(defaultVMID, false)
+	if inst == nil || inst.preparedLinkTap == "" {
+		t.Fatal("Prepare did not record the prepared tap")
+	}
+
+	// A claim whose policy is rejected: the CIDR list cannot be parsed.
+	if _, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/snap", Network: baseNet(), AllowCIDRs: []string{"not-a-cidr"}}); err == nil {
+		t.Fatal("Activate accepted a malformed CIDR allowlist")
+	}
+	if inst.preparedLinkTap != "" {
+		t.Error("a failed claim left the prepared-link marker set; the retry would skip rebuilding a torn-down tap")
+	}
+	if inst.activeTap != "" {
+		t.Error("a failed claim left activeTap set for a tap that was torn down")
+	}
+}

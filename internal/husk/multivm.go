@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
@@ -371,7 +372,53 @@ func (s *Stub) prepareInstanceOpt(ctx context.Context, id vmID, opts prepareOpts
 		}
 	}
 
+	// Bring THIS pod's default-VM tap up while it is dormant, under a DEFAULT-DENY
+	// policy, so the claim pays only the atomic nft transaction that installs the
+	// tenant's policy. Opt-in (Options.PrepareEgressLink), default VM only, and only
+	// when the in-pod link is configured; otherwise activate does the whole thing as
+	// before. FAIL CLOSED: ensureEgressLink tears the tap down on any error and we
+	// refuse to go dormant, so the pool never offers a pod whose datapath is
+	// half-built. A dormant tap is never a hazard: nothing is loaded behind it, and
+	// the policy on it denies everything.
+	if err := s.prepareEgressLinkFor(ctx, id, inst); err != nil {
+		if inst.vm != nil {
+			_ = inst.vm.Close()
+			inst.vm = nil
+		}
+		return err
+	}
+
 	inst.state = StateDormant
+	return nil
+}
+
+// prepareEgressLinkFor brings up the default VM's tap with a default-deny policy while
+// the pod is dormant, when the stub opted in. A no-op otherwise, and never for a
+// secondary (co-located fork child) VM, whose tap is derived per fork at activate.
+func (s *Stub) prepareEgressLinkFor(ctx context.Context, id vmID, inst *vmInstance) error {
+	// !s.multiVM is implied today (only the multi-VM Prepare reaches prepareInstance),
+	// but it is stated rather than relied upon: the single-VM Activate path does not
+	// consult preparedLinkTap, so a dormant tap it never reuses would be dead weight.
+	if !s.prepareEgressLink || !s.multiVM || id != defaultVMID || s.netRunner == nil || s.inPodGuestIP == "" {
+		return nil
+	}
+	tap := netconf.DeriveTapName(s.inPodGuestIP)
+	cfg := NetfilterConfig{
+		Tap:     tap,
+		GuestIP: net.ParseIP(s.inPodGuestIP),
+		HostIP:  net.ParseIP(s.inPodGatewayIP),
+		Egress:  v1.EgressDeny,
+	}
+	if err := ensureEgressLink(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
+		return fmt.Errorf("husk: prepare in-pod egress link for vm %q: %w", id, err)
+	}
+	if err := applyEgressPolicy(ctx, s.netRunner, cfg); err != nil {
+		return fmt.Errorf("husk: prepare default-deny egress policy for vm %q: %w", id, err)
+	}
+	// Record it on BOTH fields: activeTap so Close tears it down even if this pod is
+	// never claimed, preparedLinkTap so activate knows it can skip the link setup.
+	inst.activeTap = tap
+	inst.preparedLinkTap = tap
 	return nil
 }
 
@@ -508,8 +555,24 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		cfg.Tap = tap
 		cfg.GuestIP = net.ParseIP(perNet.GuestIP)
 		cfg.HostIP = net.ParseIP(perNet.GatewayIP)
-		if err := applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
-			werr := fmt.Errorf("husk: apply in-pod egress filter for vm %q: %w", id, err)
+		// When this instance brought the SAME tap up while dormant, the claim pays only
+		// the nft transaction that REPLACES the default-deny policy with the tenant's.
+		// nft applies it atomically, so there is no window in which the VM is
+		// unfiltered. Any other tap (a fork child's, or a pod that did not opt in) takes
+		// the full path. Both halves fail closed by tearing the tap down, so clear the
+		// prepared marker first: after a failure the link no longer exists and the next
+		// attempt must rebuild it.
+		prepared := inst.preparedLinkTap != "" && inst.preparedLinkTap == tap
+		inst.preparedLinkTap = ""
+		var ferr error
+		if prepared {
+			ferr = applyEgressPolicy(ctx, s.netRunner, cfg)
+		} else {
+			ferr = applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg)
+		}
+		if ferr != nil {
+			inst.activeTap = ""
+			werr := fmt.Errorf("husk: apply in-pod egress filter for vm %q: %w", id, ferr)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
 		}
 		// Pin the baked NIC to THIS VM's tap so the restored VM's NIC is backed by
