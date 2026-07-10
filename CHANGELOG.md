@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.39.0](https://github.com/mitos-run/mitos/compare/v1.38.1...v1.39.0) (2026-07-10)
+
+
+### Features
+
+* **gateway:** let an operator grant an org a tier above the free default ([#881](https://github.com/mitos-run/mitos/issues/881)) ([475ed4a](https://github.com/mitos-run/mitos/commit/475ed4a6991308ef9b1a894a8a4f50c3cfc1b757))
+* **mcp:** screen tool calls against vendored ATR rules in report mode ([#849](https://github.com/mitos-run/mitos/issues/849)) ([f4bf605](https://github.com/mitos-run/mitos/commit/f4bf605e98905ff66e2be963ea1aa3ec97a5fb00))
+
+
+### Bug Fixes
+
+* **guest:** reseed the run_code kernel PRNGs after a fork ([#882](https://github.com/mitos-run/mitos/issues/882)) ([6b23d6a](https://github.com/mitos-run/mitos/commit/6b23d6a20abdb3c3375d53110a375442c7f2386d))
+* **sdk:** pool HTTP connections so a create does not pay two TLS handshakes ([#877](https://github.com/mitos-run/mitos/issues/877)) ([d3ef408](https://github.com/mitos-run/mitos/commit/d3ef408099aef0368f599173af66ffb1a3e13591))
+* **usage:** bill cumulative-counter deltas that span a window boundary ([#822](https://github.com/mitos-run/mitos/issues/822)) ([737ac32](https://github.com/mitos-run/mitos/commit/737ac32a79eec287c6c45245f3774771e109e332)), closes [#755](https://github.com/mitos-run/mitos/issues/755)
+
 ## [1.38.1](https://github.com/mitos-run/mitos/compare/v1.38.0...v1.38.1) (2026-07-09)
 
 

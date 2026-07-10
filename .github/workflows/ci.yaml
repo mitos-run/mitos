@@ -181,6 +181,10 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
       - run: pytest tests/ -v
+      # The in-guest run_code kernel driver ships in the guest rootfs, not in the SDK,
+      # and its fork-reseed tests stub jupyter_client so they need no kernel deps. They
+      # ran nowhere before this step; the PRNG-sharing bug they gate is a real one.
+      - run: pytest ../../guest/rootfs/kernel_driver_test.py -v
 
   typescript-sdk:
     runs-on: ubuntu-latest

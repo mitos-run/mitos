@@ -197,12 +197,22 @@ func (tm *TemplateManager) startWorkloadGRPC(vsockPath string, w *WorkloadSpec) 
 // start, so every fork wakes with a warm kernel instead of paying the ~5s lazy
 // start on its first run_code.
 //
-// FORK-CORRECTNESS INVARIANT: this cell must NOT touch random, numpy, uuid, or
-// anything else that draws randomness. CPython seeds its Mersenne Twister
-// lazily from os.urandom on first use; keeping the PRNGs unseeded at snapshot
-// time means each fork seeds fresh after the per-fork CRNG reseed instead of
-// inheriting one shared PRNG state (docs/fork-correctness.md, run_code kernel
-// caveat). Pinned by TestWarmKernelCode_NeverDrawsRandomness.
+// FORK-CORRECTNESS: this cell must NOT touch random, numpy, uuid, or anything else
+// that draws randomness. That is hygiene, and it is NOT sufficient on its own.
+//
+// The comment here used to claim that CPython seeds its Mersenne Twister lazily on
+// first use, so a warmup cell that drew no randomness left the kernel's PRNGs unseeded
+// in the snapshot. That is FALSE. random.Random seeds itself from os.urandom in its
+// CONSTRUCTOR, and the random module builds its shared instance at IMPORT. ipykernel's
+// own import chain imports random, so the Mersenne state is already fixed by the time
+// this cell runs. Measured against prod with warmKernel on, three INDEPENDENT sandboxes
+// each returned random.random() == 0.993005259705148.
+//
+// The actual mitigation lives in the guest: /opt/mitos/kernel_driver.py installs a
+// SIGUSR2 handler and reseeds the kernel's Python PRNGs before the next cell, after the
+// agent has credibly reseeded the CRNG (docs/fork-correctness.md, run_code kernel).
+// Keeping this cell inert still matters: it keeps the snapshot free of any randomness
+// the driver does not know how to reseed. Pinned by TestWarmKernelCode_NeverDrawsRandomness.
 const warmKernelCode = "pass"
 
 // warmKernelTimeoutSecs bounds the warmup cell. The ipykernel boot is ~5s on a
