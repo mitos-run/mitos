@@ -2,6 +2,8 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -158,6 +160,99 @@ func (b *checkoutBuffer) stampOrg(ctx context.Context, ns, org string, e buffere
 			"sandbox", e.name, "error", err.Error())
 	}
 	return false
+}
+
+// refillBackoffBase and refillBackoffCap bound the retry cadence after
+// consecutive refill failures (the #894 lesson: a refill that cannot succeed
+// must never spin at full cadence).
+const (
+	refillBackoffBase = time.Second
+	refillBackoffCap  = time.Minute
+)
+
+// reconcilePool is one pass of the buffer loop for one pool: count the
+// cluster's buffered sandboxes and refill toward the floor, at most one
+// create per pass so two replicas converge without a thundering herd.
+func (b *checkoutBuffer) reconcilePool(ctx context.Context, pool string) {
+	ns := b.k.singleTenantNamespace
+	var list v1.SandboxList
+	if err := b.k.c.List(ctx, &list, client.InNamespace(ns),
+		client.MatchingLabels{BufferedLabelKey: "true", bufferedPoolLabelKey: pool}); err != nil {
+		slog.Warn("checkout buffer list failed", "pool", pool, "error", err.Error())
+		return
+	}
+	count := len(list.Items)
+	if count >= b.cfg.Floor || count >= b.cfg.Cap {
+		return
+	}
+	b.mu.Lock()
+	wait := b.k.now().Before(b.nextRefill[pool])
+	b.mu.Unlock()
+	if wait {
+		return
+	}
+	if err := b.refillOne(ctx, pool); err != nil {
+		b.mu.Lock()
+		b.refillFails[pool]++
+		backoff := refillBackoffBase << (b.refillFails[pool] - 1)
+		if backoff <= 0 || backoff > refillBackoffCap {
+			backoff = refillBackoffCap
+		}
+		b.nextRefill[pool] = b.k.now().Add(backoff)
+		b.mu.Unlock()
+		slog.Warn("checkout refill failed; backing off", "pool", pool, "error", err.Error())
+		return
+	}
+	b.mu.Lock()
+	b.refillFails[pool] = 0
+	delete(b.nextRefill, pool)
+	b.mu.Unlock()
+}
+
+// refillOne creates ONE buffered sandbox through the normal create machinery
+// (watch-before-create and all): buffered + pool labels, NO org labels, so it
+// bills nobody and matches no caller until checkout.
+func (b *checkoutBuffer) refillOne(ctx context.Context, pool string) error {
+	ns := b.k.singleTenantNamespace
+	sb := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      generateName(),
+			Namespace: ns,
+			Labels:    map[string]string{BufferedLabelKey: "true", bufferedPoolLabelKey: pool},
+		},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: pool}}},
+	}
+	resp, err := b.k.createSandboxAndAwait(ctx, sb, b.k.now())
+	if err != nil {
+		return err
+	}
+	if resp.Status != http.StatusCreated {
+		return fmt.Errorf("buffered create for pool %q did not become ready (status %d)", pool, resp.Status)
+	}
+	var payload struct {
+		ID       string `json:"id"`
+		Endpoint string `json:"endpoint"`
+		Token    string `json:"token"`
+	}
+	if err := json.Unmarshal(resp.Body, &payload); err != nil {
+		return fmt.Errorf("parse buffered create payload: %w", err)
+	}
+	// One off-hot-path read to snapshot the resourceVersion (the checkout
+	// patch's optimistic lock) and the backing pod name.
+	var cur v1.Sandbox
+	if err := b.k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: payload.ID}, &cur); err != nil {
+		return fmt.Errorf("snapshot buffered sandbox: %w", err)
+	}
+	b.add(bufferedSandbox{
+		name:            payload.ID,
+		pool:            pool,
+		endpoint:        payload.Endpoint,
+		token:           payload.Token,
+		resourceVersion: cur.ResourceVersion,
+		podName:         cur.Status.Pod,
+		createdAt:       cur.CreationTimestamp.Time,
+	})
+	return nil
 }
 
 // eligible reports whether this create may be served from the buffer: a

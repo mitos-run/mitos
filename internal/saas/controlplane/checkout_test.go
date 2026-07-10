@@ -2,6 +2,7 @@ package controlplane
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -209,6 +210,91 @@ func TestCheckoutEmptyBufferFallsBackClassic(t *testing.T) {
 	}
 	if resp.Status != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", resp.Status, resp.Body)
+	}
+}
+
+// TestRefillFillsToFloorAndStopsAtIt asserts reconcilePool creates buffered
+// sandboxes (org-less, buffered+pool labels) until the cluster count reaches
+// the floor, one per pass so two replicas converge without a thundering herd,
+// and a pass at the floor creates none.
+func TestRefillFillsToFloorAndStopsAtIt(t *testing.T) {
+	c := newFakeClient(t, poolInNs("mitos", "python"))
+	cp := New(c,
+		WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second),
+		WithSingleTenantNamespace("mitos"),
+		WithCheckout(CheckoutConfig{Pools: []string{"python"}, Floor: 2, Cap: 4, MaxAge: 10 * time.Minute}))
+
+	countBuffered := func() int {
+		var list v1.SandboxList
+		if err := c.List(context.Background(), &list, client.InNamespace("mitos"),
+			client.MatchingLabels{BufferedLabelKey: "true"}); err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		return len(list.Items)
+	}
+
+	for i := 0; i < 2; i++ {
+		stop := flipToReadyWhenCreatedInNs(t, c, "mitos", "10.0.0.5:9091", "tok-refill")
+		cp.checkout.reconcilePool(context.Background(), "python")
+		stop()
+	}
+	if n := countBuffered(); n != 2 {
+		t.Fatalf("buffered count after two passes = %d, want floor 2", n)
+	}
+	cp.checkout.reconcilePool(context.Background(), "python")
+	if n := countBuffered(); n != 2 {
+		t.Fatalf("buffered count after an at-floor pass = %d, want 2 (no over-refill)", n)
+	}
+	e, ok := cp.checkout.pop("python")
+	if !ok {
+		t.Fatal("refill did not cache a claimable entry")
+	}
+	if e.token != "tok-refill" || e.endpoint != "10.0.0.5:9091" || e.resourceVersion == "" {
+		t.Fatalf("cached entry incomplete: %+v", e)
+	}
+	// The buffered CRs carry NO org label: they bill nobody and match no caller.
+	var list v1.SandboxList
+	_ = c.List(context.Background(), &list, client.InNamespace("mitos"), client.MatchingLabels{BufferedLabelKey: "true"})
+	for _, sb := range list.Items {
+		if sb.Labels[tenant.OrgLabelKey] != "" {
+			t.Fatalf("buffered sandbox %s carries an org label %q", sb.Name, sb.Labels[tenant.OrgLabelKey])
+		}
+	}
+}
+
+// TestRefillBacksOffAfterFailure asserts a failed refill sets a backoff: the
+// next pass makes NO create attempt until the backoff expires (the #894
+// lesson: a refill that cannot succeed must never spin at full cadence). The
+// create itself errors so no CR lingers to satisfy the floor by accident;
+// only the backoff can explain the second pass staying quiet.
+func TestRefillBacksOffAfterFailure(t *testing.T) {
+	var creates atomic.Int64
+	base := fakeclient.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&v1.Sandbox{}).
+		WithObjects(poolInNs("mitos", "python")).
+		Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*v1.Sandbox); ok {
+				creates.Add(1)
+				return errors.New("apiserver unavailable")
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+	})
+	cp := New(c,
+		WithPollInterval(5*time.Millisecond), WithReadyTimeout(50*time.Millisecond),
+		WithSingleTenantNamespace("mitos"),
+		WithCheckout(CheckoutConfig{Pools: []string{"python"}, Floor: 1, Cap: 2, MaxAge: 10 * time.Minute}))
+
+	cp.checkout.reconcilePool(context.Background(), "python")
+	if n := creates.Load(); n != 1 {
+		t.Fatalf("first pass made %d create attempts, want 1", n)
+	}
+	cp.checkout.reconcilePool(context.Background(), "python")
+	if n := creates.Load(); n != 1 {
+		t.Fatalf("pass during backoff made a create attempt (total %d), want none", n)
 	}
 }
 
