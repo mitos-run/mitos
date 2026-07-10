@@ -327,6 +327,16 @@ func currentHuskTestCheckpointer() func(ctx context.Context, claim *v1.Sandbox, 
 }
 
 // setHuskTestActivator installs the husk activator the suite reconciler uses.
+// setHuskTestTokenWriter installs a fake per-sandbox token Secret writer on the husk
+// claim reconciler for one test, or restores the real one with nil.
+// huskClaim is the husk-enabled claim reconciler the suite registers; tests reach it
+// to install per-test seams.
+var huskClaim *controller.SandboxReconciler
+
+func setHuskTestTokenWriter(fn func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error) {
+	huskClaim.SetEnsureTokenSecretForTest(fn)
+}
+
 func setHuskTestActivator(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
 	huskTestActivatorMu.Lock()
 	defer huskTestActivatorMu.Unlock()
@@ -657,7 +667,7 @@ func TestMain(m *testing.M) {
 
 	// A husk-enabled claim reconciler that handles ONLY husk-test claims. Its
 	// activator is swappable per test via setHuskTestActivator.
-	huskClaim := &controller.SandboxReconciler{
+	huskClaim = &controller.SandboxReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
 		APIReader:         mgr.GetAPIReader(),

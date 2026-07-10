@@ -21,6 +21,7 @@ import (
 	v1 "mitos.run/mitos/api/v1"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"mitos.run/mitos/internal/controller"
 	"mitos.run/mitos/internal/husk"
 	"mitos.run/mitos/internal/tenant"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
@@ -553,5 +555,79 @@ func TestHuskClaimActivateFailureNotReady(t *testing.T) {
 	}
 	if again.Status.Phase == v1.SandboxReady {
 		t.Errorf("claim eventually went Ready despite repeated activate failures: %+v", again.Status)
+	}
+}
+
+// TestHuskClaimActivateFailureJoinsTheTokenSecretWrite is a data-integrity gate.
+//
+// The warm-claim path writes the per-sandbox token Secret CONCURRENTLY with the
+// activate RPC. If a failed activate returned while that write was still in flight,
+// the writer would still be holding THIS pass's token; the next pass mints a NEW token,
+// activates the husk with it, and rewrites the SAME Secret. Whichever write lands last
+// wins, so a stale writer landing last leaves a Ready claim whose Secret holds a token
+// the husk never received, and every tenant call with it is rejected.
+//
+// The fake writer blocks until released and deliberately ignores its context, so the
+// only way the reconcile can proceed is by JOINING it. If the reconcile returned early,
+// the claim would reach Pending while the writer was still blocked.
+func TestHuskClaimActivateFailureJoinsTheTokenSecretWrite(t *testing.T) {
+	makeDormantHuskPod(t, "husk-join-pool", "10.4.5.9")
+
+	act := &fakeActivator{result: husk.ActivateResult{OK: false, Error: "load snapshot: boom"}}
+	setHuskTestActivator(act.activate)
+	t.Cleanup(func() { setHuskTestActivator(nil) })
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var cancelSeen atomic.Bool
+
+	setHuskTestTokenWriter(func(ctx context.Context, _ client.Client, _ client.Object, _, _, _ string) error {
+		// Only the FIRST pass blocks and is observed. The claim is retryable, so the
+		// controller reconciles it again; a later pass carries a fresh, uncancelled
+		// context and would otherwise clobber what the first pass recorded.
+		first := false
+		once.Do(func() {
+			first = true
+			close(started)
+		})
+		if !first {
+			return nil
+		}
+		<-release // ignore ctx: the reconcile must wait for us regardless
+		cancelSeen.Store(ctx.Err() != nil)
+		return ctx.Err()
+	})
+	t.Cleanup(func() { setHuskTestTokenWriter(nil) })
+
+	claim := makeHuskClaim(t, "husk-join", v1.SandboxSpec{})
+
+	select {
+	case <-started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the token Secret write never started; the claim never reached activate")
+	}
+
+	// While the writer is blocked, the reconcile must NOT have persisted its outcome.
+	// Without the join it returns here and stamps Pending with the writer still running.
+	time.Sleep(750 * time.Millisecond)
+	var mid v1.Sandbox
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: "default"}, &mid); err != nil {
+		t.Fatal(err)
+	}
+	if mid.Status.Phase == v1.SandboxPending || mid.Status.Phase == v1.SandboxFailed {
+		t.Fatalf("claim reached phase %q while the token Secret write was still in flight: the reconcile did not join the writer", mid.Status.Phase)
+	}
+
+	close(release)
+
+	got := waitClaimPhase(t, claim.Name, func(c *v1.Sandbox) bool {
+		return c.Status.Phase == v1.SandboxPending || c.Status.Phase == v1.SandboxFailed
+	})
+	if got.Status.Phase == v1.SandboxReady {
+		t.Errorf("claim went Ready despite an activate failure: %+v", got.Status)
+	}
+	if !cancelSeen.Load() {
+		t.Error("the reconcile joined the writer but never cancelled its context, so a slow write cannot be cut short")
 	}
 }

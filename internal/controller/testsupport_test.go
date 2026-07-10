@@ -154,6 +154,13 @@ func (r *SandboxReconciler) OnlyLabels(labels ...string) {
 	r.controllerName = "sandbox-husk"
 }
 
+// SetEnsureTokenSecretForTest injects a fake per-sandbox token Secret writer, so a
+// test can control exactly when that concurrent write completes. Nil restores the
+// real ensureSandboxTokenSecret.
+func (r *SandboxReconciler) SetEnsureTokenSecretForTest(fn func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error) {
+	r.ensureTokenSecret = fn
+}
+
 // SetActivateForTest injects a fake husk activator (the test seam).
 func (r *SandboxReconciler) SetActivateForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
 	r.Activate = fn

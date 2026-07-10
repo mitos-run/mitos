@@ -120,6 +120,12 @@ type SandboxReconciler struct {
 	forkSnapshot       huskForkSnapshotter
 	removeForkSnapshot huskForkSnapshotRemover
 
+	// ensureTokenSecret writes the per-sandbox token Secret. Nil defaults to
+	// ensureSandboxTokenSecret. Tests inject a fake to control when the concurrent
+	// write completes, which is the only way to assert that the warm-claim path
+	// JOINS that write before it returns.
+	ensureTokenSecret func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error
+
 	// MultiVMFork routes a husk fork child into an ADDITIONAL VM spawned INSIDE the
 	// SOURCE pod (SpawnVMOnHusk) instead of a brand-new child pod, when the source
 	// pod is multi-VM capable. EXPERIMENTAL, DEFAULT OFF: off is byte-for-byte the
@@ -960,12 +966,24 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 	// activate-failure path below mutates claim.Status and returns WITHOUT joining, so
 	// handing the live object to a still-running writer would share mutable state
 	// across goroutines with no synchronization.
+	//
+	// The write runs under a CANCELLABLE context and every path out of this function
+	// JOINS it. A reconcile that returned while the write was still in flight would
+	// leave a writer holding an OLD token: the retry mints a NEW one and rewrites the
+	// SAME Secret, and whichever write lands last wins. The stale one landing last
+	// leaves a Ready claim whose Secret holds a token the husk never received.
+	writeTokenSecret := r.ensureTokenSecret
+	if writeTokenSecret == nil {
+		writeTokenSecret = ensureSandboxTokenSecret
+	}
+	tokenCtx, cancelTokenWrite := context.WithCancel(ctx)
+	defer cancelTokenWrite()
 	tokenErrCh := make(chan error, 1)
 	tokenStart := time.Now()
 	tokenOwner := claim.DeepCopy()
 	tokenSecretName := claim.Name + tokenSecretSuffix
 	go func() {
-		tokenErrCh <- ensureSandboxTokenSecret(ctx, r.Client, tokenOwner, tokenSecretName, apiToken, endpoint)
+		tokenErrCh <- writeTokenSecret(tokenCtx, r.Client, tokenOwner, tokenSecretName, apiToken, endpoint)
 	}()
 
 	mark = time.Now()
@@ -987,6 +1005,16 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 		}
 		logger.Info("husk activation failed, pending", "pod", pod.Name, "node", pod.Spec.NodeName, "detail", msg)
 		recordClaimError(claim.Spec.Source.PoolRef.Name, "activate")
+		// Join the in-flight token Secret write BEFORE returning. The next pass mints a
+		// new token and rewrites the same Secret; a writer still holding this pass's
+		// token could otherwise land after it and leave the Ready claim with a token the
+		// husk never received. Cancelling first makes the join prompt.
+		cancelTokenWrite()
+		if tokErr := <-tokenErrCh; tokErr != nil && !errors.Is(tokErr, context.Canceled) {
+			// The claim is pending anyway; the next pass re-mints and overwrites. Never
+			// log the token VALUE.
+			logger.Error(tokErr, "token secret write failed while pending the claim", "secret", tokenSecretName)
+		}
 		// Release the claim label stamped before activation so this pod returns to
 		// the dormant pool and can be retried (by this claim or another). Without
 		// this a stamped-but-not-activated pod is orphaned forever, leaking warm
