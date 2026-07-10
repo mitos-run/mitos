@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -36,6 +37,21 @@ func init() {
 	// v1: the consolidated three-noun API (issue #23, ADR 0007). One served
 	// version equals stored version; v1alpha1 and v1alpha2 are removed.
 	utilruntime.Must(v1.AddToScheme(scheme))
+}
+
+// validatePrepareFlags rejects prepare-time flag combinations that would silently do
+// nothing, so an operator asking for a latency optimization is never left with a pod
+// shape that cannot deliver it. It runs AFTER resolveRunMode, so enableHuskPods already
+// reflects the resolved path (false on --enable-raw-forkd or --mock).
+//
+// --husk-prepare-egress-link needs BOTH --multi-vm-fork (the stub prepares its tap only
+// on the multi-VM Prepare path) AND the husk-pods run path (the raw-forkd path never
+// creates a husk pod, so there is no pod to prepare a tap in).
+func validatePrepareFlags(prepareEgressLink, multiVMFork, enableHuskPods bool) error {
+	if prepareEgressLink && (!multiVMFork || !enableHuskPods) {
+		return fmt.Errorf("--husk-prepare-egress-link requires --multi-vm-fork AND the husk-pods run path (not --enable-raw-forkd or --mock): the tap is prepared only by a multi-VM husk pod, which the raw-forkd path never creates")
+	}
+	return nil
 }
 
 // resolveRunMode picks the single active controller run path from the flags.
@@ -145,8 +161,8 @@ func main() {
 	// without --multi-vm-fork would hand the pool builder MultiVM=false while the claim
 	// reconciler believed the link was prepared. An operator who asked for a latency
 	// optimization must not be left with a pod shape that cannot deliver it.
-	if prepareEgressLink && !multiVMFork {
-		logger.Error(nil, "--husk-prepare-egress-link requires --multi-vm-fork: the husk stub only prepares its tap on the multi-VM path")
+	if err := validatePrepareFlags(prepareEgressLink, multiVMFork, enableHuskPods); err != nil {
+		logger.Error(err, "invalid prepare-time flags")
 		os.Exit(1)
 	}
 	if rawForkd {
