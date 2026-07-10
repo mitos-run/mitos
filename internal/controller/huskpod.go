@@ -568,7 +568,11 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 	if opts.PrewarmChild {
 		args = append(args, "--prewarm-child")
 	}
-	if opts.PrepareEgressLink {
+	// Gated on MultiVM as documented: the stub only brings the tap up on the multi-VM
+	// Prepare path, so emitting these to a single-VM stub would produce an unsupported
+	// pod shape whose flags do nothing. main rejects the flag combination outright; this
+	// is the second gate, at the boundary that actually builds the pod.
+	if opts.PrepareEgressLink && opts.MultiVM {
 		// The stub needs the in-pod link BEFORE a claim arrives, because the tap name
 		// derives from the guest IP. These are the same fixed values huskNotifyNetwork
 		// sends in the activate request; they are config, not secrets.

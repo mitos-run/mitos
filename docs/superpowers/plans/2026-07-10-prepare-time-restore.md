@@ -120,7 +120,9 @@ Expected activate: roughly `nft` + `handshake` + `serve_api`, i.e. ~30 ms agains
    the link rather than installing a policy on a tap that no longer exists
    (`TestAFailedClaimPolicyRebuildsTheLinkOnRetry`). Worth roughly 20 ms, and a
    prerequisite for slice 2 because Firecracker requires the tap to exist at restore time.
-   Still to do: measure it on prod behind a one-pod canary, then a KVM gate.
+   Requires `--multi-vm-fork`; the controller refuses the combination at startup and the pod
+   builder refuses it again. Still to do: measure it on prod behind a one-pod canary, then a
+   KVM gate. Until both, the threat model does NOT call this path verified.
 2. **Restore at Prepare.** Move `setLiveCowMemSource` / `LoadSnapshot` / `PatchDrive` /
    `Resume` / guest-ready into `prepareInstance`, behind the same flag, with the guards
    above. Activate becomes policy + handshake + serve_api.

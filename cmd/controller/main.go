@@ -140,6 +140,15 @@ func main() {
 	// (it has no KVM), so mock implies the raw-forkd path the dev overlay uses.
 	// forkd-the-builder runs regardless in both modes (it builds the snapshots).
 	enableHuskPods, rawForkd := resolveRunMode(enableHuskPods, enableRawForkd, mockMode)
+	// FAIL FAST on a flag combination that would silently do nothing. The husk stub only
+	// brings its tap up on the multi-VM Prepare path, so --husk-prepare-egress-link
+	// without --multi-vm-fork would hand the pool builder MultiVM=false while the claim
+	// reconciler believed the link was prepared. An operator who asked for a latency
+	// optimization must not be left with a pod shape that cannot deliver it.
+	if prepareEgressLink && !multiVMFork {
+		logger.Error(nil, "--husk-prepare-egress-link requires --multi-vm-fork: the husk stub only prepares its tap on the multi-VM path")
+		os.Exit(1)
+	}
 	if rawForkd {
 		logger.Info("run path: raw-forkd (fork per claim); husk pods disabled", "reason-mock", mockMode, "reason-flag", enableRawForkd)
 	} else {

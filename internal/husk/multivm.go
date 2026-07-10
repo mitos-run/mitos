@@ -396,7 +396,10 @@ func (s *Stub) prepareInstanceOpt(ctx context.Context, id vmID, opts prepareOpts
 // the pod is dormant, when the stub opted in. A no-op otherwise, and never for a
 // secondary (co-located fork child) VM, whose tap is derived per fork at activate.
 func (s *Stub) prepareEgressLinkFor(ctx context.Context, id vmID, inst *vmInstance) error {
-	if !s.prepareEgressLink || id != defaultVMID || s.netRunner == nil || s.inPodGuestIP == "" {
+	// !s.multiVM is implied today (only the multi-VM Prepare reaches prepareInstance),
+	// but it is stated rather than relied upon: the single-VM Activate path does not
+	// consult preparedLinkTap, so a dormant tap it never reuses would be dead weight.
+	if !s.prepareEgressLink || !s.multiVM || id != defaultVMID || s.netRunner == nil || s.inPodGuestIP == "" {
 		return nil
 	}
 	tap := netconf.DeriveTapName(s.inPodGuestIP)

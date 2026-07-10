@@ -1536,3 +1536,23 @@ func TestBuildHuskPodThreadsPrepareEgressLink(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildHuskPodOmitsPrepareEgressLinkWithoutMultiVM: the option is documented as
+// requiring MultiVM, and the stub only brings its tap up on the multi-VM Prepare path.
+// Emitting the flags to a single-VM stub would produce an unsupported pod shape whose
+// arguments do nothing. cmd/controller rejects the combination outright; this pins the
+// second gate, at the boundary that actually builds the pod.
+func TestBuildHuskPodOmitsPrepareEgressLinkWithoutMultiVM(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	pod := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: false, PrepareEgressLink: true,
+	})
+	for _, unwanted := range []string{"--prepare-egress-link", "--in-pod-guest-ip", "--in-pod-gateway-ip"} {
+		if argsContain(pod.Spec.Containers[0].Args, unwanted) {
+			t.Errorf("husk args carry %s without --multi-vm: %v", unwanted, pod.Spec.Containers[0].Args)
+		}
+	}
+}
