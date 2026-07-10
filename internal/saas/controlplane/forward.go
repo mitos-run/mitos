@@ -181,6 +181,17 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 
 	ns := k.namespaceForOrg(req.OrgID)
 
+	// Pre-claimed checkout: an eligible create is served from the buffer of
+	// already-activated sandboxes, paying ONE label patch instead of the whole
+	// claim round trip. Any miss (feature off, ineligible body, empty buffer,
+	// or a lost race) falls through to the classic path below. A buffered
+	// entry also proves the pool exists, so a hit skips the pre-check too.
+	if k.checkout != nil && k.checkout.eligible(body, pool) {
+		if resp, ok := k.checkout.claim(ctx, ns, req.OrgID, pool, startedAt); ok {
+			return resp, nil
+		}
+	}
+
 	// Fast-fail on an unknown pool. In the hosted control plane pools are
 	// pre-provisioned and stable, so a create naming a pool that does not exist
 	// in the tenant namespace is a typo, not a manifest-ordering race: return an

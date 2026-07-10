@@ -1,9 +1,57 @@
 package controlplane
 
 import (
+	"context"
+	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	v1 "mitos.run/mitos/api/v1"
+	"mitos.run/mitos/internal/saas"
+	"mitos.run/mitos/internal/tenant"
 )
+
+// poolInNs builds a SandboxPool in an explicit namespace (the single-tenant
+// shape, unlike poolIn's per-org namespace derivation).
+func poolInNs(ns, name string) *v1.SandboxPool {
+	return &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+}
+
+// seedBuffered creates a Ready buffered sandbox CR in ns "mitos" and returns
+// the entry the gateway would cache for it.
+func seedBuffered(t *testing.T, c client.Client, name string) bufferedSandbox {
+	t.Helper()
+	sb := &v1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "mitos",
+			Labels: map[string]string{BufferedLabelKey: "true", bufferedPoolLabelKey: "python"},
+		},
+		Spec: v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "python"}}},
+	}
+	if err := c.Create(context.Background(), sb); err != nil {
+		t.Fatalf("seed buffered sandbox: %v", err)
+	}
+	sb.Status.Phase = v1.SandboxReady
+	sb.Status.Endpoint = "10.0.0.9:9091"
+	sb.Status.Pod = name
+	if err := c.Status().Update(context.Background(), sb); err != nil {
+		t.Fatalf("seed status: %v", err)
+	}
+	var cur v1.Sandbox
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "mitos", Name: name}, &cur); err != nil {
+		t.Fatalf("re-get: %v", err)
+	}
+	return bufferedSandbox{
+		name: name, pool: "python", endpoint: "10.0.0.9:9091", token: "tok-" + name,
+		resourceVersion: cur.ResourceVersion, podName: name, createdAt: time.Now(),
+	}
+}
 
 // checkoutCP builds a control plane with the checkout feature on for the
 // "python" pool in single-tenant mode, the shape hosted prod runs.
@@ -47,6 +95,120 @@ func TestCheckoutEligibilityGate(t *testing.T) {
 		if got := b.eligible(tc.body, tc.pool); got != tc.want {
 			t.Errorf("%s: eligible = %v, want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+// TestCheckoutServesCreateFromBuffer asserts an eligible create is served
+// from the buffer: 201 with the cached endpoint and token, NO Sandbox Create
+// on the hot path, and the CR atomically loses the buffered label and gains
+// the caller's org labels BEFORE the response returns (runtime authz getOwned
+// re-checks that label on the first exec).
+func TestCheckoutServesCreateFromBuffer(t *testing.T) {
+	var creates atomic.Int64
+	base := fakeclient.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&v1.Sandbox{}).
+		Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if _, ok := obj.(*v1.Sandbox); ok {
+				creates.Add(1)
+			}
+			return cl.Create(ctx, obj, opts...)
+		},
+	})
+	cp := New(c,
+		WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second),
+		WithSingleTenantNamespace("mitos"),
+		WithCheckout(CheckoutConfig{Pools: []string{"python"}}))
+	cp.checkout.add(seedBuffered(t, c, "sb-buffered1"))
+	creates.Store(0)
+
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"python"}`),
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", resp.Status, resp.Body)
+	}
+	m := decodeBody(t, resp.Body)
+	if m["id"] != "sb-buffered1" || m["endpoint"] != "10.0.0.9:9091" || m["token"] != "tok-sb-buffered1" {
+		t.Fatalf("payload = %v, want the buffered sandbox's identity", m)
+	}
+	if n := creates.Load(); n != 0 {
+		t.Fatalf("checkout performed %d Sandbox Create(s) on the hot path, want 0", n)
+	}
+	var sb v1.Sandbox
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "mitos", Name: "sb-buffered1"}, &sb); err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if _, still := sb.Labels[BufferedLabelKey]; still {
+		t.Error("buffered label survived the checkout")
+	}
+	if sb.Labels[tenant.OrgLabelKey] != orgA {
+		t.Errorf("org label = %q, want %q", sb.Labels[tenant.OrgLabelKey], orgA)
+	}
+}
+
+// TestCheckoutIsExclusiveAcrossReplicas asserts two gateways holding the same
+// cached entry cannot both hand it out: the resourceVersion-guarded patch lets
+// exactly one win, and the loser falls back to the classic path.
+func TestCheckoutIsExclusiveAcrossReplicas(t *testing.T) {
+	c := newFakeClient(t, poolInNs("mitos", "python"))
+	mk := func() *K8sControlPlane {
+		return New(c,
+			WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second),
+			WithSingleTenantNamespace("mitos"),
+			WithCheckout(CheckoutConfig{Pools: []string{"python"}}))
+	}
+	cpA, cpB := mk(), mk()
+	e := seedBuffered(t, c, "sb-shared")
+	cpA.checkout.add(e)
+	cpB.checkout.add(e)
+
+	stop := flipToReadyWhenCreatedInNs(t, c, "mitos", "10.9.9.9:9091", "tok-classic")
+	defer stop()
+
+	respA, errA := cpA.Forward(context.Background(), saas.ForwardRequest{OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"python"}`)})
+	respB, errB := cpB.Forward(context.Background(), saas.ForwardRequest{OrgID: orgB, Op: "sandbox.create", Body: []byte(`{"pool":"python"}`)})
+	if errA != nil || errB != nil {
+		t.Fatalf("Forward: %v / %v", errA, errB)
+	}
+	if respA.Status != http.StatusCreated || respB.Status != http.StatusCreated {
+		t.Fatalf("statuses = %d/%d, bodies %s / %s", respA.Status, respB.Status, respA.Body, respB.Body)
+	}
+	idA := decodeBody(t, respA.Body)["id"]
+	idB := decodeBody(t, respB.Body)["id"]
+	got := 0
+	if idA == "sb-shared" {
+		got++
+	}
+	if idB == "sb-shared" {
+		got++
+	}
+	if got != 1 {
+		t.Fatalf("the shared buffered sandbox was handed out %d times (ids %v, %v), want exactly 1", got, idA, idB)
+	}
+}
+
+// TestCheckoutEmptyBufferFallsBackClassic asserts an eligible create with no
+// buffered entry takes the classic path and still succeeds.
+func TestCheckoutEmptyBufferFallsBackClassic(t *testing.T) {
+	c := newFakeClient(t, poolInNs("mitos", "python"))
+	cp := New(c,
+		WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second),
+		WithSingleTenantNamespace("mitos"),
+		WithCheckout(CheckoutConfig{Pools: []string{"python"}}))
+	stop := flipToReadyWhenCreatedInNs(t, c, "mitos", "10.9.9.9:9091", "tok-classic")
+	defer stop()
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"python"}`)})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", resp.Status, resp.Body)
 	}
 }
 
