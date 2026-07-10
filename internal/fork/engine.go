@@ -40,6 +40,12 @@ import (
 // controller treats it as a capacity refusal (the same class as NoCapacity).
 var ErrAtCapacity = errors.New("forkd at sandbox capacity: MaxSandboxes reached")
 
+// ErrTemplateBuildInProgress is returned when a build for the SAME template is already
+// running on this node. It is a retry-later signal, not a failure: the caller must not
+// report the template as BuildFailed, because the in-flight build is still going to
+// finish. See Engine.CreateTemplate.
+var ErrTemplateBuildInProgress = errors.New("forkd: a build for this template is already in progress")
+
 type Engine struct {
 	mu             sync.RWMutex
 	dataDir        string
@@ -118,9 +124,14 @@ type Engine struct {
 	// NotifyForked. Both nil (the default) means networking is DISABLED and
 	// the engine behaves exactly as before. resolverIP is the optional DNS
 	// resolver guests may reach (nil omits the DNS allow rule).
-	netMgr     network.Manager
-	netAlloc   *netconf.Allocator
-	resolverIP net.IP
+	netMgr network.Manager
+
+	// templateBuilds holds the ids of template builds running RIGHT NOW, so a second
+	// concurrent build of the same template is refused rather than racing the first
+	// over its placeholder tap and its template dir.
+	templateBuilds sync.Map
+	netAlloc       *netconf.Allocator
+	resolverIP     net.IP
 
 	// DNS-based name egress is opt-in on top of networking. When
 	// enableDNSEgres is set and dnsRegistry is non-nil, a fork whose egress
@@ -2235,6 +2246,19 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 	if !safeSandboxIDComponent(id) {
 		return fmt.Errorf("invalid template id %q: must be 1-64 characters of [a-zA-Z0-9_-], starting with a letter or digit (no dots, no slashes)", id)
 	}
+
+	// ONE build per template at a time. A build that pulls and unpacks an image takes
+	// minutes, while the controller re-reconciles its pool every ~20 seconds and calls
+	// this again. Without this guard the second call raced the first: it tried to
+	// create the same placeholder tap and failed with
+	// `ioctl(TUNSETIFF): Device or resource busy`, which the controller reported as
+	// BuildFailed. A pool whose template is not built does not serve its warm husk
+	// pods, so every create went Pending for as long as the flapping lasted. The
+	// caller is told the build is in progress and should retry, NOT that it failed.
+	if _, loaded := e.templateBuilds.LoadOrStore(id, struct{}{}); loaded {
+		return fmt.Errorf("%w: template %s", ErrTemplateBuildInProgress, id)
+	}
+	defer e.templateBuilds.Delete(id)
 	// Fail fast with an actionable error if the guest kernel the build boots from
 	// is not staged yet (issue #174 box 5): the kernel-provisioner DaemonSet may
 	// still be coming up, and an opaque Firecracker boot failure would hide that.
@@ -2344,7 +2368,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 	// in but is irrelevant: forks restore the same MAC, and each fork sits on
 	// its own /30 tap, so the MAC need not be unique on the host bridge.
 	if e.networkEnabled() {
-		placeholderID := placeholderNetIdentity()
+		placeholderID := placeholderNetIdentity(id)
 		if err := e.netMgr.Setup(context.Background(), placeholderID, netconf.SandboxPolicy{Egress: v1.EgressDeny}, nil); err != nil {
 			return fmt.Errorf("create placeholder tap for template %s: %w", id, err)
 		}
@@ -2356,7 +2380,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 		cfg.Network = &firecracker.NetworkIdentity{
 			IfaceID:     firecracker.NetIfaceID,
 			GuestMAC:    placeholderMAC,
-			HostDevName: firecracker.PlaceholderTapName,
+			HostDevName: placeholderID.TapName,
 		}
 	}
 
