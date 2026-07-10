@@ -158,7 +158,7 @@ func TestWarmKernelGRPC_DrainsToExitZero(t *testing.T) {
 func TestWarmKernelCode_NeverDrawsRandomness(t *testing.T) {
 	for _, banned := range []string{"random", "numpy", "np.", "import", "uuid", "secrets"} {
 		if strings.Contains(warmKernelCode, banned) {
-			t.Errorf("warmKernelCode %q must not contain %q: the warmup cell must keep the kernel's Python PRNGs unseeded at snapshot time", warmKernelCode, banned)
+			t.Errorf("warmKernelCode %q must not contain %q: the warmup cell must draw no randomness, so the snapshot holds no PRNG state the guest-side post-fork reseed does not know how to reseed. It does NOT keep the kernel's PRNGs unseeded: ipykernel's own imports seed random before this cell runs", warmKernelCode, banned)
 		}
 	}
 }

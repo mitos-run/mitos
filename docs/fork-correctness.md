@@ -547,7 +547,7 @@ fixed by the time the warmup cell runs, and it is captured in the snapshot.
 Measured against production with `warmKernel: true`, three INDEPENDENT sandboxes
 each returned:
 
-```
+```text
 random.random() == 0.993005259705148
 ```
 
