@@ -2256,7 +2256,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 	// pods, so every create went Pending for as long as the flapping lasted. The
 	// caller is told the build is in progress and should retry, NOT that it failed.
 	if _, loaded := e.templateBuilds.LoadOrStore(id, struct{}{}); loaded {
-		return fmt.Errorf("%w: template %s", ErrTemplateBuildInProgress, id)
+		return fmt.Errorf("create template %s: %w", id, ErrTemplateBuildInProgress)
 	}
 	defer e.templateBuilds.Delete(id)
 	// Fail fast with an actionable error if the guest kernel the build boots from
