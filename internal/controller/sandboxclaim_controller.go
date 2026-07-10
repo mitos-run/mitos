@@ -159,6 +159,9 @@ type SandboxReconciler struct {
 	// pod brings its default VM's tap up before any claim arrives, leaving only the
 	// atomic nft policy transaction on the warm-claim hot path. Requires MultiVMFork.
 	PrepareEgressLink bool
+	// PrepareRestore passes --prepare-restore so a dormant pod also loads its snapshot
+	// and resumes its guest before any claim arrives. Requires PrepareEgressLink.
+	PrepareRestore bool
 
 	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
 	// Nil defaults to SpawnVMOnHusk; tests inject a fake.

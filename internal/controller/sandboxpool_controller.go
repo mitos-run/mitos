@@ -62,6 +62,9 @@ type SandboxPoolReconciler struct {
 	// pod brings its default VM's tap up before any claim arrives, leaving only the
 	// atomic nft policy transaction on the warm-claim hot path. Requires MultiVMFork.
 	PrepareEgressLink bool
+	// PrepareRestore passes --prepare-restore so a dormant pod also loads its snapshot
+	// and resumes its guest before any claim arrives. Requires PrepareEgressLink.
+	PrepareRestore bool
 	// MultiVMForkVMs is how many co-located fork VMs a multi-VM warm pod reserves
 	// node memory for up front (beyond the source VM), so the co-location routing
 	// has room before a fork spills to a new pod. Only consulted when MultiVM is set;

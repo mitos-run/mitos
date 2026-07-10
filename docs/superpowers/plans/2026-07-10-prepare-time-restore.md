@@ -1,6 +1,6 @@
 # Prepare-time restore: move the snapshot restore off the warm-claim hot path
 
-Status: slice 1 implemented (default off, not yet canaried on prod); slices 2 and 3 designed.
+Status: slices 1 and 2 implemented (default off, not yet canaried on prod); slice 3 designed.
 
 ## Why
 
@@ -123,9 +123,18 @@ Expected activate: roughly `nft` + `handshake` + `serve_api`, i.e. ~30 ms agains
    Requires `--multi-vm-fork`; the controller refuses the combination at startup and the pod
    builder refuses it again. Still to do: measure it on prod behind a one-pod canary, then a
    KVM gate. Until both, the threat model does NOT call this path verified.
-2. **Restore at Prepare.** Move `setLiveCowMemSource` / `LoadSnapshot` / `PatchDrive` /
-   `Resume` / guest-ready into `prepareInstance`, behind the same flag, with the guards
-   above. Activate becomes policy + handshake + serve_api.
+2. **Restore at Prepare.** DONE, default off. Behind `--husk-prepare-restore` (which
+   requires `--husk-prepare-egress-link`), `prepareRestoreDefaultVM` runs
+   `setLiveCowMemSource` / `LoadSnapshotWithOverrides` / `PatchDrive` / `Resume` /
+   guest-ready for the DEFAULT VM after the tap is up, closing the ready conn rather than
+   holding it across dormancy. Activate takes a fast path when `inst.preRestored`: it
+   skips the restore, re-dials the already-running guest, and pays only the handshake via
+   the shared `activateHandshakeAndServe`. FAIL CLOSED on a snapshot-dir mismatch (a
+   resumed guest cannot be reloaded). Co-located fork children and the pre-warm child are
+   never pre-restored. Pinned by `TestPrepareRestoresAndResumesTheGuestWhileDormant`,
+   `TestPrepareRestoreIsOptIn`, `TestActivateFailsClosedOnASnapshotMismatchAfterPrepareRestore`,
+   `TestBuildHuskPodThreadsPrepareRestore`. Still to do: a KVM gate and a one-pod prod
+   canary before it is called verified.
 3. **Prefault the kernel.** Run the inert warm cell at Prepare so the first tenant
    `run_code` does not fault the ipykernel's pages in.
 
