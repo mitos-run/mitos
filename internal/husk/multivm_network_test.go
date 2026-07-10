@@ -128,7 +128,7 @@ func TestMultiVMActivateProgramsDistinctTapPerVMID(t *testing.T) {
 
 	const second vmID = "vm-2"
 	for _, id := range []vmID{defaultVMID, second} {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 		req := ActivateRequest{
@@ -168,12 +168,13 @@ func TestMultiVMActivateProgramsDistinctTapPerVMID(t *testing.T) {
 	// applied for each VM (one egress chain per instance).
 	var madeDefault, madeSecond, metadataBlocks int
 	for _, c := range rr.calls {
-		// ip tuntap add <tap> mode tap
-		if len(c.argv) >= 4 && c.argv[0] == "ip" && c.argv[1] == "tuntap" && c.argv[2] == "add" {
-			switch c.argv[3] {
-			case wantDefaultTap:
+		// The tap is created by an `ip -batch -` line: `tuntap add <tap> mode tap`
+		// (the per-command execs are collapsed into one batched ip process).
+		if len(c.argv) >= 2 && c.argv[0] == "ip" && c.argv[1] == "-batch" {
+			if strings.Contains(c.stdin, "tuntap add "+wantDefaultTap+" mode tap") {
 				madeDefault++
-			case wantSecondTap:
+			}
+			if strings.Contains(c.stdin, "tuntap add "+wantSecondTap+" mode tap") {
 				madeSecond++
 			}
 		}
@@ -205,5 +206,271 @@ func TestMultiVMActivateProgramsDistinctTapPerVMID(t *testing.T) {
 	}
 	if len(seen) != 2 {
 		t.Errorf("the two VMs must be handed distinct guest IPs, got %v", seen)
+	}
+}
+
+// --- prepare-time egress link ------------------------------------------------------
+
+// countIPBatch counts the ip -batch (tap create) invocations.
+func countIPBatch(calls []recordedCall) int {
+	n := 0
+	for _, c := range calls {
+		if len(c.argv) > 0 && strings.Contains(c.argv[0], "ip") && strings.Contains(strings.Join(c.argv, " "), "-batch") {
+			n++
+		}
+	}
+	return n
+}
+
+func countNft(calls []recordedCall) int {
+	n := 0
+	for _, c := range calls {
+		if len(c.argv) > 0 && strings.Contains(c.argv[0], "nft") {
+			n++
+		}
+	}
+	return n
+}
+
+// newPreparedLinkStub builds a multi-VM stub that brings its default VM's tap up while
+// dormant, over a recording net runner.
+func newPreparedLinkStub(t *testing.T, rr *recordingRunner) *Stub {
+	t.Helper()
+	start := func(_ firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil }
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:             start,
+		Ready:             readyOK,
+		Notify:            (&fakeNotifier{}).notify,
+		Verify:            verifyOK,
+		MultiVM:           true,
+		PrepareEgressLink: true,
+		InPodGuestIP:      "10.200.0.2",
+		InPodGatewayIP:    "10.200.0.1",
+	})
+	s.SetNetRunner(rr.run)
+	return s
+}
+
+// TestPrepareBringsTheTapUpDormantAndActivateOnlyInstallsThePolicy is the point of the
+// split. A pod that opted in pays the tap create while it is DORMANT, so the claim's
+// egress_filter stage is one atomic nft transaction and nothing else. The dormant tap
+// carries a default-deny policy, so the VM behind it is never unfiltered.
+func TestPrepareBringsTheTapUpDormantAndActivateOnlyInstallsThePolicy(t *testing.T) {
+	var rr recordingRunner
+	s := newPreparedLinkStub(t, &rr)
+	ctx := context.Background()
+
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if got := countIPBatch(rr.calls); got != 1 {
+		t.Errorf("Prepare ran %d tap creates, want exactly 1", got)
+	}
+	if got := countNft(rr.calls); got != 1 {
+		t.Errorf("Prepare installed %d policies, want exactly 1 (the dormant default-deny)", got)
+	}
+	tap := netconf.DeriveTapName("10.200.0.2")
+	if !strings.Contains(strings.Join(rr.calls[0].argv, " "), tap) {
+		t.Errorf("Prepare did not touch the pod's tap %q: %v", tap, rr.calls[0].argv)
+	}
+
+	prepared := len(rr.calls)
+	if _, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/snap", Network: baseNet()}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	claim := rr.calls[prepared:]
+	if got := countIPBatch(claim); got != 0 {
+		t.Errorf("the claim re-created the tap %d times; the dormant pod already brought it up", got)
+	}
+	if got := countNft(claim); got != 1 {
+		t.Errorf("the claim ran %d nft transactions, want exactly 1 (replace the policy): %v", got, claim)
+	}
+	if len(claim) != 1 {
+		t.Errorf("the claim ran %d commands, want exactly 1: %v", len(claim), claim)
+	}
+}
+
+// TestPrepareTimeLinkIsOptIn: a stub that did not opt in must behave byte-for-byte as
+// before, doing all of it at activate.
+func TestPrepareTimeLinkIsOptIn(t *testing.T) {
+	var rr recordingRunner
+	start := func(_ firecracker.VMConfig) (vmm, error) { return &fakeVMM{}, nil }
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start: start, Ready: readyOK, Notify: (&fakeNotifier{}).notify, Verify: verifyOK,
+		MultiVM: true,
+	})
+	s.SetNetRunner(rr.run)
+	ctx := context.Background()
+
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(rr.calls) != 0 {
+		t.Fatalf("Prepare touched the network without opting in: %v", rr.calls)
+	}
+	if _, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/snap", Network: baseNet()}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if got := countIPBatch(rr.calls); got != 1 {
+		t.Errorf("activate ran %d tap creates, want 1", got)
+	}
+	if got := countNft(rr.calls); got != 1 {
+		t.Errorf("activate ran %d nft transactions, want 1", got)
+	}
+}
+
+// TestAFailedClaimPolicyRebuildsTheLinkOnRetry: applyEgressPolicy fails closed by
+// tearing the tap down, so the prepared marker must be cleared. Otherwise the retry
+// would install a policy on a tap that no longer exists and the pod would be poisoned.
+func TestAFailedClaimPolicyRebuildsTheLinkOnRetry(t *testing.T) {
+	var rr recordingRunner
+	s := newPreparedLinkStub(t, &rr)
+	ctx := context.Background()
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	inst := s.instanceFor(defaultVMID, false)
+	if inst == nil || inst.preparedLinkTap == "" {
+		t.Fatal("Prepare did not record the prepared tap")
+	}
+
+	// A claim whose policy is rejected: the CIDR list cannot be parsed.
+	if _, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/snap", Network: baseNet(), AllowCIDRs: []string{"not-a-cidr"}}); err == nil {
+		t.Fatal("Activate accepted a malformed CIDR allowlist")
+	}
+	if inst.preparedLinkTap != "" {
+		t.Error("a failed claim left the prepared-link marker set; the retry would skip rebuilding a torn-down tap")
+	}
+	if inst.activeTap != "" {
+		t.Error("a failed claim left activeTap set for a tap that was torn down")
+	}
+}
+
+// --- prepare-time restore -----------------------------------------------------------
+
+// newPrepareRestoreStub builds a multi-VM stub that brings its tap up AND restores +
+// resumes its default VM while dormant, over a recording net runner. It configures the
+// prepare snapshot dir so prepareRestoreDefaultVM engages.
+func newPrepareRestoreStub(t *testing.T, rr *recordingRunner, vms map[string]*fakeVMM) *Stub {
+	t.Helper()
+	start := func(cfg firecracker.VMConfig) (vmm, error) {
+		vm := &fakeVMM{}
+		if vms != nil {
+			vms[cfg.ID] = vm
+		}
+		return vm, nil
+	}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              start,
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		MultiVM:            true,
+		PrepareEgressLink:  true,
+		PrepareRestore:     true,
+		InPodGuestIP:       "10.200.0.2",
+		InPodGatewayIP:     "10.200.0.1",
+		PrepareSnapshotDir: "/snap",
+	})
+	s.SetNetRunner(rr.run)
+	return s
+}
+
+// TestPrepareRestoresAndResumesTheGuestWhileDormant is the core of slice 2: with
+// PrepareRestore, the LoadSnapshot and Resume happen at Prepare, so a claim pays neither.
+func TestPrepareRestoresAndResumesTheGuestWhileDormant(t *testing.T) {
+	var rr recordingRunner
+	vms := map[string]*fakeVMM{}
+	s := newPrepareRestoreStub(t, &rr, vms)
+	ctx := context.Background()
+
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	vm := vms["husk-test"]
+	if vm == nil {
+		t.Fatal("no default VM created")
+	}
+	if vm.loadCalls != 1 {
+		t.Errorf("Prepare loaded the snapshot %d times, want exactly 1 (restore at prepare)", vm.loadCalls)
+	}
+	if vm.resumeCalls != 1 {
+		t.Errorf("Prepare resumed %d times, want exactly 1 (resume at prepare)", vm.resumeCalls)
+	}
+
+	// The claim must NOT load or resume again: the guest is already running.
+	if _, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/snap", Network: baseNet()}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if vm.loadCalls != 1 {
+		t.Errorf("Activate re-loaded the snapshot (loadCalls=%d); it must reuse the pre-restored guest", vm.loadCalls)
+	}
+	if vm.resumeCalls != 1 {
+		t.Errorf("Activate re-resumed the guest (resumeCalls=%d); it must reuse the pre-restored guest", vm.resumeCalls)
+	}
+}
+
+// TestPrepareRestoreIsOptIn: without PrepareRestore the restore stays on the activate
+// path byte-for-byte (load + resume happen at Activate, not Prepare).
+func TestPrepareRestoreIsOptIn(t *testing.T) {
+	var rr recordingRunner
+	vms := map[string]*fakeVMM{}
+	// PrepareEgressLink on but PrepareRestore OFF.
+	start := func(cfg firecracker.VMConfig) (vmm, error) {
+		vm := &fakeVMM{}
+		vms[cfg.ID] = vm
+		return vm, nil
+	}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start: start, Ready: readyOK, Notify: (&fakeNotifier{}).notify, Verify: verifyOK,
+		MultiVM: true, PrepareEgressLink: true, InPodGuestIP: "10.200.0.2", InPodGatewayIP: "10.200.0.1",
+		PrepareSnapshotDir: "/snap",
+	})
+	s.SetNetRunner(rr.run)
+	ctx := context.Background()
+
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	vm := vms["husk-test"]
+	if vm.loadCalls != 0 || vm.resumeCalls != 0 {
+		t.Fatalf("Prepare restored without opting in: load=%d resume=%d", vm.loadCalls, vm.resumeCalls)
+	}
+	if _, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/snap", Network: baseNet()}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if vm.loadCalls != 1 || vm.resumeCalls != 1 {
+		t.Errorf("Activate must do the restore when not pre-restored: load=%d resume=%d", vm.loadCalls, vm.resumeCalls)
+	}
+}
+
+// TestActivateFailsClosedOnASnapshotMismatchAfterPrepareRestore: a resumed guest cannot
+// be reloaded, so a claim naming a DIFFERENT snapshot than the one pre-restored must be
+// refused rather than served against the wrong image.
+func TestActivateFailsClosedOnASnapshotMismatchAfterPrepareRestore(t *testing.T) {
+	var rr recordingRunner
+	vms := map[string]*fakeVMM{}
+	s := newPrepareRestoreStub(t, &rr, vms)
+	ctx := context.Background()
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	// Record how many net commands Prepare ran, so we can assert the mismatch refusal
+	// touched NONE beyond them: the identity gate fires before the egress policy, so a
+	// wrong-image claim must not install a tenant policy on the tap fronting the guest.
+	nBeforeActivate := len(rr.calls)
+
+	res, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/a-different-snapshot", Network: baseNet()})
+	if err == nil || res.OK {
+		t.Fatalf("Activate accepted a snapshot that differs from the pre-restored one: res=%+v err=%v", res, err)
+	}
+	if !strings.Contains(res.Error, "wrong image") {
+		t.Errorf("mismatch error should name the hazard, got %q", res.Error)
+	}
+	if len(rr.calls) != nBeforeActivate {
+		t.Errorf("a wrong-image claim mutated the egress datapath (%d new net commands); the identity gate must refuse before any side effect: %v",
+			len(rr.calls)-nBeforeActivate, rr.calls[nBeforeActivate:])
 	}
 }

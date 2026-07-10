@@ -34,6 +34,7 @@ Usage:
                                                     cluster up or down
   mitos doctor [-n namespace]                    run install/node preflight
                                                     checks and print remediation
+  mitos completion bash|zsh|fish                 print a shell completion script
 
 Flags:
   --pool string      pool to create sandboxes from
@@ -103,6 +104,10 @@ func Run(ctx context.Context, args []string, backend Backend, out, errw io.Write
 		// authProvider interface) wires it in; otherwise the subcommands report no
 		// service is configured.
 		return cmdAuth(ctx, args[1:], authServiceFor(backend), out, errw)
+	case "completion":
+		// Static shell completion. Contacts no backend, so it works offline and
+		// is safe to invoke from a shell startup file.
+		return cmdCompletion(args[1:], out, errw)
 	case "dev":
 		return cmdDev(ctx, args[1:], out, errw)
 	case "init":

@@ -6,7 +6,7 @@
 # scikit-learn -> sklearn.
 [project]
 name = "mitos-run"
-version = "0.3.0"
+version = "0.3.1"
 description = "Python SDK for Mitos: snapshot-fork sandboxes for AI agents on Kubernetes."
 keywords = ["sandbox", "firecracker", "microvm", "ai-agents", "kubernetes", "code-interpreter", "mitos"]
 readme = "README.md"

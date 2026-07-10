@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
       - run: go build ./...
       - name: Install envtest assets (controller suite needs etcd/kube-apiserver)
         run: echo "KUBEBUILDER_ASSETS=$(go run sigs.k8s.io/controller-runtime/tools/setup-envtest@latest use 1.31 -p path)" >> "$GITHUB_ENV"
@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
       - name: golangci-lint
         run: |
           # Build golangci-lint from source with the job's go 1.26 toolchain.
@@ -80,7 +80,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -181,6 +181,10 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
       - run: pytest tests/ -v
+      # The in-guest run_code kernel driver ships in the guest rootfs, not in the SDK,
+      # and its fork-reseed tests stub jupyter_client so they need no kernel deps. They
+      # ran nowhere before this step; the PRNG-sharing bug they gate is a real one.
+      - run: pytest ../../guest/rootfs/kernel_driver_test.py -v
 
   typescript-sdk:
     runs-on: ubuntu-latest
@@ -213,7 +217,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
@@ -480,7 +484,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
       - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-ci
@@ -756,7 +760,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
       - name: Check KVM availability on the runner
         # The kind-e2e runner class has /dev/kvm (proven by the device-plugin
         # e2e in the mock job and by kvm-test.yaml). Record it up front so a
@@ -1910,7 +1914,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
       - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-tenancy
@@ -1973,7 +1977,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
       - name: Check KVM availability on the runner
         run: |
           set -euo pipefail
@@ -2143,7 +2147,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
       - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1
         with:
           cluster_name: mitos-facade

@@ -147,9 +147,9 @@ func (e *Engine) unjournalBuild(id string) {
 
 // placeholderNetIdentity is the fixed identity of the host-side placeholder tap
 // the template build attaches; shared by the build path and the orphan reaper.
-func placeholderNetIdentity() netconf.Identity {
+func placeholderNetIdentity(templateID string) netconf.Identity {
 	return netconf.Identity{
-		TapName:  firecracker.PlaceholderTapName,
+		TapName:  firecracker.PlaceholderTapNameFor(templateID),
 		GuestMAC: placeholderMAC,
 		HostIP:   placeholderHostIP,
 		GuestIP:  placeholderGuestIP,
@@ -210,7 +210,7 @@ func (e *Engine) reapBuildArtifacts(rec buildRecord) {
 		}
 	}
 	if rec.Networked && e.netMgr != nil && e.networkEnabled() {
-		if err := e.netMgr.Teardown(context.Background(), placeholderNetIdentity()); err != nil {
+		if err := e.netMgr.Teardown(context.Background(), placeholderNetIdentity(rec.ID)); err != nil {
 			fmt.Fprintf(os.Stderr, "forkd: reap build placeholder tap for %s: %v\n", rec.ID, err)
 		}
 	}

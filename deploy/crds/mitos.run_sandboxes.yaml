@@ -773,12 +773,42 @@ spec:
                   pass. Unchanged from v1alpha1.
                 format: date-time
                 type: string
+              forkReconcilePasses:
+                description: |-
+                  ForkReconcilePasses counts the husk fork reconcile passes that advanced the
+                  fan-out (each pass that reached a status write). For a level-triggered
+                  controller the pass count is a first-class part of the latency breakdown:
+                  control-plane round-trips (one ~1s requeue per pass) can dominate the
+                  end-to-end fork latency, so the pass count says how much of the total is
+                  requeue wait versus real per-stage work. Timing/observability only. NEW
+                  field.
+                format: int32
+                type: integer
               forkSnapshotTaken:
                 description: |-
                   ForkSnapshotTaken is the exactly-once fork-snapshot guard for a replicas >
                   1 Sandbox, carried so the controller-restart correctness holds. Maps from
                   SandboxForkStatus.forkSnapshotTaken.
                 type: boolean
+              forkStartedAt:
+                description: |-
+                  ForkStartedAt is when the husk fork fan-out began its first working
+                  reconcile pass (the source pod resolved Ready and the controller started
+                  the snapshot/spawn work). A hosted co-location fork is LEVEL-TRIGGERED and
+                  reaches Ready across several ~1s requeue passes, so the wall-clock latency
+                  of the whole fork is NOT observable inside one pass; persisting the start
+                  timestamp lets the controller attribute the true end-to-end latency (from
+                  here to Ready) even though the work is split across passes. Set exactly
+                  once and never rewritten. Timing/observability only; it drives no fork
+                  behavior. NEW field.
+                format: date-time
+                type: string
+              lastRestartTime:
+                description: |-
+                  LastRestartTime is when the backing VM was most recently destroyed and replaced.
+                  Nil while Restarts is zero.
+                format: date-time
+                type: string
               node:
                 description: |-
                   Node is the node the sandbox VM runs on. Unchanged from v1alpha1. It is the
@@ -809,6 +839,23 @@ spec:
                 description: |-
                   ReadyReplicas is the ready child count for a replicas > 1 Sandbox. Maps
                   from SandboxForkStatus.readyForks.
+                format: int32
+                type: integer
+              restarts:
+                description: |-
+                  Restarts counts how many times this sandbox's backing VM was destroyed and
+                  replaced by a fresh one (a husk pod loss re-pended under DrainPolicy Kill).
+
+                  It is the DURABLE signal that the sandbox a caller is holding is no longer the
+                  sandbox it created: the replacement re-activates from the POOL TEMPLATE, so every
+                  process, every write to the guest filesystem, and the whole guest memory of the
+                  previous instance are gone. The Ready condition also flips, but only transiently
+                  (the next reconcile re-activates and sets Ready=True again), so a caller polling
+                  the API would otherwise see an unbroken healthy sandbox and keep issuing calls
+                  against state that no longer exists (mitos-run/mitos#870).
+
+                  Monotonic for the lifetime of the sandbox. Zero means the caller still holds the
+                  original VM.
                 format: int32
                 type: integer
               revision:

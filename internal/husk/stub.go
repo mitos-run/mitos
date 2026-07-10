@@ -17,6 +17,7 @@ import (
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/dnsproxy"
 	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
 	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
@@ -98,7 +99,42 @@ type vmInstance struct {
 	prepareVerified bool
 	rootfsClonePath string
 	activeTap       string
-	dnsProxy        *dnsproxy.Server
+	// preparedLinkTap names the tap this instance brought up while DORMANT
+	// (Options.PrepareEgressLink). When it matches the tap the claim resolves to,
+	// activate installs the tenant policy on it and skips the link setup. Cleared
+	// whenever the tap is torn down, so a retry re-ensures it.
+	preparedLinkTap string
+	// preRestored is set when this instance loaded its snapshot and RESUMED its guest
+	// while dormant (Options.PrepareRestore), so activate skips the restore/resume/
+	// guest-ready and pays only the fork-correctness handshake. preRestoredSnapshotDir
+	// is the snapshot the dormant restore used; activate FAILS CLOSED if the claim's
+	// snapshot dir differs, because a resumed guest cannot be reloaded.
+	preRestored            bool
+	preRestoredSnapshotDir string
+	dnsProxy               *dnsproxy.Server
+
+	// childUFFDPlan carries a co-located live-cow fork child's LAZY UFFD import
+	// intent from SpawnVM to activateInstance: the ChildMemfdImport coordinates (the
+	// source memfd + FROZEN overlay + live bitmap) and the backend socket path.
+	// activateInstance consumes it at the load step to restore through Firecracker's
+	// native Uffd backend (faulting the working set in on demand) instead of a disk
+	// mem file. Nil keeps the disk restore. Set + read under inst.mu.
+	childUFFDPlan *lazyChildUFFDPlan
+	// childUFFD is the live lazy-UFFD handler serving this instance's guest-memory
+	// faults for the life of the child, retained so teardown Closes it (which unblocks
+	// its Serve loop and munmaps the source views). Nil on the disk-restore path.
+	childUFFD fork.ChildUFFDHandle
+}
+
+// lazyChildUFFDPlan is the co-located live-cow fork child's lazy-UFFD import
+// intent. imp is the armed parent handle's ChildImport (the source shared memfd,
+// the FROZEN memfd, and the LIVE frozen bitmap memfd, each identity-verified);
+// sockPath is the backend unix socket the child Firecracker's Uffd restore backend
+// connects to. Built by SpawnVM on the armed child-import path and consumed once by
+// activateInstance.
+type lazyChildUFFDPlan struct {
+	imp      fork.ChildMemfdImport
+	sockPath string
 }
 
 // newVMInstance builds a fresh per-VM instance in StateNew. It is the
@@ -118,6 +154,16 @@ type vmm interface {
 	// (PatchDrive) while the VM is PAUSED, before the guest can write anything,
 	// then resumes explicitly via Resume.
 	LoadSnapshotWithOverrides(mem, snapshot string, resume bool, overrides []firecracker.NetworkOverride) error
+	// LoadSnapshotUFFD loads a snapshot through Firecracker's native userfaultfd
+	// memory backend: instead of a mem file it points /snapshot/load at
+	// uffdSocketPath, a unix socket an external handler is already listening on, so
+	// Firecracker creates the guest userfaultfd and hands it to the handler over the
+	// socket. Always loads PAUSED. The live-cow lazy child import uses it so a
+	// co-located fork child faults its guest RAM in on demand (composed from the
+	// source memfd + FROZEN overlay) instead of restoring a disk mem file. The
+	// vmstate-only fork writes no mem file, so this is the ONLY memory backend a
+	// child-import spawn can take.
+	LoadSnapshotUFFD(snapshot, uffdSocketPath string, overrides []firecracker.NetworkOverride) error
 	// VsockHostPath resolves a relative vsock uds_path to its host location.
 	VsockHostPath(rel string) string
 	// PatchDrive rebinds an existing baked drive (by drive id) to a host backing
@@ -141,6 +187,14 @@ type vmm interface {
 	// fork-snapshot op writes the source VM's snapshot here so child husk pods can
 	// restore independent copies of it.
 	CreateSnapshot(memPath, snapshotPath string) error
+	// CreateSnapshotVMStateOnly writes ONLY the device/CPU vmstate of the PAUSED VM
+	// to snapshotPath and does NOT copy guest memory to a mem file. It is the
+	// live-cow fork capture: the guest RAM is already resident in the source's
+	// exported MAP_SHARED memfd (m1) that a co-located child MAP_PRIVATEs, so the
+	// ~364ms mem write a Full snapshot does is redundant (issue #832). The
+	// fork-snapshot op uses it ONLY on the armed live-cow path and falls back to
+	// CreateSnapshot otherwise, so a fork never breaks.
+	CreateSnapshotVMStateOnly(snapshotPath string) error
 	// Ping reports whether the VMM still answers its API socket. It returns an
 	// error once the Firecracker process is gone or defunct, which the husk
 	// liveness monitor uses to detect a dead warm slot (issue #527).
@@ -162,7 +216,11 @@ type starter func(cfg firecracker.VMConfig) (vmm, error)
 // vsockPath, or the timeout elapses. The production seam dials the gRPC Control
 // service and calls Ping; tests inject a fake. ctx is forwarded so a cancelled
 // activate context also cancels the readiness wait.
-type guestReady func(ctx context.Context, vsockPath string, timeout time.Duration) error
+// guestReady waits for the guest agent and returns the connection it proved healthy,
+// so the fork-correctness handshake can run on that same connection instead of dialing
+// the guest again. A nil client is legal (the unit and mock seams return one), and
+// makes the notifier open its own connection.
+type guestReady func(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error)
 
 // notifier runs the post-restore fork-correctness handshake against the guest
 // agent at vsockPath: it delivers the fresh generation + entropy via
@@ -173,7 +231,9 @@ type guestReady func(ctx context.Context, vsockPath string, timeout time.Duratio
 // siblings' CRNG state is never served. The production seam connects via
 // internal/vsock; tests inject a fake. The entropy and secret VALUES are never
 // logged by any implementation.
-type notifier func(vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error
+// notifier runs the post-restore fork-correctness handshake. client is the connection
+// guestReady already proved healthy; when it is nil the notifier dials vsockPath itself.
+type notifier func(client *guestgrpc.Client, vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error
 
 // dialFunc is the injectable gRPC dial seam used by notifierGRPC and
 // guestReadyGRPC. The production seam uses guestgrpc.Dial (vsock); tests inject
@@ -189,12 +249,17 @@ type dialFunc func(vsockPath string) (*guestgrpc.Client, error)
 //
 // Entropy and secret VALUES are never logged or included in any error text:
 // errors carry only the operation name and the underlying transport error.
-func notifierGRPC(vsockPath string, generation uint64, entropy []byte, req ActivateRequest, dial dialFunc) error {
-	client, err := dial(vsockPath)
-	if err != nil {
-		return fmt.Errorf("connect guest agent gRPC for fork handshake: %w", err)
+func notifierGRPC(client *guestgrpc.Client, vsockPath string, generation uint64, entropy []byte, req ActivateRequest, dial dialFunc) error {
+	// Reuse the readiness connection when the caller has one. It owns the Close then;
+	// only a connection we opened here is ours to close.
+	if client == nil {
+		dialed, err := dial(vsockPath)
+		if err != nil {
+			return fmt.Errorf("connect guest agent gRPC for fork handshake: %w", err)
+		}
+		defer dialed.Close() //nolint:errcheck // best-effort on close
+		client = dialed
 	}
-	defer client.Close() //nolint:errcheck // best-effort on close
 
 	// Build the network sub-message from the vsock type. Nil network is valid
 	// (no per-fork re-addressing needed for this activation).
@@ -260,20 +325,47 @@ func notifierGRPC(vsockPath string, generation uint64, entropy []byte, req Activ
 // on AgentPort 52 is no longer used for this path.
 //
 // Entropy and secret VALUES are never logged or included in any error text.
-func productionNotifier(vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error {
-	return notifierGRPC(vsockPath, generation, entropy, req, guestgrpc.Dial)
+func productionNotifier(client *guestgrpc.Client, vsockPath string, generation uint64, entropy []byte, req ActivateRequest) error {
+	return notifierGRPC(client, vsockPath, generation, entropy, req, guestgrpc.Dial)
 }
 
 // guestReadyGRPC waits for the guest agent's gRPC Control service to answer a
 // Ping RPC, retrying at fixed intervals until the timeout elapses or ctx is
 // cancelled. It uses the supplied dial function so tests can inject DialUnix.
 // The retry semantics mirror the legacy productionGuestReady JSON poll loop.
-func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration, dial dialFunc) error {
+// Retry pacing for the post-resume guest readiness probe. The guest agent's
+// vsock listener is not accepting the instant Firecracker resumes the VM, so the
+// first dial nearly always fails and the retry delay is charged straight to the
+// claim's activate latency. A fixed 20ms backoff therefore cost ~20ms on EVERY
+// warm claim while the guest was in fact answering a millisecond later. Start
+// sub-millisecond and grow geometrically so a healthy guest is picked up almost
+// immediately, while an unhealthy one still backs off to a cheap poll rather
+// than spinning on dial for the whole readyTimeout.
+const (
+	guestReadyBackoffInitial = 500 * time.Microsecond
+	guestReadyBackoffMax     = 5 * time.Millisecond
+)
+
+func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration, dial dialFunc) (*guestgrpc.Client, error) {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
+	backoff := guestReadyBackoffInitial
+	// wait sleeps the current backoff then grows it, capped. It reports false when
+	// the context ended, so the caller returns instead of retrying.
+	wait := func() bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(backoff):
+		}
+		if backoff *= 2; backoff > guestReadyBackoffMax {
+			backoff = guestReadyBackoffMax
+		}
+		return true
+	}
 	for {
 		if ctx.Err() != nil {
-			return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
+			return nil, fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
 		}
 		if time.Now().After(deadline) {
 			break
@@ -282,10 +374,8 @@ func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration
 		client, err := dial(vsockPath)
 		if err != nil {
 			lastErr = err
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
-			case <-time.After(20 * time.Millisecond):
+			if !wait() {
+				return nil, fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
 			}
 			continue
 		}
@@ -293,21 +383,23 @@ func guestReadyGRPC(ctx context.Context, vsockPath string, timeout time.Duration
 		pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		_, pingErr := client.Control.Ping(pingCtx, &internalv1.PingRequest{})
 		cancel()
-		client.Close() //nolint:errcheck // best-effort; conn closed after check
 		if pingErr == nil {
-			return nil
+			// Hand the caller the connection we just proved healthy. It runs the
+			// fork-correctness handshake on it instead of dialing the guest a second
+			// time, which put a whole vsock connect plus HTTP/2 setup on the activate
+			// critical path for nothing. The caller owns the Close.
+			return client, nil
 		}
+		client.Close() //nolint:errcheck // best-effort; the ping failed, drop the conn
 		lastErr = pingErr
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
-		case <-time.After(20 * time.Millisecond):
+		if !wait() {
+			return nil, fmt.Errorf("guest agent gRPC not ready: %w", ctx.Err())
 		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("timeout")
 	}
-	return fmt.Errorf("guest agent gRPC not ready within %s: %w", timeout, lastErr)
+	return nil, fmt.Errorf("guest agent gRPC not ready within %s: %w", timeout, lastErr)
 }
 
 // reflinker copies a source file to a destination with copy-on-write semantics
@@ -392,7 +484,7 @@ func (c *clientVMM) Close() error {
 // to answer a Ping RPC on vsock.AgentGRPCPort (53). The Rust agent is the sole
 // guest agent and serves gRPC only (#310). The retry semantics mirror the
 // removed JSON poll.
-func productionGuestReady(ctx context.Context, vsockPath string, timeout time.Duration) error {
+func productionGuestReady(ctx context.Context, vsockPath string, timeout time.Duration) (*guestgrpc.Client, error) {
 	return guestReadyGRPC(ctx, vsockPath, timeout, guestgrpc.Dial)
 }
 
@@ -508,6 +600,64 @@ type Options struct {
 	// snapshot restore. It is a no-op off Linux (userfaultfd write-protect is
 	// Linux-only); the path fails closed to the disk restore.
 	LiveCowFork bool
+	// LiveCowChildImport gates the VMSTATE-ONLY fork capture (issue #832): the
+	// paused-window optimization that FREEZES the armed source and writes ONLY the
+	// vmstate, SKIPPING the ~364ms guest-RAM `mem` file, on the promise that the
+	// co-located child boots its guest RAM from the source's shared memfd instead
+	// of the disk `mem`. That promise holds ONLY when a shipped child-side
+	// memfd-import Firecracker patch consumes FIRECRACKER_MITOS_CHILD_MEMFD. The
+	// currently shipped patched binary (mitos-fc-wp-on-restore) patches the SOURCE
+	// (restore) side ONLY, so a co-located child RESTORES FROM THE DISK fork
+	// snapshot; a vmstate-only snapshot has no `mem` file, so that child cannot
+	// restore and the fork hangs (the prod hang, children stuck Restoring). It
+	// therefore DEFAULTS false: forkSnapshotInstance keeps writing the disk `mem`
+	// (the Full path) even when the source is armed, so every co-located child is
+	// restorable and the fork never hangs. Turn it on ONLY once a child-side
+	// memfd-import binary is shipped and every co-located child imports the memfd.
+	// Independent of LiveCowFork so the source can be armed (freezer live) without
+	// yet skipping the disk mem.
+	LiveCowChildImport bool
+	// PrepareEgressLink opts a multi-VM pod into bringing up its default VM's tap
+	// while the pod is DORMANT (no tenant attached), so a claim pays only the atomic
+	// nft transaction that installs the tenant's policy instead of also paying the
+	// tap create. Measured on prod, the link half is roughly two thirds of the ~30 ms
+	// the egress_filter stage costs on the warm-claim hot path.
+	//
+	// DEFAULTS false. Requires MultiVM and InPodGuestIP; a no-op otherwise, so a pod
+	// that does not opt in behaves byte-for-byte as before. The dormant tap carries a
+	// DEFAULT-DENY policy, and the claim REPLACES it in one nft transaction, so there
+	// is never a window in which a VM is unfiltered.
+	PrepareEgressLink bool
+	// InPodGuestIP / InPodGatewayIP are the fixed in-pod /30 the pod's default VM
+	// uses. They are the same values the controller sends in the activate request;
+	// PrepareEgressLink needs them BEFORE that request arrives, because the tap name
+	// derives from the guest IP. Config, never secrets.
+	InPodGuestIP   string
+	InPodGatewayIP string
+	// PrepareRestore opts a multi-VM pod's DEFAULT VM into loading its snapshot and
+	// resuming its guest while the pod is DORMANT, so a claim pays only the fork-
+	// correctness handshake instead of the snapshot restore, the resume, and the guest-
+	// ready wait (measured ~55 ms of the ~113 ms warm-claim activate, plus the demand
+	// fault-in that makes the first run_code cold). REQUIRES PrepareEgressLink (the tap
+	// must exist before LoadSnapshot) and InPodGuestIP. Default off. The dormant guest
+	// serves no tenant and is reseeded fail-closed at the claim's NotifyForked, exactly
+	// as a restore-at-activate guest is. See docs/superpowers/plans/2026-07-10-prepare-time-restore.md.
+	PrepareRestore bool
+	// PrewarmChild opts into keeping ONE dormant, generic co-located child
+	// Firecracker pre-prepared (booted, and snapshot-verified when a template
+	// snapshot is configured) in a multi-VM pod, so a co-located fork that does
+	// NOT need a fork-specific launch env can ACTIVATE the pre-warmed child (rootfs
+	// clone at fork time + LoadSnapshot + resume) instead of paying the on-demand
+	// process boot on the fork hot path. SpawnVM consumes the pre-warmed slot and
+	// asynchronously re-warms a fresh one for the NEXT fork, OFF the hot path. It
+	// DEFAULTS false and is a no-op unless MultiVM is also on. It is deliberately
+	// bypassed for the live-cow child-import fork (FIRECRACKER_MITOS_CHILD_MEMFD):
+	// that child MUST be exec'd with per-fork frozen-epoch coordinates that only
+	// exist after the fork's Freeze, so it keeps the on-demand launch byte-for-byte
+	// (the disk-restore co-located fork and template spawn are what the pre-warm
+	// accelerates). At most ONE dormant child is kept, so the pre-warm never
+	// over-admits the pod's per-VM memory budget (it counts as one extra VM).
+	PrewarmChild bool
 }
 
 // DefaultReadyTimeout bounds how long Activate waits for the guest agent to
@@ -604,13 +754,49 @@ type Stub struct {
 	// instances is the default-off scaffold a later increment migrates that
 	// single-VM state onto (map[vmID]*vmInstance keyed per fork); it is nil unless
 	// a caller opts in, so increment 1 changes no runtime behavior.
-	multiVM   bool
+	multiVM bool
 	// liveCowFork gates the live copy-on-write co-located fork path (Options
 	// .LiveCowFork, milestone m4b). Default false keeps the co-located fork on the
 	// disk snapshot restore byte-for-byte; separate from multiVM so it canaries
 	// independently.
 	liveCowFork bool
-	instances   map[vmID]*vmInstance
+	// liveCowChildImport gates the vmstate-only fork capture (Options
+	// .LiveCowChildImport). Default false: forkSnapshotInstance keeps writing the
+	// disk `mem` file even when the source is armed, so the co-located child (which
+	// restores from the disk fork snapshot until a child-side memfd-import
+	// Firecracker patch ships) is always restorable and the fork never hangs.
+	liveCowChildImport bool
+
+	// prepareEgressLink / inPodGuestIP / inPodGatewayIP back Options.PrepareEgressLink.
+	prepareEgressLink bool
+	prepareRestore    bool
+	inPodGuestIP      string
+	inPodGatewayIP    string
+	// prewarmChild keeps ONE dormant, generic co-located child Firecracker
+	// pre-prepared (Options.PrewarmChild) so a co-located fork that needs no
+	// fork-specific launch env activates it instead of paying the process boot on
+	// the hot path. prewarming is the single-flight guard so at most one re-warm
+	// runs at a time and the pod never keeps more than one pre-warmed child (never
+	// over-admitting the per-VM memory budget). Both guarded by mu; only meaningful
+	// on the multi-VM path.
+	prewarmChild bool
+	prewarming   bool
+	// liveCowParent is the armed parent-side live-cow WP handler for this pod's
+	// running source VM (milestone m5). When non-nil AND liveCowFork is on, a
+	// co-located fork child spawn imports its guest RAM from the parent's live
+	// shared memfd (SpawnVM sets FIRECRACKER_MITOS_CHILD_MEMFD from it) instead of
+	// the disk snapshot mem file. Nil (the default, and today's production wiring
+	// until the parent-arm + Firecracker child-restore patch land) means every
+	// co-located child restores from disk. Set via SetLiveCowParent, which the
+	// source-arm wiring (armLiveCowSource, milestone m6b) drives once the patched
+	// source Firecracker completes the write-protect handshake.
+	liveCowParent fork.ChildImportProvider
+	// liveCowHandle is the armed source-side WP handler (milestone m6b), retained so
+	// teardown can Close it (unblocking a stuck Receive and stopping the Serve fault
+	// loop). It is the SAME object as liveCowParent once the handshake completes, but
+	// typed as the closable handle. Nil unless the source was armed. Guarded by mu.
+	liveCowHandle fork.WPForkHandle
+	instances     map[vmID]*vmInstance
 	// closing is set (under mu) when closeAllInstances begins teardown, so a
 	// concurrent create can no longer add a VM that would outlive Close. Guarded
 	// by mu; only meaningful on the multi-VM path.
@@ -662,6 +848,12 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		egressBytes:        opts.EgressBytes,
 		multiVM:            opts.MultiVM,
 		liveCowFork:        opts.LiveCowFork,
+		liveCowChildImport: opts.LiveCowChildImport,
+		prepareEgressLink:  opts.PrepareEgressLink,
+		prepareRestore:     opts.PrepareRestore,
+		inPodGuestIP:       opts.InPodGuestIP,
+		inPodGatewayIP:     opts.InPodGatewayIP,
+		prewarmChild:       opts.PrewarmChild,
 	}
 	// Multi-VM scaffold (#764), default off: allocate the per-fork instance map
 	// ONLY when a caller opts in. No production caller sets MultiVM in increment
@@ -732,7 +924,9 @@ func (s *Stub) Prepare(ctx context.Context) error {
 	if s.multiVM {
 		// A plain Prepare brings up the pod's default (source) VM from the pool
 		// template, so the rootfs clone source is the template (empty override).
-		return s.prepareInstance(ctx, defaultVMID, "")
+		// A plain Prepare is a warm-pool prepay, not on the hosted-fork hot path,
+		// so it opts out of the per-stage timing map (nil stages).
+		return s.prepareInstance(ctx, defaultVMID, "", nil)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -984,11 +1178,18 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 	}
 
 	vsockPath := s.vm.VsockHostPath(firecracker.VsockRelPath)
-	if err := s.ready(ctx, vsockPath, s.readyTimeout); err != nil {
+	guestConn, err := s.ready(ctx, vsockPath, s.readyTimeout)
+	if err != nil {
 		// Fail closed: the snapshot loaded but the guest never answered, so we
 		// cannot vouch for the VM. Do NOT mark active or report a usable VM.
 		werr := fmt.Errorf("husk: guest not ready after activate: %w", err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
+	// The readiness probe hands us its proven connection so the handshake below can
+	// reuse it. We own the Close. Nil on the unit and mock seams, which make the
+	// notifier dial for itself.
+	if guestConn != nil {
+		defer guestConn.Close() //nolint:errcheck // best-effort on close
 	}
 
 	// Fork-correctness handshake. The restored guest is a byte-for-byte copy of
@@ -1004,7 +1205,7 @@ func (s *Stub) Activate(ctx context.Context, req ActivateRequest) (ActivateResul
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
 	s.generation++
-	if err := s.notify(vsockPath, s.generation, entropy, req); err != nil {
+	if err := s.notify(guestConn, vsockPath, s.generation, entropy, req); err != nil {
 		// Fail closed: the guest did not complete the reseed handshake, so it may
 		// still share its siblings' CRNG state. Leave the VM NOT active. The
 		// error carries no entropy or secret values.

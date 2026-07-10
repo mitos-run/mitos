@@ -229,6 +229,38 @@ func TestBuildHuskPodThreadsDNSUpstream(t *testing.T) {
 // so a co-located fork child can share the parent's resident guest memory, and
 // with it OFF (the default, every deployment today) the flag is absent so the pod
 // is byte-for-byte the current disk co-location.
+func TestBuildHuskPodThreadsPrewarmChild(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true, PrewarmChild: true})
+	if !argsContain(on.Spec.Containers[0].Args, "--prewarm-child") {
+		t.Errorf("husk args missing --prewarm-child when enabled: %v", on.Spec.Containers[0].Args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true})
+	if argsContain(off.Spec.Containers[0].Args, "--prewarm-child") {
+		t.Errorf("husk args must omit --prewarm-child by default: %v", off.Spec.Containers[0].Args)
+	}
+}
+
+func TestBuildHuskPodThreadsLiveCowChildImport(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", LiveCowFork: true, LiveCowChildImport: true})
+	if !argsContain(on.Spec.Containers[0].Args, "--live-cow-child-import") {
+		t.Errorf("husk args missing --live-cow-child-import when enabled: %v", on.Spec.Containers[0].Args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", LiveCowFork: true})
+	if argsContain(off.Spec.Containers[0].Args, "--live-cow-child-import") {
+		t.Errorf("husk args must omit --live-cow-child-import by default: %v", off.Spec.Containers[0].Args)
+	}
+}
+
 func TestBuildHuskPodThreadsLiveCowFork(t *testing.T) {
 	r := &controller.SandboxPoolReconciler{}
 	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
@@ -238,11 +270,37 @@ func TestBuildHuskPodThreadsLiveCowFork(t *testing.T) {
 	if !argsContain(on.Spec.Containers[0].Args, "--live-cow-fork") {
 		t.Errorf("husk args missing --live-cow-fork when enabled: %v", on.Spec.Containers[0].Args)
 	}
+	// The live-cow write-protect fork creates its userfaultfd via the /dev/userfaultfd
+	// device injected by the kvm device plugin (issue #832), NOT the userfaultfd(2)
+	// syscall the container seccomp profile denies. So a live-cow husk pod keeps the
+	// minimal NET_ADMIN-only capability set and adds NO CAP_SYS_PTRACE: the earlier
+	// CAP_SYS_PTRACE grant satisfied only the kernel gate, never the seccomp gate, and
+	// is not needed by the device path.
+	if onCaps := on.Spec.Containers[0].SecurityContext.Capabilities.Add; capsContain(onCaps, "SYS_PTRACE") {
+		t.Errorf("live-cow husk must NOT add SYS_PTRACE (device path needs no cap); Capabilities.Add = %+v", onCaps)
+	}
+	if onCaps := on.Spec.Containers[0].SecurityContext.Capabilities.Add; len(onCaps) != 1 || !capsContain(onCaps, "NET_ADMIN") {
+		t.Errorf("live-cow husk Capabilities.Add = %+v, want exactly [NET_ADMIN]", onCaps)
+	}
 
 	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img"})
 	if argsContain(off.Spec.Containers[0].Args, "--live-cow-fork") {
 		t.Errorf("husk args must omit --live-cow-fork by default: %v", off.Spec.Containers[0].Args)
 	}
+	// A non-live-cow pod also stays NET_ADMIN-only.
+	if offCaps := off.Spec.Containers[0].SecurityContext.Capabilities.Add; capsContain(offCaps, "SYS_PTRACE") {
+		t.Errorf("non-live-cow husk must not add SYS_PTRACE; Capabilities.Add = %+v", offCaps)
+	}
+}
+
+// capsContain reports whether a capability is present in the add list.
+func capsContain(caps []corev1.Capability, want corev1.Capability) bool {
+	for _, c := range caps {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 // argsContain reports whether a standalone flag is present in args.
@@ -1446,5 +1504,84 @@ func TestReconcileHuskPodsThreadsMultiVM(t *testing.T) {
 		if _, ok := p.Labels[label]; ok {
 			t.Fatalf("MultiVM-off reconciler must NOT stamp %s, got labels %v", label, p.Labels)
 		}
+	}
+}
+
+// TestBuildHuskPodThreadsPrepareEgressLink proves the prepare-time link flag reaches the
+// stub together with the in-pod addresses it cannot work without: the tap name derives
+// from the guest IP, and the stub needs it BEFORE an activate request arrives. Off (the
+// default) the pod is byte-for-byte the current activate-time filter.
+func TestBuildHuskPodThreadsPrepareEgressLink(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true, PrepareEgressLink: true})
+	args := on.Spec.Containers[0].Args
+	for _, want := range []string{"--prepare-egress-link", "--in-pod-guest-ip", "--in-pod-gateway-ip"} {
+		if !argsContain(args, want) {
+			t.Errorf("husk args missing %s when prepare-egress-link is enabled: %v", want, args)
+		}
+	}
+	// The addresses must be the ones the activate request carries, or the stub would
+	// bring up a tap the claim never resolves to and the skip would silently not apply.
+	if !argsContain(args, "10.200.0.2") || !argsContain(args, "10.200.0.1") {
+		t.Errorf("husk args do not carry the fixed in-pod /30: %v", args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true})
+	for _, unwanted := range []string{"--prepare-egress-link", "--in-pod-guest-ip", "--in-pod-gateway-ip"} {
+		if argsContain(off.Spec.Containers[0].Args, unwanted) {
+			t.Errorf("husk args must omit %s by default: %v", unwanted, off.Spec.Containers[0].Args)
+		}
+	}
+}
+
+// TestBuildHuskPodOmitsPrepareEgressLinkWithoutMultiVM: the option is documented as
+// requiring MultiVM, and the stub only brings its tap up on the multi-VM Prepare path.
+// Emitting the flags to a single-VM stub would produce an unsupported pod shape whose
+// arguments do nothing. cmd/controller rejects the combination outright; this pins the
+// second gate, at the boundary that actually builds the pod.
+func TestBuildHuskPodOmitsPrepareEgressLinkWithoutMultiVM(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	pod := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: false, PrepareEgressLink: true,
+	})
+	for _, unwanted := range []string{"--prepare-egress-link", "--in-pod-guest-ip", "--in-pod-gateway-ip"} {
+		if argsContain(pod.Spec.Containers[0].Args, unwanted) {
+			t.Errorf("husk args carry %s without --multi-vm: %v", unwanted, pod.Spec.Containers[0].Args)
+		}
+	}
+}
+
+// TestBuildHuskPodThreadsPrepareRestore proves --prepare-restore flows to the stub ONLY
+// alongside --prepare-egress-link (and therefore MultiVM), because the restore builds on
+// the prepared tap. Off, the flag is absent.
+func TestBuildHuskPodThreadsPrepareRestore(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareRestore: true,
+	})
+	if !argsContain(on.Spec.Containers[0].Args, "--prepare-restore") {
+		t.Errorf("husk args missing --prepare-restore when enabled: %v", on.Spec.Containers[0].Args)
+	}
+
+	// Without the prepared link, restore has no tap; the flag must not be emitted.
+	noLink := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareRestore: true,
+	})
+	if argsContain(noLink.Spec.Containers[0].Args, "--prepare-restore") {
+		t.Errorf("husk args carry --prepare-restore without --prepare-egress-link: %v", noLink.Spec.Containers[0].Args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true, PrepareEgressLink: true})
+	if argsContain(off.Spec.Containers[0].Args, "--prepare-restore") {
+		t.Errorf("husk args must omit --prepare-restore by default: %v", off.Spec.Containers[0].Args)
 	}
 }

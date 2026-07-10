@@ -375,3 +375,118 @@ func TestBuildQuotaEnforcerUsesInjectedSuspensionStore(t *testing.T) {
 		t.Errorf("injected-store mode = %q, want it to name the durable posture", w.mode)
 	}
 }
+
+// --- per-org tier override -------------------------------------------------------
+
+// TestParseOrgTiersAcceptsTheLadder proves an operator can grant any tier the ladder
+// defines, and that the parse is the only place a tier name is trusted.
+func TestParseOrgTiersAcceptsTheLadder(t *testing.T) {
+	got, err := parseOrgTiers([]string{"org-a=starter", "org-b=pro", "org-c=free"})
+	if err != nil {
+		t.Fatalf("parseOrgTiers: %v", err)
+	}
+	want := map[string]quota.TierName{
+		"org-a": quota.TierStarter,
+		"org-b": quota.TierPro,
+		"org-c": quota.TierFree,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d overrides, want %d: %v", len(got), len(want), got)
+	}
+	for org, tier := range want {
+		if got[org] != tier {
+			t.Errorf("org %q = %q, want %q", org, got[org], tier)
+		}
+	}
+}
+
+// TestParseOrgTiersRejectsAnUnknownTier is the fail-closed gate: a typo must stop the
+// process at startup, never silently resolve to something wider (or narrower) later.
+func TestParseOrgTiersRejectsAnUnknownTier(t *testing.T) {
+	for _, entry := range []string{"org-a=enterprise", "org-a=PRO", "org-a=unlimited"} {
+		if _, err := parseOrgTiers([]string{entry}); err == nil {
+			t.Errorf("parseOrgTiers(%q) accepted an unknown tier", entry)
+		}
+	}
+}
+
+// TestParseOrgTiersRejectsMalformedEntries keeps the flag from silently doing nothing.
+func TestParseOrgTiersRejectsMalformedEntries(t *testing.T) {
+	for _, entry := range []string{"org-a", "=pro", "org-a=", "  =  ", ""} {
+		if _, err := parseOrgTiers([]string{entry}); err == nil {
+			t.Errorf("parseOrgTiers(%q) accepted a malformed entry", entry)
+		}
+	}
+}
+
+// TestParseOrgTiersRejectsADuplicateOrg: last-wins would make the effective tier depend
+// on flag order, which is exactly the kind of silent privilege change this must not have.
+func TestParseOrgTiersRejectsADuplicateOrg(t *testing.T) {
+	if _, err := parseOrgTiers([]string{"org-a=free", "org-a=pro"}); err == nil {
+		t.Error("parseOrgTiers accepted a duplicate org")
+	}
+}
+
+// TestOrgTierResolverIsFailClosed is the core security property: an org with no
+// override resolves to the TIGHTEST tier, never to the widest. The absence of a plan is
+// never read as "unlimited".
+func TestOrgTierResolverIsFailClosed(t *testing.T) {
+	resolve := orgTierResolver(map[string]quota.TierName{"org-bench": quota.TierPro})
+
+	tier, err := resolve(context.Background(), "org-bench")
+	if err != nil || tier != quota.TierPro {
+		t.Errorf("overridden org = (%q, %v), want (pro, nil)", tier, err)
+	}
+	for _, org := range []string{"org-other", "", "ORG-BENCH", "org-bench "} {
+		tier, err := resolve(context.Background(), org)
+		if err != nil || tier != quota.TierFree {
+			t.Errorf("org %q = (%q, %v), want (free, nil)", org, tier, err)
+		}
+	}
+}
+
+// TestOrgTierResolverWithNoOverridesMatchesTheFreeDefault proves the flag is inert when
+// unset: the hosted default posture is byte-for-byte what it was before this existed.
+func TestOrgTierResolverWithNoOverridesMatchesTheFreeDefault(t *testing.T) {
+	for _, overrides := range []map[string]quota.TierName{nil, {}} {
+		resolve := orgTierResolver(overrides)
+		tier, err := resolve(context.Background(), "any-org")
+		if err != nil || tier != quota.TierFree {
+			t.Errorf("overrides=%v: got (%q, %v), want (free, nil)", overrides, tier, err)
+		}
+	}
+}
+
+// TestBuildQuotaEnforcerAppliesTheOrgTierGrant is the wiring assertion: a correct
+// resolver is useless if buildQuotaEnforcer never consults it. The free tier allows
+// 5 creates/minute and pro allows 120, so the granted org must survive a burst that
+// the ungranted one cannot.
+func TestBuildQuotaEnforcerAppliesTheOrgTierGrant(t *testing.T) {
+	wiring := buildQuotaEnforcer(enforcementConfig{
+		enabled:  true,
+		orgTiers: map[string]quota.TierName{"org-granted": quota.TierPro},
+	})
+
+	// Read the cap from the ladder rather than hardcoding it, so a change to the free
+	// tier cannot make this test silently vacuous.
+	burst := int(quota.DefaultTiers()[quota.TierFree].CreationRatePerMinute) + 1
+	granted := 0
+	for i := 0; i < burst; i++ {
+		if err := wiring.enforcer.Check(context.Background(), "org-granted", "sandbox.create"); err == nil {
+			granted++
+		}
+	}
+	if granted != burst {
+		t.Errorf("granted org completed %d/%d creates, want all of them (pro allows 120/min)", granted, burst)
+	}
+
+	allowed := 0
+	for i := 0; i < burst; i++ {
+		if err := wiring.enforcer.Check(context.Background(), "org-plain", "sandbox.create"); err == nil {
+			allowed++
+		}
+	}
+	if allowed >= burst {
+		t.Errorf("ungranted org completed %d/%d creates; the free creation-rate cap did not apply", allowed, burst)
+	}
+}

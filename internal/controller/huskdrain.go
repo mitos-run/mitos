@@ -56,6 +56,13 @@ import (
 // option is surfaced honestly, never silently degraded. See docs/conditions.md.
 const reasonCheckpointNotImplemented = "CheckpointNotImplemented"
 
+// reasonSandboxRestarted is the Warning event emitted when a sandbox's backing VM was
+// destroyed and replaced by a fresh one from the pool template. The Ready condition
+// that records it is transient (the re-activation flips Ready back to True), so the
+// event plus Status.Restarts are the durable signals a tenant's in-guest state is gone
+// (mitos-run/mitos#870).
+const reasonSandboxRestarted = "SandboxRestarted"
+
 // huskCheckpointer is the seam the claim reconciler checkpoints a live husk VM
 // through before re-pending under a Checkpoint drain policy. The production
 // value (defaultHuskCheckpointer) calls the engine ForkRunning/CreateSnapshot
@@ -175,7 +182,11 @@ func (r *SandboxReconciler) rependOnHuskPodLost(ctx context.Context, claim *v1.S
 	}
 
 	reason := "HuskPodLost"
-	msg := "the backing husk pod was lost (drain, eviction, or deletion); the claim is re-pending and will re-activate on a replacement dormant slot"
+	// Say what actually happened. The replacement re-activates from the POOL TEMPLATE,
+	// so the tenant's processes, guest filesystem writes, and guest memory are GONE.
+	// The old message ("will re-activate on a replacement dormant slot") read like a
+	// transparent failover and let a caller keep working against a wiped guest (#870).
+	msg := "the backing husk pod was lost (drain, eviction, or deletion); the sandbox re-activates on a replacement dormant slot from the pool template, so ALL in-guest state (processes, memory, filesystem writes) was LOST. Check status.restarts to detect this; create a new sandbox, or persist state via a workspace"
 	if policy == v1.DrainCheckpoint {
 		if checkpointed {
 			msg = "the backing husk pod was lost; a live-VM checkpoint was captured and the claim is re-pending to re-activate on a replacement slot"
@@ -194,6 +205,20 @@ func (r *SandboxReconciler) rependOnHuskPodLost(ctx context.Context, claim *v1.S
 				"DrainPolicy Checkpoint is not yet implemented; claim %q re-pended with Kill semantics (in-VM state NOT captured)", claim.Name)
 			logger.Info("Checkpoint drain policy is not implemented; degraded to Kill re-pend (in-VM state lost)", "claim", claim.Name)
 		}
+	}
+
+	// DURABLE restart signal (#870). The Ready condition below is transient: the next
+	// reconcile re-activates the claim and stamps Ready=True, so a caller polling the
+	// API sees an unbroken healthy sandbox. Restarts survives that, which is what lets
+	// a client detect that the VM it created no longer exists. Not incremented when a
+	// Checkpoint actually captured the live VM: that re-pend restores the state.
+	if !checkpointed {
+		claim.Status.Restarts++
+		now := metav1.NewTime(r.now())
+		claim.Status.LastRestartTime = &now
+		r.Feed.recorderOrNop().Eventf(claim, corev1.EventTypeWarning, reasonSandboxRestarted,
+			"backing husk pod %q was lost; sandbox %q re-activates from the pool template and ALL in-guest state was lost (restart %d)",
+			pod.GetName(), claim.Name, claim.Status.Restarts)
 	}
 
 	claim.Status.Phase = v1.SandboxPending

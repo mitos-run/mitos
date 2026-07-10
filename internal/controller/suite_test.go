@@ -16,7 +16,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/retry"
@@ -107,29 +106,30 @@ func (r *bufferingRecorder) snapshot() []string {
 	return append([]string(nil), r.events...)
 }
 
-// updateSandboxStatusWithRetry applies a Sandbox status mutation under
-// RetryOnConflict, re-Getting the object each attempt. A test that Creates a
-// sandbox and immediately stamps its status from the stale Create response
-// loses the optimistic-lock race intermittently: the claim reconciler writes
-// metadata (the pool-missing stamp) and status (a PoolNotFound pend) on a
-// sandbox whose referenced pool does not exist, bumping the resourceVersion in
-// between (issue #630).
+// updateSandboxStatusWithRetry applies a Sandbox status mutation from a test.
+//
+// It PATCHES rather than Updates, deliberately. A Get-mutate-Update takes an optimistic
+// lock on resourceVersion, and a source claim's reconciler churns the object
+// continuously (it re-reconciles while pending), so the write kept losing that race:
+// "the object has been modified; please apply your changes" (issue #630). The retry
+// budget here was widened from retry.DefaultRetry to ~3s, then to ~6.7s, and STILL
+// flaked in CI under -race (TestHuskForkChildInheritsSourceNetwork). Reproduced locally
+// on main at roughly one run in three.
+//
+// A merge patch carries no resourceVersion, so it CANNOT conflict, however long the
+// reconciler churns. It also states what these tests actually mean: stamp these status
+// fields, do not replace the object. RetryOnConflict is kept for the same reason a belt
+// is kept with braces; it should now never fire.
 func updateSandboxStatusWithRetry(t *testing.T, name, namespace string, mutate func(*v1.Sandbox)) {
 	t.Helper()
-	// retry.DefaultRetry is only ~5 short steps; a source claim whose reconciler
-	// churns the object continuously (it re-reconciles while pending) can conflict
-	// on every one of them, flaking the status write. A ~3s budget was measured to
-	// still flake (the churn outlasts it), so retry for about 6.7s worst case
-	// (20 steps, 40ms base, 1.3x, capped at 500ms), long enough to always catch a
-	// gap in the reconcile loop while still bounding a genuinely wedged write.
-	backoff := wait.Backoff{Steps: 20, Duration: 40 * time.Millisecond, Factor: 1.3, Cap: 500 * time.Millisecond}
-	if err := retry.RetryOnConflict(backoff, func() error {
+	if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		var sb v1.Sandbox
 		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: namespace}, &sb); err != nil {
 			return err
 		}
+		patch := client.MergeFrom(sb.DeepCopy())
 		mutate(&sb)
-		return k8sClient.Status().Update(ctx, &sb)
+		return k8sClient.Status().Patch(ctx, &sb, patch)
 	}); err != nil {
 		t.Fatalf("update sandbox %s/%s status: %v", namespace, name, err)
 	}
@@ -324,6 +324,36 @@ func currentHuskTestCheckpointer() func(ctx context.Context, claim *v1.Sandbox, 
 	huskTestCheckpointerMu.Lock()
 	defer huskTestCheckpointerMu.Unlock()
 	return huskTestCheckpointer
+}
+
+// huskTestTokenWriter is the per-test fake token Secret writer, guarded exactly like
+// huskTestActivator. The husk claim reconciler is SHARED and live for the whole suite,
+// so writing its seam field directly would race an in-flight reconcile from another
+// test. The reconciler instead holds ONE stable closure, installed in the suite setup,
+// that reads this variable under the mutex.
+// huskClaim is the husk-enabled claim reconciler the suite registers; tests reach it
+// to install per-test seams.
+var huskClaim *controller.SandboxReconciler
+
+var (
+	huskTestTokenWriterMu sync.Mutex
+	huskTestTokenWriter   func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error
+)
+
+// setHuskTestTokenWriter installs a fake per-sandbox token Secret writer for one test,
+// or restores the real ensureSandboxTokenSecret with nil.
+func setHuskTestTokenWriter(fn func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error) {
+	huskTestTokenWriterMu.Lock()
+	defer huskTestTokenWriterMu.Unlock()
+	huskTestTokenWriter = fn
+}
+
+// currentHuskTestTokenWriter returns the installed fake, or nil when none is installed,
+// in which case the reconciler uses the real writer.
+func currentHuskTestTokenWriter() func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error {
+	huskTestTokenWriterMu.Lock()
+	defer huskTestTokenWriterMu.Unlock()
+	return huskTestTokenWriter
 }
 
 // setHuskTestActivator installs the husk activator the suite reconciler uses.
@@ -657,7 +687,7 @@ func TestMain(m *testing.M) {
 
 	// A husk-enabled claim reconciler that handles ONLY husk-test claims. Its
 	// activator is swappable per test via setHuskTestActivator.
-	huskClaim := &controller.SandboxReconciler{
+	huskClaim = &controller.SandboxReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
 		APIReader:         mgr.GetAPIReader(),
@@ -674,6 +704,14 @@ func TestMain(m *testing.M) {
 	// (husk-fork-test) sandboxes: the consolidated reconciler owns both engines, so
 	// a husk pod event enqueues the sandbox on exactly one reconciler (no race).
 	huskClaim.OnlyLabels(controller.HuskTestClaimLabel, controller.HuskForkTestLabel)
+	// ONE stable closure for the whole suite: it reads the per-test fake under the
+	// mutex, so installing a fake never writes a live reconciler's field.
+	huskClaim.SetEnsureTokenSecretForTest(func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error {
+		if fn := currentHuskTestTokenWriter(); fn != nil {
+			return fn(ctx, c, owner, name, token, endpoint)
+		}
+		return controller.EnsureSandboxTokenSecretForTest(ctx, c, owner, name, token, endpoint)
+	})
 	huskClaim.SetActivateForTest(func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error) {
 		// The activate seam is shared by the husk-claim path and the husk-fork child
 		// path. A husk-fork test installs currentForkActivator; a husk-claim test

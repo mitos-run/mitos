@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
+	"strings"
 
 	"mitos.run/mitos/internal/saas"
 	"mitos.run/mitos/internal/saas/quota"
@@ -34,6 +38,11 @@ type enforcementConfig struct {
 	// with no cluster client), under which the live caps are not enforced; the
 	// mode string names that gap.
 	live quota.LiveUsageSource
+	// orgTiers grants specific orgs a tier above the fail-closed TierFree default,
+	// parsed from the repeatable --org-tier flag. It is OPERATOR configuration; no
+	// tenant input reaches it. Empty (the default) means every org is TierFree, the
+	// posture before this existed.
+	orgTiers map[string]quota.TierName
 }
 
 // quotaWiring is the constructed enforcement surface: the saas.QuotaEnforcer the
@@ -83,6 +92,16 @@ func (conservativeLiveUsage) Live(_ context.Context, _ string) (quota.LiveUsage,
 	return quota.LiveUsage{}, nil
 }
 
+// multiFlag collects a repeatable string flag (flag.Value). Used by --org-tier.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
+	return nil
+}
+
 // freeTierResolver resolves every org to the tightest tier (TierFree). It is the
 // fail-closed default until a plan-backed resolver (reading the org's billing
 // plan) is wired: an org whose plan is unknown gets the SMALLEST limits and the
@@ -90,6 +109,64 @@ func (conservativeLiveUsage) Live(_ context.Context, _ string) (quota.LiveUsage,
 // explicit, plan-driven action; the absence of a plan is never read as "unlimited".
 func freeTierResolver(_ context.Context, _ string) (quota.TierName, error) {
 	return quota.TierFree, nil
+}
+
+// parseOrgTiers parses repeated `--org-tier=<orgID>=<tier>` entries into the override
+// map. It is the ONLY place a tier name is trusted, so it validates against the tier
+// ladder and refuses anything it does not recognize: a typo stops the process at
+// startup rather than resolving to a surprising tier at request time. A duplicate org
+// is an error too, because last-wins would make an org's effective limits depend on
+// flag order.
+//
+// Org ids and tier names are not secrets and may be logged; no credential passes here.
+func parseOrgTiers(entries []string) (map[string]quota.TierName, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	ladder := quota.DefaultTiers()
+	out := make(map[string]quota.TierName, len(entries))
+	for _, entry := range entries {
+		org, name, ok := strings.Cut(entry, "=")
+		org = strings.TrimSpace(org)
+		name = strings.TrimSpace(name)
+		if !ok || org == "" || name == "" {
+			return nil, fmt.Errorf("org-tier %q: want <orgID>=<tier>", entry)
+		}
+		tier := quota.TierName(name)
+		if _, known := ladder[tier]; !known {
+			return nil, fmt.Errorf("org-tier %q: unknown tier %q", entry, name)
+		}
+		if _, dup := out[org]; dup {
+			return nil, fmt.Errorf("org-tier %q: org %q given more than once", entry, org)
+		}
+		out[org] = tier
+	}
+	return out, nil
+}
+
+// orgTierResolver resolves an org to its operator-granted tier, and to TierFree when
+// the org has no grant. It is the first step of the plan-backed resolver freeTierResolver
+// stands in for: it lets an operator grant a tier before billing plans are wired, from
+// configuration the operator controls, never from anything a tenant can set.
+//
+// FAILS CLOSED, exactly like freeTierResolver: an org that is not named in the overrides
+// gets the SMALLEST limits and the deny-by-default egress posture. Absence of a grant is
+// never read as "unlimited", and the match is exact (no case folding, no trimming), so a
+// near-miss org id gets the tight tier rather than the wide one.
+func orgTierResolver(overrides map[string]quota.TierName) func(context.Context, string) (quota.TierName, error) {
+	if len(overrides) == 0 {
+		return freeTierResolver
+	}
+	granted := make(map[string]quota.TierName, len(overrides))
+	for org, tier := range overrides {
+		granted[org] = tier
+	}
+	return func(_ context.Context, orgID string) (quota.TierName, error) {
+		if tier, ok := granted[orgID]; ok {
+			return tier, nil
+		}
+		return quota.TierFree, nil
+	}
 }
 
 // buildQuotaEnforcer constructs the gateway's quota/abuse enforcement surface from
@@ -149,7 +226,7 @@ func buildQuotaEnforcer(cfg enforcementConfig) quotaWiring {
 	}
 	enf := quota.NewEnforcer(quota.Deps{
 		Tiers:       quota.DefaultTiers(),
-		TierOf:      freeTierResolver,
+		TierOf:      orgTierResolver(cfg.orgTiers),
 		LiveUsage:   live,
 		Suspensions: sus,
 		// Now nil: the enforcer creates a real-clock rate limiter.
@@ -175,6 +252,13 @@ func buildQuotaEnforcer(cfg enforcementConfig) quotaWiring {
 // operator can always see whether the gateway is enforcing quotas, without leaking
 // any secret. It logs the mode string and the trusted-hop count only.
 func logEnforcementMode(log *slog.Logger, cfg enforcementConfig, w quotaWiring) {
+	// A granted tier widens an org's limits (and, at TierPro, its egress posture), so
+	// it is never silent: every grant is named at startup. Org ids and tier names are
+	// not secrets.
+	for _, org := range slices.Sorted(maps.Keys(cfg.orgTiers)) {
+		log.Warn("gateway quota tier granted to org above the fail-closed free default",
+			"org", org, "tier", string(cfg.orgTiers[org]))
+	}
 	if cfg.enabled {
 		log.Info("gateway quota enforcement", "mode", w.mode, "trusted_proxy_hops", cfg.trustedProxyHops)
 		return
