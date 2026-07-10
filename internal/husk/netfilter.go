@@ -81,15 +81,37 @@ type netfilterRunner func(ctx context.Context, argv []string, stdin string) erro
 // `nft -f` that applies the shared table, this VM's per-tap chain, the SNAT, the
 // shared input table, and this tap's input chain. A malformed allowlist fails
 // the whole call (fail-closed: a VM never comes up with a half-applied filter).
+// applyEgressFilter brings up this VM's tap and installs its policy, fail-closed.
+//
+// It is the composition of the two halves below, and it stays the ONLY entry point for
+// callers that have no prepared link: the two are split so a warm husk pod can pay the
+// link half while it is dormant (no tenant attached) and leave only the policy half on
+// the claim's hot path. Measured on prod, the link half is roughly two thirds of the
+// ~30 ms this call costs at activate.
 func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwarding func() error, cfg NetfilterConfig) (err error) {
-	enforceable, _, err := netconf.SplitAllowList(cfg.Allow)
-	if err != nil {
+	// Reject a malformed allowlist BEFORE creating anything, so a bad policy never
+	// costs a tap create and teardown, and the caller sees the parse error rather than
+	// a later one. applyEgressPolicy re-parses; parsing is pure and cheap.
+	if _, _, err := netconf.SplitAllowList(cfg.Allow); err != nil {
 		return fmt.Errorf("husk netfilter: parse allowlist: %w", err)
 	}
-	cidrV4, cidrV6, err := netconf.ParseCIDRList(cfg.AllowCIDRs)
-	if err != nil {
+	if _, _, err := netconf.ParseCIDRList(cfg.AllowCIDRs); err != nil {
 		return fmt.Errorf("husk netfilter: parse CIDR allowlist: %w", err)
 	}
+	if err := ensureEgressLink(ctx, run, enableForwarding, cfg); err != nil {
+		return err
+	}
+	return applyEgressPolicy(ctx, run, cfg)
+}
+
+// ensureEgressLink enables forwarding and (re)creates this VM's tap with its host /30.
+// It installs NO policy: a tap that exists without a policy carries no traffic, because
+// nothing is loaded behind it yet and the shared forward table's default is a drop.
+//
+// FAIL CLOSED and idempotent: any error tears the tap back down before returning, and a
+// pre-existing tap of the same name is removed first (the name is deterministic per
+// template, so a leaked tap would otherwise poison the pod with EBUSY forever, #428).
+func ensureEgressLink(ctx context.Context, run netfilterRunner, enableForwarding func() error, cfg NetfilterConfig) (err error) {
 	// IPv4 forwarding in the pod netns: the kernel will not route the guest /30
 	// between the tap and the pod uplink without it, so the SNAT below would have
 	// nothing to NAT. Nil seam (tests) skips it. Done first so a failure aborts
@@ -111,11 +133,11 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 	// ip -batch invocation may create the tap and then fail on a LATER line in the
 	// SAME process, which would leak the tap: its name is deterministic per
 	// template, so a leak makes the next activation fail right at tap creation
-	// with EBUSY (Device or resource busy), masking the real first-attempt error
-	// and permanently poisoning the warm pod (issue #428). Tearing down on every
-	// error path removes a partially created tap (link del of an absent tap is an
-	// ignored no-op), and the original error is preserved as the named return so
-	// the true root-cause step error is surfaced, not the EBUSY of a later retry.
+	// with EBUSY, masking the real first-attempt error and permanently poisoning
+	// the warm pod (issue #428). Tearing down on every error path removes a
+	// partially created tap (link del of an absent tap is an ignored no-op), and
+	// the original error is preserved as the named return so the true root-cause
+	// step error is surfaced, not the EBUSY of a later retry.
 	defer func() {
 		if err != nil {
 			// Detached from ctx so cleanup still runs when the failure was a
@@ -133,6 +155,30 @@ func applyEgressFilter(ctx context.Context, run netfilterRunner, enableForwardin
 	if err := run(ctx, netconf.IPBatchArgs(), netconf.RenderIPBatch(cfg.Tap, cfg.HostIP, cfg.ResolverIP)); err != nil {
 		return fmt.Errorf("husk netfilter: set up tap %s: %w", cfg.Tap, err)
 	}
+	return nil
+}
+
+// applyEgressPolicy installs (or REPLACES) this VM's netfilter policy on a tap that
+// already exists. It is one nft process applying one atomic transaction, so a claim can
+// widen a dormant VM's default-deny policy to its tenant posture with no window in
+// which the VM is unfiltered, and a malformed allowlist installs NOTHING.
+//
+// FAIL CLOSED: on any error the tap is torn down, exactly as a full applyEgressFilter
+// would, so a VM never comes up half-filtered.
+func applyEgressPolicy(ctx context.Context, run netfilterRunner, cfg NetfilterConfig) (err error) {
+	enforceable, _, err := netconf.SplitAllowList(cfg.Allow)
+	if err != nil {
+		return fmt.Errorf("husk netfilter: parse allowlist: %w", err)
+	}
+	cidrV4, cidrV6, err := netconf.ParseCIDRList(cfg.AllowCIDRs)
+	if err != nil {
+		return fmt.Errorf("husk netfilter: parse CIDR allowlist: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = teardownEgressFilter(context.WithoutCancel(ctx), run, cfg.Tap)
+		}
+	}()
 	// One nft process instead of ~5, applied as a SINGLE atomic transaction:
 	//   - the pod-global shared forward table (idempotent skeleton),
 	//   - this VM's per-tap egress chain (metadata drop + allowlist + counter),

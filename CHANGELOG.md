@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.39.1](https://github.com/mitos-run/mitos/compare/v1.39.0...v1.39.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **forkd:** stop concurrent template builds colliding on one placeholder tap ([#884](https://github.com/mitos-run/mitos/issues/884)) ([fd3854c](https://github.com/mitos-run/mitos/commit/fd3854c52fe01707ed9ca5a2f7ffe0008d8f50c1))
+
 ## [1.39.0](https://github.com/mitos-run/mitos/compare/v1.38.1...v1.39.0) (2026-07-10)
 
 

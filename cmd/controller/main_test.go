@@ -33,3 +33,26 @@ func TestResolveRunMode(t *testing.T) {
 		})
 	}
 }
+
+func TestValidatePrepareFlags(t *testing.T) {
+	cases := []struct {
+		name                                        string
+		egress, restore, multiVM, huskPods, wantErr bool
+	}{
+		{"off is fine", false, false, false, false, false},
+		{"egress with multivm and husk pods", true, false, true, true, false},
+		{"egress without multivm", true, false, false, true, true},
+		{"egress without husk pods (raw-forkd path)", true, false, true, false, true},
+		{"restore with egress, multivm, husk pods", true, true, true, true, false},
+		{"restore without egress", false, true, true, true, true},
+		{"restore with egress but no multivm", true, true, false, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePrepareFlags(tc.egress, tc.restore, tc.multiVM, tc.huskPods)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validatePrepareFlags(egress=%v,restore=%v,multiVM=%v,huskPods=%v) err=%v, wantErr=%v", tc.egress, tc.restore, tc.multiVM, tc.huskPods, err, tc.wantErr)
+			}
+		})
+	}
+}

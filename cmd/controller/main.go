@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	ctrladmission "sigs.k8s.io/controller-runtime/pkg/webhook/admission"
@@ -35,6 +37,28 @@ func init() {
 	// v1: the consolidated three-noun API (issue #23, ADR 0007). One served
 	// version equals stored version; v1alpha1 and v1alpha2 are removed.
 	utilruntime.Must(v1.AddToScheme(scheme))
+}
+
+// validatePrepareFlags rejects prepare-time flag combinations that would silently do
+// nothing, so an operator asking for a latency optimization is never left with a pod
+// shape that cannot deliver it. It runs AFTER resolveRunMode, so enableHuskPods already
+// reflects the resolved path (false on --enable-raw-forkd or --mock).
+//
+// --husk-prepare-egress-link needs BOTH --multi-vm-fork (the stub prepares its tap only
+// on the multi-VM Prepare path) AND the husk-pods run path (the raw-forkd path never
+// creates a husk pod, so there is no pod to prepare a tap in). --husk-prepare-restore
+// needs --husk-prepare-egress-link, and therefore everything that needs.
+func validatePrepareFlags(prepareEgressLink, prepareRestore, multiVMFork, enableHuskPods bool) error {
+	if prepareEgressLink && (!multiVMFork || !enableHuskPods) {
+		return fmt.Errorf("--husk-prepare-egress-link requires --multi-vm-fork AND the husk-pods run path (not --enable-raw-forkd or --mock): the tap is prepared only by a multi-VM husk pod, which the raw-forkd path never creates")
+	}
+	// Prepare-time restore builds ON the prepared tap (Firecracker binds the baked NIC
+	// to it at snapshot load), so it requires the egress link, and transitively
+	// everything the egress link requires.
+	if prepareRestore && !prepareEgressLink {
+		return fmt.Errorf("--husk-prepare-restore requires --husk-prepare-egress-link: the tap must exist before the snapshot load")
+	}
+	return nil
 }
 
 // resolveRunMode picks the single active controller run path from the flags.
@@ -63,6 +87,8 @@ func main() {
 	var huskConnReuse bool
 	var liveCowChildImport bool
 	var prewarmChild bool
+	var prepareEgressLink bool
+	var prepareRestore bool
 	var huskStubImage string
 	var huskDNSUpstream string
 	var huskControlPort int
@@ -95,6 +121,8 @@ func main() {
 	flag.BoolVar(&multiVMFork, "multi-vm-fork", false, "EXPERIMENTAL, DEFAULT OFF: route a hosted fork child into an ADDITIONAL VM spawned INSIDE the source husk pod (the spawn-vm control op) instead of a brand-new child pod, when the source pod is multi-VM capable (its stub runs --multi-vm). OFF is byte-for-byte the current new-pod-per-fork path, so nothing changes unless you opt in AND the source pod is multi-VM capable; a non-capable source silently falls back to a new pod. This wires the routing + status (child status.pod = source pod, status.vmId = the spawned VM); the per-pod and node memory accounting that pends or spills a fork when a pod is full is a follow-up, so co-location is capped conservatively and the remainder spills to new pods. Only used with --enable-husk-pods.")
 	flag.BoolVar(&liveCowFork, "live-cow-fork", false, "EXPERIMENTAL, DEFAULT OFF: start warm husk pods with --live-cow-fork so a CO-LOCATED fork child shares the PARENT's resident guest memory (patched Firecracker memfd + userfaultfd write-protect) instead of restoring from the disk fork snapshot (milestone m4b), driving the hosted fork toward sub-100ms. SEPARATE from --multi-vm-fork so it can be deployed off and canaried independently. OFF is byte-for-byte the current disk co-location. The co-located child still falls back to the disk restore where the child-side memfd import is not yet complete, so turning it on never breaks a fork; it is a no-op off Linux (userfaultfd write-protect is Linux-only). Only meaningful with --enable-husk-pods.")
 	flag.BoolVar(&liveCowChildImport, "live-cow-child-import", false, "EXPERIMENTAL, DEFAULT OFF: with --live-cow-fork on, opt warm husk pods onto the VMSTATE-ONLY fork capture (skip the ~364ms disk mem write) so a co-located child boots its guest RAM from the source shared memfd instead of the disk fork snapshot. REQUIRES a child-side-import patched Firecracker; off keeps the armed source writing the disk mem so every child restores from disk and no fork hangs. Only meaningful with --live-cow-fork and --enable-husk-pods.")
+	flag.BoolVar(&prepareRestore, "husk-prepare-restore", false, "EXPERIMENTAL, DEFAULT OFF: warm husk pods load their default VM's snapshot and RESUME its guest while DORMANT, so a claim pays only the fork-correctness handshake instead of the restore, resume, and guest-ready wait. REQUIRES --husk-prepare-egress-link (the tap must exist before the snapshot load) and --multi-vm-fork. Off keeps the whole restore on the activate path byte-for-byte.")
+	flag.BoolVar(&prepareEgressLink, "husk-prepare-egress-link", false, "EXPERIMENTAL, DEFAULT OFF: warm husk pods bring their default VM's tap up while DORMANT, under a default-deny policy, so a claim pays only the atomic nft transaction that installs the tenant's policy instead of also paying the tap create. Requires --multi-vm-fork and --enable-husk-pods. Off keeps the whole filter on the activate path byte-for-byte.")
 	flag.BoolVar(&prewarmChild, "prewarm-child", false, "EXPERIMENTAL, DEFAULT OFF: keep one dormant generic co-located child Firecracker pre-prepared per multi-vm husk pod so a fork adopts the ready child (fc_boot=0, prepare off the hot path) instead of booting one at fork time. Requires --multi-vm-fork and --enable-husk-pods; a fresh slot re-warms async, a miss falls back to on-demand prepare byte-for-byte.")
 	flag.BoolVar(&huskConnReuse, "husk-conn-reuse", false, "EXPERIMENTAL, DEFAULT OFF: reuse ONE authenticated mTLS husk control connection per husk pod across control-plane RPCs (activate, fork-snapshot, spawn-vm, remove-fork-snapshot) instead of opening a fresh TCP+TLS handshake per RPC. A co-located fork does fork-snapshot then spawn-vm to the SAME source pod, so reuse saves the second full handshake and cuts the per-RPC connection-setup overhead toward zero, driving the hosted fork toward sub-100ms. OFF is byte-for-byte the current one-shot dial-per-RPC path. The husk server always supports both (a one-shot client that closes after one request and a reused connection that sends several), so this flag only changes the CONTROLLER side and can be canaried + rolled back independently. mTLS identity is verified on every dial and one request is in flight per connection, so a reused connection is neither less authenticated nor frame-interleaved (see docs/threat-model.md). Only meaningful with --enable-husk-pods.")
 	flag.StringVar(&huskStubImage, "husk-stub-image", "mitos-husk-stub:latest", "Container image that runs the dormant-VMM stub in a husk pod. Only used with --enable-husk-pods.")
@@ -137,6 +165,15 @@ func main() {
 	// (it has no KVM), so mock implies the raw-forkd path the dev overlay uses.
 	// forkd-the-builder runs regardless in both modes (it builds the snapshots).
 	enableHuskPods, rawForkd := resolveRunMode(enableHuskPods, enableRawForkd, mockMode)
+	// FAIL FAST on a flag combination that would silently do nothing. The husk stub only
+	// brings its tap up on the multi-VM Prepare path, so --husk-prepare-egress-link
+	// without --multi-vm-fork would hand the pool builder MultiVM=false while the claim
+	// reconciler believed the link was prepared. An operator who asked for a latency
+	// optimization must not be left with a pod shape that cannot deliver it.
+	if err := validatePrepareFlags(prepareEgressLink, prepareRestore, multiVMFork, enableHuskPods); err != nil {
+		logger.Error(err, "invalid prepare-time flags")
+		os.Exit(1)
+	}
 	if rawForkd {
 		logger.Info("run path: raw-forkd (fork per claim); husk pods disabled", "reason-mock", mockMode, "reason-flag", enableRawForkd)
 	} else {
@@ -234,6 +271,8 @@ func main() {
 		LiveCowFork:               liveCowFork,
 		LiveCowChildImport:        liveCowChildImport,
 		PrewarmChild:              prewarmChild,
+		PrepareEgressLink:         prepareEgressLink,
+		PrepareRestore:            prepareRestore,
 		HuskStubImage:             huskStubImage,
 		HuskDNSUpstream:           huskDNSUpstream,
 		KVMResourceName:           "mitos.run/kvm",
@@ -279,6 +318,8 @@ func main() {
 		HuskConns:          huskConnPool,
 		LiveCowChildImport: liveCowChildImport,
 		PrewarmChild:       prewarmChild,
+		PrepareEgressLink:  prepareEgressLink,
+		PrepareRestore:     prepareRestore,
 		HuskControlPort:    huskControlPort,
 		HuskStubImage:      huskStubImage,
 		HuskDNSUpstream:    huskDNSUpstream,
@@ -467,6 +508,28 @@ func main() {
 			return controller.HuskDialTLSConfig(dialCtx, mgr.GetClient(), discoveryNamespace, poolNamespace)
 		}
 		sandboxReconciler.HuskTLSFor = huskDial
+
+		// Pre-warm the mTLS dial config once the manager cache is up, so the FIRST
+		// warm claim after a controller start or a leader handover does not pay the
+		// cold path. Measured on prod: the first claim's dial_tls stage was 301 ms
+		// (the lazy Secret informer cache fill for the controller namespace) against
+		// ~1 ms for every claim after it. That 300 ms landed squarely on one user's
+		// create, every rollout.
+		//
+		// Best effort by construction: a failure here is not fatal (the reconciler
+		// resolves the config itself on demand exactly as before), so a controller
+		// whose PKI is not ready yet still starts and converges.
+		if err := mgr.Add(manager.RunnableFunc(func(runCtx context.Context) error {
+			if _, werr := huskDial(runCtx, discoveryNamespace); werr != nil {
+				logger.Info("husk mTLS pre-warm skipped; the first claim will resolve it on demand", "detail", werr.Error())
+				return nil
+			}
+			logger.Info("husk mTLS dial config pre-warmed", "namespace", discoveryNamespace)
+			return nil
+		})); err != nil {
+			logger.Error(err, "unable to add husk mTLS pre-warm")
+			os.Exit(1)
+		}
 		logger.Info("PKI bootstrap complete; dialing forkd with mTLS and husk pods with per-namespace identity", "namespace", discoveryNamespace)
 	}
 

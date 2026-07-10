@@ -99,7 +99,19 @@ type vmInstance struct {
 	prepareVerified bool
 	rootfsClonePath string
 	activeTap       string
-	dnsProxy        *dnsproxy.Server
+	// preparedLinkTap names the tap this instance brought up while DORMANT
+	// (Options.PrepareEgressLink). When it matches the tap the claim resolves to,
+	// activate installs the tenant policy on it and skips the link setup. Cleared
+	// whenever the tap is torn down, so a retry re-ensures it.
+	preparedLinkTap string
+	// preRestored is set when this instance loaded its snapshot and RESUMED its guest
+	// while dormant (Options.PrepareRestore), so activate skips the restore/resume/
+	// guest-ready and pays only the fork-correctness handshake. preRestoredSnapshotDir
+	// is the snapshot the dormant restore used; activate FAILS CLOSED if the claim's
+	// snapshot dir differs, because a resumed guest cannot be reloaded.
+	preRestored            bool
+	preRestoredSnapshotDir string
+	dnsProxy               *dnsproxy.Server
 
 	// childUFFDPlan carries a co-located live-cow fork child's LAZY UFFD import
 	// intent from SpawnVM to activateInstance: the ChildMemfdImport coordinates (the
@@ -605,6 +617,32 @@ type Options struct {
 	// Independent of LiveCowFork so the source can be armed (freezer live) without
 	// yet skipping the disk mem.
 	LiveCowChildImport bool
+	// PrepareEgressLink opts a multi-VM pod into bringing up its default VM's tap
+	// while the pod is DORMANT (no tenant attached), so a claim pays only the atomic
+	// nft transaction that installs the tenant's policy instead of also paying the
+	// tap create. Measured on prod, the link half is roughly two thirds of the ~30 ms
+	// the egress_filter stage costs on the warm-claim hot path.
+	//
+	// DEFAULTS false. Requires MultiVM and InPodGuestIP; a no-op otherwise, so a pod
+	// that does not opt in behaves byte-for-byte as before. The dormant tap carries a
+	// DEFAULT-DENY policy, and the claim REPLACES it in one nft transaction, so there
+	// is never a window in which a VM is unfiltered.
+	PrepareEgressLink bool
+	// InPodGuestIP / InPodGatewayIP are the fixed in-pod /30 the pod's default VM
+	// uses. They are the same values the controller sends in the activate request;
+	// PrepareEgressLink needs them BEFORE that request arrives, because the tap name
+	// derives from the guest IP. Config, never secrets.
+	InPodGuestIP   string
+	InPodGatewayIP string
+	// PrepareRestore opts a multi-VM pod's DEFAULT VM into loading its snapshot and
+	// resuming its guest while the pod is DORMANT, so a claim pays only the fork-
+	// correctness handshake instead of the snapshot restore, the resume, and the guest-
+	// ready wait (measured ~55 ms of the ~113 ms warm-claim activate, plus the demand
+	// fault-in that makes the first run_code cold). REQUIRES PrepareEgressLink (the tap
+	// must exist before LoadSnapshot) and InPodGuestIP. Default off. The dormant guest
+	// serves no tenant and is reseeded fail-closed at the claim's NotifyForked, exactly
+	// as a restore-at-activate guest is. See docs/superpowers/plans/2026-07-10-prepare-time-restore.md.
+	PrepareRestore bool
 	// PrewarmChild opts into keeping ONE dormant, generic co-located child
 	// Firecracker pre-prepared (booted, and snapshot-verified when a template
 	// snapshot is configured) in a multi-VM pod, so a co-located fork that does
@@ -728,6 +766,12 @@ type Stub struct {
 	// restores from the disk fork snapshot until a child-side memfd-import
 	// Firecracker patch ships) is always restorable and the fork never hangs.
 	liveCowChildImport bool
+
+	// prepareEgressLink / inPodGuestIP / inPodGatewayIP back Options.PrepareEgressLink.
+	prepareEgressLink bool
+	prepareRestore    bool
+	inPodGuestIP      string
+	inPodGatewayIP    string
 	// prewarmChild keeps ONE dormant, generic co-located child Firecracker
 	// pre-prepared (Options.PrewarmChild) so a co-located fork that needs no
 	// fork-specific launch env activates it instead of paying the process boot on
@@ -805,6 +849,10 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		multiVM:            opts.MultiVM,
 		liveCowFork:        opts.LiveCowFork,
 		liveCowChildImport: opts.LiveCowChildImport,
+		prepareEgressLink:  opts.PrepareEgressLink,
+		prepareRestore:     opts.PrepareRestore,
+		inPodGuestIP:       opts.InPodGuestIP,
+		inPodGatewayIP:     opts.InPodGatewayIP,
 		prewarmChild:       opts.PrewarmChild,
 	}
 	// Multi-VM scaffold (#764), default off: allocate the per-fork instance map
