@@ -1,0 +1,27 @@
+{
+  "counts": {
+    "compiled_conditions": 1911,
+    "corpus_rules": 655,
+    "excluded_by_status": 39,
+    "mcp_bucket_rules": 399,
+    "skipped_re2_incompatible": 3,
+    "vendored_rules": 396
+  },
+  "coverage": {
+    "true_negative_cases": 1816,
+    "true_negative_clean": 1814,
+    "true_positive_cases": 1967,
+    "true_positive_matched": 1722
+  },
+  "license": "MIT",
+  "mcp_scan_targets": [
+    "",
+    "both",
+    "mcp",
+    "tool_args",
+    "tool_response"
+  ],
+  "source_repo": "https://github.com/Agent-Threat-Rule/agent-threat-rules",
+  "source_sha": "f49ddd904b50b33e804d3000f95a6d75864f0034",
+  "spec": "ATR-SPEC-v1"
+}

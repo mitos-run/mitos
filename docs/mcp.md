@@ -63,6 +63,25 @@ Flags and environment:
 | `--server` | `MITOS_BASE_URL` | `https://mitos.run` | Base URL of the sandbox-server; defaults to the hosted endpoint. |
 | `--token` | `MITOS_API_KEY` | credential file | Bearer token sent on every backend request. |
 | `--enable-workspace-tools` | | `false` | Advertise the deferred workspace tools. |
+| `--enable-atr` | | `false` | Screen `sandbox_exec` and `sandbox_write_file` calls against the vendored Agent Threat Rules in report mode (log detections, no deny). Detection only, not an isolation control. |
+| `--atr-scan-max-bytes` | | `262144` | Head-only byte cap for ATR scanning of a tool payload; a capped scan is logged as `truncated=true`. `0` disables the cap. |
+
+### Agent Threat Rules screening (report mode)
+
+With `--enable-atr`, mitos-mcp loads a vendored subset of
+[Agent Threat Rules](https://github.com/Agent-Threat-Rule/agent-threat-rules)
+(ATR-SPEC-v1, MIT) and screens the two tool calls that carry agent-authored
+payloads through the dispatch chokepoint: the `sandbox_exec` command and the
+`sandbox_write_file` content. A rule match is logged to stderr as one line
+naming the rule id, severity, category, and which fields fired; the screened
+payload itself is never logged.
+
+This is a DETECTION layer, not an isolation control. It flags patterns in the
+tool-call traffic mitos routes; it does not block prompt injection and does not
+change the tool result. In this slice there is no deny mode: enabling the flag
+only adds observability. The isolation boundary is unchanged whether the flag is
+on or off. See `docs/threat-model.md` section 9 for the honest layering, the
+RE2-subset coverage caveats, and the vendoring/provenance details.
 
 ### Token resolution
 
