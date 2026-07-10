@@ -346,3 +346,122 @@ func TestAFailedClaimPolicyRebuildsTheLinkOnRetry(t *testing.T) {
 		t.Error("a failed claim left activeTap set for a tap that was torn down")
 	}
 }
+
+// --- prepare-time restore -----------------------------------------------------------
+
+// newPrepareRestoreStub builds a multi-VM stub that brings its tap up AND restores +
+// resumes its default VM while dormant, over a recording net runner. It configures the
+// prepare snapshot dir so prepareRestoreDefaultVM engages.
+func newPrepareRestoreStub(t *testing.T, rr *recordingRunner, vms map[string]*fakeVMM) *Stub {
+	t.Helper()
+	start := func(cfg firecracker.VMConfig) (vmm, error) {
+		vm := &fakeVMM{}
+		if vms != nil {
+			vms[cfg.ID] = vm
+		}
+		return vm, nil
+	}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              start,
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		MultiVM:            true,
+		PrepareEgressLink:  true,
+		PrepareRestore:     true,
+		InPodGuestIP:       "10.200.0.2",
+		InPodGatewayIP:     "10.200.0.1",
+		PrepareSnapshotDir: "/snap",
+	})
+	s.SetNetRunner(rr.run)
+	return s
+}
+
+// TestPrepareRestoresAndResumesTheGuestWhileDormant is the core of slice 2: with
+// PrepareRestore, the LoadSnapshot and Resume happen at Prepare, so a claim pays neither.
+func TestPrepareRestoresAndResumesTheGuestWhileDormant(t *testing.T) {
+	var rr recordingRunner
+	vms := map[string]*fakeVMM{}
+	s := newPrepareRestoreStub(t, &rr, vms)
+	ctx := context.Background()
+
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	vm := vms["husk-test"]
+	if vm == nil {
+		t.Fatal("no default VM created")
+	}
+	if vm.loadCalls != 1 {
+		t.Errorf("Prepare loaded the snapshot %d times, want exactly 1 (restore at prepare)", vm.loadCalls)
+	}
+	if vm.resumeCalls != 1 {
+		t.Errorf("Prepare resumed %d times, want exactly 1 (resume at prepare)", vm.resumeCalls)
+	}
+
+	// The claim must NOT load or resume again: the guest is already running.
+	if _, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/snap", Network: baseNet()}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if vm.loadCalls != 1 {
+		t.Errorf("Activate re-loaded the snapshot (loadCalls=%d); it must reuse the pre-restored guest", vm.loadCalls)
+	}
+	if vm.resumeCalls != 1 {
+		t.Errorf("Activate re-resumed the guest (resumeCalls=%d); it must reuse the pre-restored guest", vm.resumeCalls)
+	}
+}
+
+// TestPrepareRestoreIsOptIn: without PrepareRestore the restore stays on the activate
+// path byte-for-byte (load + resume happen at Activate, not Prepare).
+func TestPrepareRestoreIsOptIn(t *testing.T) {
+	var rr recordingRunner
+	vms := map[string]*fakeVMM{}
+	// PrepareEgressLink on but PrepareRestore OFF.
+	start := func(cfg firecracker.VMConfig) (vmm, error) {
+		vm := &fakeVMM{}
+		vms[cfg.ID] = vm
+		return vm, nil
+	}
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start: start, Ready: readyOK, Notify: (&fakeNotifier{}).notify, Verify: verifyOK,
+		MultiVM: true, PrepareEgressLink: true, InPodGuestIP: "10.200.0.2", InPodGatewayIP: "10.200.0.1",
+		PrepareSnapshotDir: "/snap",
+	})
+	s.SetNetRunner(rr.run)
+	ctx := context.Background()
+
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	vm := vms["husk-test"]
+	if vm.loadCalls != 0 || vm.resumeCalls != 0 {
+		t.Fatalf("Prepare restored without opting in: load=%d resume=%d", vm.loadCalls, vm.resumeCalls)
+	}
+	if _, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/snap", Network: baseNet()}); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if vm.loadCalls != 1 || vm.resumeCalls != 1 {
+		t.Errorf("Activate must do the restore when not pre-restored: load=%d resume=%d", vm.loadCalls, vm.resumeCalls)
+	}
+}
+
+// TestActivateFailsClosedOnASnapshotMismatchAfterPrepareRestore: a resumed guest cannot
+// be reloaded, so a claim naming a DIFFERENT snapshot than the one pre-restored must be
+// refused rather than served against the wrong image.
+func TestActivateFailsClosedOnASnapshotMismatchAfterPrepareRestore(t *testing.T) {
+	var rr recordingRunner
+	vms := map[string]*fakeVMM{}
+	s := newPrepareRestoreStub(t, &rr, vms)
+	ctx := context.Background()
+	if err := s.Prepare(ctx); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	res, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/a-different-snapshot", Network: baseNet()})
+	if err == nil || res.OK {
+		t.Fatalf("Activate accepted a snapshot that differs from the pre-restored one: res=%+v err=%v", res, err)
+	}
+	if !strings.Contains(res.Error, "wrong image") {
+		t.Errorf("mismatch error should name the hazard, got %q", res.Error)
+	}
+}

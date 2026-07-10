@@ -17,6 +17,7 @@ import (
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/vsock"
@@ -388,7 +389,77 @@ func (s *Stub) prepareInstanceOpt(ctx context.Context, id vmID, opts prepareOpts
 		return err
 	}
 
+	// Load the snapshot and RESUME the guest while dormant, so the claim pays only the
+	// fork-correctness handshake. Requires the tap prepared just above (Firecracker
+	// binds the baked NIC to it at restore). FAIL CLOSED: on any error we refuse to go
+	// dormant, so the pool never offers a half-restored pod.
+	if err := s.prepareRestoreDefaultVM(ctx, id, inst, opts); err != nil {
+		if inst.vm != nil {
+			_ = inst.vm.Close()
+			inst.vm = nil
+		}
+		return err
+	}
+
 	inst.state = StateDormant
+	return nil
+}
+
+// prepareRestoreDefaultVM loads the pod's default-VM snapshot and resumes its guest
+// while the pod is DORMANT, when the stub opted in (Options.PrepareRestore). It is the
+// same load/rootfs-rebind/resume/guest-ready the warm-claim activate does, moved off the
+// hot path; activate then skips it and pays only the handshake.
+//
+// A NO-OP unless every precondition holds: PrepareRestore on, the tap was prepared just
+// above (preparedLinkTap set), the DEFAULT vm only, a real snapshot dir configured, and
+// this is not the pre-warm generic-child boot (opts.preWarmBoot). A co-located fork
+// child (its own snapshot, childUFFD backend, per-fork tap) is never pre-restored here;
+// it restores at spawn/activate exactly as before.
+//
+// The guest agent conn proven by the readiness wait is CLOSED, not held across dormancy:
+// a long-idle vsock conn can go stale, and re-dialing an already-running guest at the
+// claim is a sub-millisecond round trip.
+func (s *Stub) prepareRestoreDefaultVM(ctx context.Context, id vmID, inst *vmInstance, opts prepareOpts) error {
+	// id != defaultVMID already excludes the pre-warm generic child (it is always a
+	// secondary VM); skipRootfsClone and reuseVM are belt-and-braces so a future
+	// pre-warm of the default slot never double-resumes an adopted VMM.
+	if !s.prepareRestore || id != defaultVMID || inst.preparedLinkTap == "" ||
+		s.prepareSnapshotDir == "" || opts.skipRootfsClone || opts.reuseVM != nil {
+		return nil
+	}
+	// PrepareRestore requires PrepareEgressLink; the stub, pod builder, and controller
+	// all enforce that, and preparedLinkTap being set is the runtime proof the tap is up.
+	memFile := filepath.Join(s.prepareSnapshotDir, "mem")
+	vmStateFile := filepath.Join(s.prepareSnapshotDir, "vmstate")
+	// The baked NIC is remapped onto the prepared tap, the same override activate builds
+	// for the default VM (whose guest IP is the fixed in-pod constant).
+	overrides := []firecracker.NetworkOverride{{
+		IfaceID:     firecracker.NetIfaceID,
+		HostDevName: inst.preparedLinkTap,
+	}}
+	if err := s.setLiveCowMemSource(memFile); err != nil {
+		return fmt.Errorf("husk: prepare-restore arm lazy live-cow mem source for vm %q: %w", id, err)
+	}
+	if err := inst.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
+		return fmt.Errorf("husk: prepare-restore load snapshot for vm %q: %w", id, err)
+	}
+	if inst.rootfsClonePath != "" {
+		if err := inst.vm.PatchDrive("rootfs", inst.rootfsClonePath); err != nil {
+			return fmt.Errorf("husk: prepare-restore rebind rootfs drive for vm %q: %w", id, err)
+		}
+	}
+	if err := inst.vm.Resume(); err != nil {
+		return fmt.Errorf("husk: prepare-restore resume vm %q: %w", id, err)
+	}
+	conn, err := s.ready(ctx, inst.vm.VsockHostPath(firecracker.VsockRelPath), s.readyTimeout)
+	if err != nil {
+		return fmt.Errorf("husk: prepare-restore guest not ready for vm %q: %w", id, err)
+	}
+	if conn != nil {
+		_ = conn.Close() //nolint:errcheck // do not hold a vsock conn across dormancy
+	}
+	inst.preRestored = true
+	inst.preRestoredSnapshotDir = s.prepareSnapshotDir
 	return nil
 }
 
@@ -586,6 +657,35 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	recordStage(stages, "egress_filter", mark)
 	mark = time.Now()
 
+	// PRE-RESTORED fast path: this instance loaded its snapshot and resumed its guest
+	// while dormant (Options.PrepareRestore), so skip the restore, the rootfs rebind,
+	// the resume, and the guest-ready wait, and pay only the handshake below. FAIL
+	// CLOSED on a snapshot mismatch: a resumed guest cannot be reloaded, so if the claim
+	// names a different snapshot than the one restored at prepare, refuse rather than
+	// serve the wrong image. Only the default VM is ever pre-restored (see
+	// prepareRestoreDefaultVM), and a co-located fork child is never pre-restored.
+	if inst.preRestored {
+		if req.SnapshotDir != inst.preRestoredSnapshotDir {
+			werr := fmt.Errorf("husk: activate vm %q wants snapshot %q but this pod pre-restored %q; refusing to serve the wrong image", id, req.SnapshotDir, inst.preRestoredSnapshotDir)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+		recordStage(stages, "vmstate_restore", mark)
+		recordStage(stages, "resume", mark)
+		// Re-dial the already-running guest for the handshake. Sub-millisecond: the
+		// guest agent's vsock listener has been up since the prepare-time resume.
+		vsockPath := inst.vm.VsockHostPath(firecracker.VsockRelPath)
+		guestConn, err := s.ready(ctx, vsockPath, s.readyTimeout)
+		if err != nil {
+			werr := fmt.Errorf("husk: pre-restored guest not reachable at activate for vm %q: %w", id, err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+		if guestConn != nil {
+			defer guestConn.Close() //nolint:errcheck // best-effort on close
+		}
+		recordStage(stages, "guest_ready", mark)
+		return s.activateHandshakeAndServe(ctx, id, inst, req, perNet, vsockPath, guestConn, stages, start)
+	}
+
 	// LAZY live-cow restore (this is what makes vmstate_restore O(1) instead of an
 	// eager 512 MiB memfd copy inside PUT /snapshot/load): hand the armed WP handler
 	// the mem file BEFORE the load, so it can serve the MISSING faults the patched
@@ -649,8 +749,19 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		defer guestConn.Close() //nolint:errcheck // best-effort on close
 	}
 	recordStage(stages, "guest_ready", mark)
-	mark = time.Now()
 
+	return s.activateHandshakeAndServe(ctx, id, inst, req, perNet, vsockPath, guestConn, stages, start)
+}
+
+// activateHandshakeAndServe runs the CLAIM-specific tail of an activation: the fork-
+// correctness handshake (fresh entropy, clock step, per-VM network re-addressing, and
+// the tenant secrets), serving the sandbox API with the claim token, and the state and
+// timing bookkeeping. It is shared by the normal restore-at-activate path and the
+// pre-restored fast path, which reach it with an already-ready guest. mark is the clock
+// for the handshake stage; start is the whole-activate clock for the total.
+func (s *Stub) activateHandshakeAndServe(ctx context.Context, id vmID, inst *vmInstance, req ActivateRequest, perNet *vsock.NotifyForkedNetwork, vsockPath string, guestConn *guestgrpc.Client, stages map[string]float64, start time.Time) (ActivateResult, error) {
+	_ = ctx
+	mark := time.Now()
 	// Fork-correctness handshake with a fresh per-VM generation + entropy. Each
 	// instance owns its own generation counter, so two VMs never share it. The
 	// entropy and secret values are held only in memory and are NEVER logged.

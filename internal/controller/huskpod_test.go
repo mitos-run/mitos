@@ -1556,3 +1556,32 @@ func TestBuildHuskPodOmitsPrepareEgressLinkWithoutMultiVM(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildHuskPodThreadsPrepareRestore proves --prepare-restore flows to the stub ONLY
+// alongside --prepare-egress-link (and therefore MultiVM), because the restore builds on
+// the prepared tap. Off, the flag is absent.
+func TestBuildHuskPodThreadsPrepareRestore(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareRestore: true,
+	})
+	if !argsContain(on.Spec.Containers[0].Args, "--prepare-restore") {
+		t.Errorf("husk args missing --prepare-restore when enabled: %v", on.Spec.Containers[0].Args)
+	}
+
+	// Without the prepared link, restore has no tap; the flag must not be emitted.
+	noLink := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareRestore: true,
+	})
+	if argsContain(noLink.Spec.Containers[0].Args, "--prepare-restore") {
+		t.Errorf("husk args carry --prepare-restore without --prepare-egress-link: %v", noLink.Spec.Containers[0].Args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true, PrepareEgressLink: true})
+	if argsContain(off.Spec.Containers[0].Args, "--prepare-restore") {
+		t.Errorf("husk args must omit --prepare-restore by default: %v", off.Spec.Containers[0].Args)
+	}
+}
