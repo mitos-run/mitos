@@ -251,6 +251,17 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 		sb.Spec.Lifetime = &v1.SandboxLifetime{TTL: &metav1.Duration{Duration: d}}
 	}
 
+	return k.createSandboxAndAwait(ctx, sb, startedAt)
+}
+
+// createSandboxAndAwait writes sb and blocks for its terminal outcome. It is
+// shared by the tenant create path and the checkout buffer's refill, which is
+// why it takes a fully built Sandbox rather than a request body. The org id
+// used by error envelopes comes from sb's org label (empty for a buffered
+// refill, whose failures are logged, not returned to a tenant).
+func (k *K8sControlPlane) createSandboxAndAwait(ctx context.Context, sb *v1.Sandbox, startedAt time.Time) (saas.ForwardResponse, error) {
+	ns, name := sb.Namespace, sb.Name
+
 	// Establish the ready watch BEFORE the Create: the create event then
 	// arrives on the stream itself, which both closes the flip-before-watch
 	// window (no authoritative re-read needed) and takes one serialized
@@ -277,7 +288,7 @@ func (k *K8sControlPlane) create(ctx context.Context, req saas.ForwardRequest) (
 			return errResp(withStatus(apierr.Get(apierr.CodeInternal).
 				WithCause("a sandbox with the generated name already exists; retry"), http.StatusConflict)), nil
 		case isNamespaceMissing(err, ns):
-			return errResp(namespaceMissingErr(req.OrgID, ns)), nil
+			return errResp(namespaceMissingErr(sb.Labels[tenant.OrgLabelKey], ns)), nil
 		case apierrors.IsInvalid(err), apierrors.IsBadRequest(err):
 			// The caller's JSON decoded fine; the OBJECT the gateway built from
 			// it failed api server validation (for example an org id that is not
