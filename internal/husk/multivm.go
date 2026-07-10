@@ -412,7 +412,8 @@ func (s *Stub) prepareInstanceOpt(ctx context.Context, id vmID, opts prepareOpts
 //
 // A NO-OP unless every precondition holds: PrepareRestore on, the tap was prepared just
 // above (preparedLinkTap set), the DEFAULT vm only, a real snapshot dir configured, and
-// this is not the pre-warm generic-child boot (opts.preWarmBoot). A co-located fork
+// this is not the pre-warm generic-child boot (opts.skipRootfsClone) or an adopted VMM
+// (opts.reuseVM). A co-located fork
 // child (its own snapshot, childUFFD backend, per-fork tap) is never pre-restored here;
 // it restores at spawn/activate exactly as before.
 //
@@ -574,6 +575,16 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		return ActivateResult{OK: false, Error: "activate: empty snapshot dir"},
 			fmt.Errorf("husk: activate vm %q: empty snapshot dir", id)
 	}
+	// Pre-restored snapshot IDENTITY gate, FIRST, before any side effect. A resumed
+	// guest cannot be reloaded, so a claim naming a different snapshot than the one this
+	// pod pre-restored must be refused BEFORE the verify-on-activate re-hash runs and
+	// BEFORE the tenant egress policy is installed on the tap fronting the (wrong) guest.
+	// Hoisting it here (rather than at the pre-restored fast path below) is what makes
+	// the refusal genuinely fail-closed: no network mutation, no re-verify, nothing.
+	if inst.preRestored && req.SnapshotDir != inst.preRestoredSnapshotDir {
+		werr := fmt.Errorf("husk: activate vm %q wants snapshot %q but this pod pre-restored %q; refusing to serve the wrong image", id, req.SnapshotDir, inst.preRestoredSnapshotDir)
+		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
 
 	memFile := filepath.Join(req.SnapshotDir, "mem")
 	vmStateFile := filepath.Join(req.SnapshotDir, "vmstate")
@@ -665,10 +676,8 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	// serve the wrong image. Only the default VM is ever pre-restored (see
 	// prepareRestoreDefaultVM), and a co-located fork child is never pre-restored.
 	if inst.preRestored {
-		if req.SnapshotDir != inst.preRestoredSnapshotDir {
-			werr := fmt.Errorf("husk: activate vm %q wants snapshot %q but this pod pre-restored %q; refusing to serve the wrong image", id, req.SnapshotDir, inst.preRestoredSnapshotDir)
-			return ActivateResult{OK: false, Error: werr.Error()}, werr
-		}
+		// The snapshot-identity gate ran fail-closed at the top of activate, before the
+		// egress policy, so by here req.SnapshotDir == inst.preRestoredSnapshotDir.
 		recordStage(stages, "vmstate_restore", mark)
 		recordStage(stages, "resume", mark)
 		// Re-dial the already-running guest for the handshake. Sub-millisecond: the

@@ -457,11 +457,20 @@ func TestActivateFailsClosedOnASnapshotMismatchAfterPrepareRestore(t *testing.T)
 		t.Fatalf("Prepare: %v", err)
 	}
 
+	// Record how many net commands Prepare ran, so we can assert the mismatch refusal
+	// touched NONE beyond them: the identity gate fires before the egress policy, so a
+	// wrong-image claim must not install a tenant policy on the tap fronting the guest.
+	nBeforeActivate := len(rr.calls)
+
 	res, err := s.Activate(ctx, ActivateRequest{SnapshotDir: "/a-different-snapshot", Network: baseNet()})
 	if err == nil || res.OK {
 		t.Fatalf("Activate accepted a snapshot that differs from the pre-restored one: res=%+v err=%v", res, err)
 	}
 	if !strings.Contains(res.Error, "wrong image") {
 		t.Errorf("mismatch error should name the hazard, got %q", res.Error)
+	}
+	if len(rr.calls) != nBeforeActivate {
+		t.Errorf("a wrong-image claim mutated the egress datapath (%d new net commands); the identity gate must refuse before any side effect: %v",
+			len(rr.calls)-nBeforeActivate, rr.calls[nBeforeActivate:])
 	}
 }
