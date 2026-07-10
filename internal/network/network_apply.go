@@ -59,6 +59,14 @@ func setup(
 		}
 	}
 
+	// Remove any tap of this name left behind by a build or fork that died before its
+	// teardown ran. Creating over it fails with `ioctl(TUNSETIFF): Device or resource
+	// busy`, which masks the real first-attempt error and wedges the caller forever
+	// (the husk egress path has done this since #428). Best effort: "not found" is the
+	// normal case. Tap names are unique per identity, so a tap of this name is a leak,
+	// never a live peer: a template build is protected from racing itself by
+	// Engine.CreateTemplate's in-flight guard, and sandbox taps are per-sandbox.
+	_ = run(ctx, netconf.LinkDelArgs(id.TapName), "")
 	if err := run(ctx, netconf.TapAddArgs(id.TapName), ""); err != nil {
 		return fmt.Errorf("create tap %s: %w", id.TapName, err)
 	}

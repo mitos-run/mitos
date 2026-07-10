@@ -326,17 +326,37 @@ func currentHuskTestCheckpointer() func(ctx context.Context, claim *v1.Sandbox, 
 	return huskTestCheckpointer
 }
 
-// setHuskTestActivator installs the husk activator the suite reconciler uses.
-// setHuskTestTokenWriter installs a fake per-sandbox token Secret writer on the husk
-// claim reconciler for one test, or restores the real one with nil.
+// huskTestTokenWriter is the per-test fake token Secret writer, guarded exactly like
+// huskTestActivator. The husk claim reconciler is SHARED and live for the whole suite,
+// so writing its seam field directly would race an in-flight reconcile from another
+// test. The reconciler instead holds ONE stable closure, installed in the suite setup,
+// that reads this variable under the mutex.
 // huskClaim is the husk-enabled claim reconciler the suite registers; tests reach it
 // to install per-test seams.
 var huskClaim *controller.SandboxReconciler
 
+var (
+	huskTestTokenWriterMu sync.Mutex
+	huskTestTokenWriter   func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error
+)
+
+// setHuskTestTokenWriter installs a fake per-sandbox token Secret writer for one test,
+// or restores the real ensureSandboxTokenSecret with nil.
 func setHuskTestTokenWriter(fn func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error) {
-	huskClaim.SetEnsureTokenSecretForTest(fn)
+	huskTestTokenWriterMu.Lock()
+	defer huskTestTokenWriterMu.Unlock()
+	huskTestTokenWriter = fn
 }
 
+// currentHuskTestTokenWriter returns the installed fake, or nil when none is installed,
+// in which case the reconciler uses the real writer.
+func currentHuskTestTokenWriter() func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error {
+	huskTestTokenWriterMu.Lock()
+	defer huskTestTokenWriterMu.Unlock()
+	return huskTestTokenWriter
+}
+
+// setHuskTestActivator installs the husk activator the suite reconciler uses.
 func setHuskTestActivator(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
 	huskTestActivatorMu.Lock()
 	defer huskTestActivatorMu.Unlock()
@@ -684,6 +704,14 @@ func TestMain(m *testing.M) {
 	// (husk-fork-test) sandboxes: the consolidated reconciler owns both engines, so
 	// a husk pod event enqueues the sandbox on exactly one reconciler (no race).
 	huskClaim.OnlyLabels(controller.HuskTestClaimLabel, controller.HuskForkTestLabel)
+	// ONE stable closure for the whole suite: it reads the per-test fake under the
+	// mutex, so installing a fake never writes a live reconciler's field.
+	huskClaim.SetEnsureTokenSecretForTest(func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error {
+		if fn := currentHuskTestTokenWriter(); fn != nil {
+			return fn(ctx, c, owner, name, token, endpoint)
+		}
+		return controller.EnsureSandboxTokenSecretForTest(ctx, c, owner, name, token, endpoint)
+	})
 	huskClaim.SetActivateForTest(func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error) {
 		// The activate seam is shared by the husk-claim path and the husk-fork child
 		// path. A husk-fork test installs currentForkActivator; a husk-claim test

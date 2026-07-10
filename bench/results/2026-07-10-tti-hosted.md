@@ -110,27 +110,41 @@ Python interpreter accounts for most of the difference between that and `print(1
 ## Peer set
 
 Context, NOT a controlled comparison. The numbers below are P50s we computed from the
-raw per-iteration data ComputeSDK publishes, run `2026-07-09T01:03:05Z`, 100
-iterations per provider, `results/sequential_tti/latest.json` in
-`computesdk/benchmarks`. Reproduce with [`bench/peer-tti.py`](../peer-tti.py). They
-were produced on ComputeSDK's runner against each vendor's own hardware; we did not
-re-run them.
+raw per-iteration data ComputeSDK publishes, run `2026-07-09T01:03:05Z`, from
+`results/sequential_tti/2026-07-09.json` in `computesdk/benchmarks`. They were produced
+on ComputeSDK's runner against each vendor's own hardware; we did not re-run them.
 
-| provider | TTI P50 | P90 | min |
-|---|---|---|---|
-| isorun | 12.8 | 15.0 | 11.9 |
-| declaw | 37.7 | 88.8 | 28.5 |
-| northflank | 95.9 | 122.0 | 66.1 |
-| daytona | 136.2 | 300.7 | 97.0 |
-| archil | 201.0 | 372.7 | 133.9 |
-| upstash | 258.3 | 275.9 | 235.6 |
-| **mitos** | **307.7** | 348.4 | 265.7 |
-| e2b | 365.6 | 501.1 | 288.8 |
-| beam | 377.9 | 388.6 | 175.1 |
-| vercel | 392.7 | 503.3 | 241.4 |
-| modal | 470.9 | 603.9 | 429.8 |
-| cloudflare | 1758.7 | 2139.8 | 1027.7 |
-| codesandbox | 2215.8 | 2513.5 | 1938.5 |
+Reproduce EXACTLY, against the immutable commit this table was computed from:
+
+```
+python3 bench/peer-tti.py --date 2026-07-09 --ref 3eddee1a972bd49aea56fd6c16d238ca0a45dece
+```
+
+Even a dated file is only as stable as the branch it is read from, so the table pins the
+upstream commit rather than a branch. `latest.json` on their default branch is MUTABLE
+and a number published from it cannot be re-derived later; the harness warns when asked
+for it.
+
+`n` is the number of iterations that produced a valid sample and `err` the number that
+did not, so a percentile computed over fewer than 100 samples is visible rather than
+implied. Errored iterations are excluded, and they matter: `superserve` records
+`ttiMs: 0.0` on its failed iteration, which would otherwise report a 0.0 ms minimum.
+
+| provider | TTI P50 | P90 | min | n | err |
+|---|---|---|---|---|---|
+| isorun | 12.8 | 15.0 | 11.9 | 100 | 0 |
+| declaw | 37.7 | 88.8 | 28.5 | 100 | 0 |
+| northflank | 95.9 | 122.0 | 66.1 | 100 | 0 |
+| daytona | 136.2 | 300.7 | 97.0 | 100 | 0 |
+| archil | 201.0 | 372.7 | 133.9 | 100 | 0 |
+| upstash | 258.3 | 275.9 | 235.6 | 100 | 0 |
+| **mitos** | **307.7** | 348.4 | 265.7 | 20 | 0 |
+| e2b | 365.6 | 501.1 | 288.8 | 100 | 0 |
+| beam | 377.9 | 388.6 | 175.1 | 100 | 0 |
+| vercel | 392.7 | 503.3 | 241.4 | 100 | 0 |
+| modal | 470.9 | 603.9 | 429.8 | 100 | 0 |
+| cloudflare | 1758.7 | 2139.8 | 1027.7 | 100 | 0 |
+| codesandbox | 2215.8 | 2513.5 | 1938.5 | 100 | 0 |
 
 Read that table with three caveats, all of which cut against us claiming a win from it:
 

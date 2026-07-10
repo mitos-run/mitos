@@ -1014,7 +1014,14 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 		// token could otherwise land after it and leave the Ready claim with a token the
 		// husk never received. Cancelling first makes the join prompt.
 		cancelTokenWrite()
-		if tokErr := <-tokenErrCh; tokErr != nil && !errors.Is(tokErr, context.Canceled) {
+		joinStart := time.Now()
+		tokErr := <-tokenErrCh
+		// This join can block on the same write the success path times, so it is timed
+		// too: a failing claim that is slow BECAUSE it waited on the Secret write would
+		// otherwise be invisible.
+		logClaimStage(logger, claim.Name, "token_secret_wait", time.Since(joinStart))
+		logClaimStage(logger, claim.Name, "token_secret_span", time.Since(tokenStart))
+		if tokErr != nil && !errors.Is(tokErr, context.Canceled) {
 			// The claim is pending anyway; the next pass re-mints and overwrites. Never
 			// log the token VALUE.
 			logger.Error(tokErr, "token secret write failed while pending the claim", "secret", tokenSecretName)

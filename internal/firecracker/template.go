@@ -316,11 +316,28 @@ const VsockRelPath = "vsock.sock"
 // network_overrides (LoadSnapshotWithOverrides), so the value must be stable.
 const NetIfaceID = "eth0"
 
-// PlaceholderTapName is the host tap a template's placeholder NIC is bound to
-// at snapshot time. It never carries live traffic: the template VM is paused
-// and snapshotted, and every fork remaps NetIfaceID to its OWN tap at load.
-// The template build creates this tap (host-side) before booting.
-const PlaceholderTapName = "sbtap-template"
+// placeholderTapPrefix names the host taps template builds bind their placeholder
+// NIC to. A Linux interface name is capped at 15 characters, so the per-template
+// suffix below is 8 hex characters and the whole name is exactly 15.
+const placeholderTapPrefix = "sbtap-t"
+
+// PlaceholderTapNameFor is the host tap the template build for id binds its
+// placeholder NIC to at snapshot time. It never carries live traffic: the template
+// VM is paused and snapshotted, and every fork remaps NetIfaceID to its OWN tap at
+// load. The template build creates this tap (host-side) before booting.
+//
+// It is derived from the template id, NOT a shared constant. Every build used to
+// bind the same "sbtap-template", so two builds racing on one node (the controller
+// re-reconciles a pool every ~20 s while a build that pulls an image takes minutes)
+// collided: the second call failed with `ioctl(TUNSETIFF): Device or resource busy`,
+// the pool reported BuildFailed, and because a rebuilding pool does not serve its warm
+// husk pods, every create went Pending until the flapping stopped. Deriving the name
+// per template makes distinct templates independent; the in-flight guard in
+// Engine.CreateTemplate keeps a single template from racing itself.
+func PlaceholderTapNameFor(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return placeholderTapPrefix + hex.EncodeToString(sum[:4])
+}
 
 // TemplateManager handles the lifecycle of snapshot templates.
 // A template is: boot a VM → run init commands → pause → snapshot → kill.
