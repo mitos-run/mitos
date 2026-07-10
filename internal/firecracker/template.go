@@ -197,12 +197,22 @@ func (tm *TemplateManager) startWorkloadGRPC(vsockPath string, w *WorkloadSpec) 
 // start, so every fork wakes with a warm kernel instead of paying the ~5s lazy
 // start on its first run_code.
 //
-// FORK-CORRECTNESS INVARIANT: this cell must NOT touch random, numpy, uuid, or
-// anything else that draws randomness. CPython seeds its Mersenne Twister
-// lazily from os.urandom on first use; keeping the PRNGs unseeded at snapshot
-// time means each fork seeds fresh after the per-fork CRNG reseed instead of
-// inheriting one shared PRNG state (docs/fork-correctness.md, run_code kernel
-// caveat). Pinned by TestWarmKernelCode_NeverDrawsRandomness.
+// FORK-CORRECTNESS: this cell must NOT touch random, numpy, uuid, or anything else
+// that draws randomness. That is hygiene, and it is NOT sufficient on its own.
+//
+// The comment here used to claim that CPython seeds its Mersenne Twister lazily on
+// first use, so a warmup cell that drew no randomness left the kernel's PRNGs unseeded
+// in the snapshot. That is FALSE. random.Random seeds itself from os.urandom in its
+// CONSTRUCTOR, and the random module builds its shared instance at IMPORT. ipykernel's
+// own import chain imports random, so the Mersenne state is already fixed by the time
+// this cell runs. Measured against prod with warmKernel on, three INDEPENDENT sandboxes
+// each returned random.random() == 0.993005259705148.
+//
+// The actual mitigation lives in the guest: /opt/mitos/kernel_driver.py installs a
+// SIGUSR2 handler and reseeds the kernel's Python PRNGs before the next cell, after the
+// agent has credibly reseeded the CRNG (docs/fork-correctness.md, run_code kernel).
+// Keeping this cell inert still matters: it keeps the snapshot free of any randomness
+// the driver does not know how to reseed. Pinned by TestWarmKernelCode_NeverDrawsRandomness.
 const warmKernelCode = "pass"
 
 // warmKernelTimeoutSecs bounds the warmup cell. The ipykernel boot is ~5s on a
@@ -306,11 +316,28 @@ const VsockRelPath = "vsock.sock"
 // network_overrides (LoadSnapshotWithOverrides), so the value must be stable.
 const NetIfaceID = "eth0"
 
-// PlaceholderTapName is the host tap a template's placeholder NIC is bound to
-// at snapshot time. It never carries live traffic: the template VM is paused
-// and snapshotted, and every fork remaps NetIfaceID to its OWN tap at load.
-// The template build creates this tap (host-side) before booting.
-const PlaceholderTapName = "sbtap-template"
+// placeholderTapPrefix names the host taps template builds bind their placeholder
+// NIC to. A Linux interface name is capped at 15 characters, so the per-template
+// suffix below is 8 hex characters and the whole name is exactly 15.
+const placeholderTapPrefix = "sbtap-t"
+
+// PlaceholderTapNameFor is the host tap the template build for id binds its
+// placeholder NIC to at snapshot time. It never carries live traffic: the template
+// VM is paused and snapshotted, and every fork remaps NetIfaceID to its OWN tap at
+// load. The template build creates this tap (host-side) before booting.
+//
+// It is derived from the template id, NOT a shared constant. Every build used to
+// bind the same "sbtap-template", so two builds racing on one node (the controller
+// re-reconciles a pool every ~20 s while a build that pulls an image takes minutes)
+// collided: the second call failed with `ioctl(TUNSETIFF): Device or resource busy`,
+// the pool reported BuildFailed, and because a rebuilding pool does not serve its warm
+// husk pods, every create went Pending until the flapping stopped. Deriving the name
+// per template makes distinct templates independent; the in-flight guard in
+// Engine.CreateTemplate keeps a single template from racing itself.
+func PlaceholderTapNameFor(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return placeholderTapPrefix + hex.EncodeToString(sum[:4])
+}
 
 // TemplateManager handles the lifecycle of snapshot templates.
 // A template is: boot a VM → run init commands → pause → snapshot → kill.

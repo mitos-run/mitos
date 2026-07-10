@@ -154,6 +154,20 @@ func (r *SandboxReconciler) OnlyLabels(labels ...string) {
 	r.controllerName = "sandbox-husk"
 }
 
+// EnsureSandboxTokenSecretForTest exposes the REAL token Secret writer to the external
+// controller_test package, so the suite's stable seam closure can fall back to it when
+// no test installed a fake.
+func EnsureSandboxTokenSecretForTest(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error {
+	return ensureSandboxTokenSecret(ctx, c, owner, name, token, endpoint)
+}
+
+// SetEnsureTokenSecretForTest injects a fake per-sandbox token Secret writer, so a
+// test can control exactly when that concurrent write completes. Nil restores the
+// real ensureSandboxTokenSecret.
+func (r *SandboxReconciler) SetEnsureTokenSecretForTest(fn func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error) {
+	r.ensureTokenSecret = fn
+}
+
 // SetActivateForTest injects a fake husk activator (the test seam).
 func (r *SandboxReconciler) SetActivateForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
 	r.Activate = fn

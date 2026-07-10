@@ -3,11 +3,15 @@ package husk
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"mitos.run/mitos/internal/firecracker"
+	"mitos.run/mitos/internal/fork"
+
+	"mitos.run/mitos/internal/guestgrpc"
 )
 
 // newMultiVMTestStub builds a stub with the multi-VM execution mode ON, using a
@@ -42,7 +46,7 @@ func TestMultiVMTwoInstancesReachActiveIndependently(t *testing.T) {
 
 	const second vmID = "vm-2"
 	for _, id := range []vmID{defaultVMID, second} {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 		res, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: "/snap"})
@@ -92,7 +96,7 @@ func TestMultiVMCloseOneLeavesOtherActive(t *testing.T) {
 
 	const second vmID = "vm-2"
 	for _, id := range []vmID{defaultVMID, second} {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 		if _, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
@@ -128,7 +132,7 @@ func TestMultiVMMeteringReportsBothVMs(t *testing.T) {
 	s := newMultiVMTestStub(t, vms)
 
 	for _, id := range []vmID{defaultVMID, "vm-2"} {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 		if _, err := s.activateInstance(context.Background(), id, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
@@ -172,13 +176,13 @@ func TestMultiVMSecondActivateFailClosedLeavesFirstActive(t *testing.T) {
 		MultiVM: true,
 	})
 
-	if err := s.prepareInstance(context.Background(), defaultVMID, ""); err != nil {
+	if err := s.prepareInstance(context.Background(), defaultVMID, "", nil); err != nil {
 		t.Fatalf("prepareInstance(default): %v", err)
 	}
 	if _, err := s.activateInstance(context.Background(), defaultVMID, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
 		t.Fatalf("activateInstance(default): %v", err)
 	}
-	if err := s.prepareInstance(context.Background(), "vm-2", ""); err != nil {
+	if err := s.prepareInstance(context.Background(), "vm-2", "", nil); err != nil {
 		t.Fatalf("prepareInstance(vm-2): %v", err)
 	}
 	res, err := s.activateInstance(context.Background(), "vm-2", ActivateRequest{SnapshotDir: "/snap"})
@@ -236,7 +240,7 @@ func TestMultiVMActivateRoutesByVMID(t *testing.T) {
 	s := newMultiVMTestStub(t, vms)
 
 	const second vmID = "vm-2"
-	if err := s.prepareInstance(context.Background(), second, ""); err != nil {
+	if err := s.prepareInstance(context.Background(), second, "", nil); err != nil {
 		t.Fatalf("prepareInstance(vm-2): %v", err)
 	}
 	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: "/snap", VMID: string(second)})
@@ -391,7 +395,7 @@ func TestMultiVMPrepareRunsConcurrentlyPerInstance(t *testing.T) {
 		wg.Add(1)
 		go func(i int, id vmID) {
 			defer wg.Done()
-			errs[i] = s.prepareInstance(context.Background(), id, "")
+			errs[i] = s.prepareInstance(context.Background(), id, "", nil)
 		}(i, id)
 	}
 
@@ -439,10 +443,10 @@ func TestMultiVMActivateRunsConcurrentlyPerInstance(t *testing.T) {
 		vms[cfg.ID] = vm
 		return vm, nil
 	}
-	ready := func(context.Context, string, time.Duration) error {
+	ready := func(context.Context, string, time.Duration) (*guestgrpc.Client, error) {
 		entered <- struct{}{}
 		<-release
-		return nil
+		return nil, nil
 	}
 	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
 		Start:   start,
@@ -454,7 +458,7 @@ func TestMultiVMActivateRunsConcurrentlyPerInstance(t *testing.T) {
 
 	ids := []vmID{defaultVMID, "vm-2"}
 	for _, id := range ids {
-		if err := s.prepareInstance(context.Background(), id, ""); err != nil {
+		if err := s.prepareInstance(context.Background(), id, "", nil); err != nil {
 			t.Fatalf("prepareInstance(%s): %v", id, err)
 		}
 	}
@@ -518,7 +522,7 @@ func TestMultiVMPrepareRefusedWhileClosing(t *testing.T) {
 	if got := s.instanceFor("late", true); got != nil {
 		t.Fatalf("instanceFor create during closing = %v, want nil (refused)", got)
 	}
-	if err := s.prepareInstance(context.Background(), "late", ""); err == nil {
+	if err := s.prepareInstance(context.Background(), "late", "", nil); err == nil {
 		t.Fatal("prepareInstance during closing = nil error, want a closing error")
 	}
 	// Also refuse re-preparing an id that ALREADY has a map entry (Close leaves
@@ -531,7 +535,7 @@ func TestMultiVMPrepareRefusedWhileClosing(t *testing.T) {
 	if got := s.instanceFor("existing", true); got != nil {
 		t.Fatalf("instanceFor create for an existing entry during closing = %v, want nil (refused)", got)
 	}
-	if err := s.prepareInstance(context.Background(), "existing", ""); err == nil {
+	if err := s.prepareInstance(context.Background(), "existing", "", nil); err == nil {
 		t.Fatal("prepareInstance of an existing entry during closing = nil error, want a closing error")
 	}
 	s.mu.Lock()
@@ -564,7 +568,7 @@ func TestSpawnVMActivationFailureReturnsNotOK(t *testing.T) {
 		MultiVM: true,
 	})
 	// Bring up the primary VM so we can prove it is undisturbed by the failure.
-	if err := s.prepareInstance(context.Background(), defaultVMID, ""); err != nil {
+	if err := s.prepareInstance(context.Background(), defaultVMID, "", nil); err != nil {
 		t.Fatalf("prepareInstance(default): %v", err)
 	}
 	if _, err := s.activateInstance(context.Background(), defaultVMID, ActivateRequest{SnapshotDir: "/snap"}); err != nil {
@@ -589,5 +593,63 @@ func TestSpawnVMActivationFailureReturnsNotOK(t *testing.T) {
 	}
 	if got := s.instances[defaultVMID].state; got != StateActive {
 		t.Fatalf("the primary instance must stay active despite the spawn failure, got %s", got)
+	}
+}
+
+// failingMemSourceHandle is a WPForkHandle whose SetMemSource always fails. Only the
+// one method under test does anything; the rest satisfy the interface.
+type failingMemSourceHandle struct{ err error }
+
+func (h *failingMemSourceHandle) Receive() error                 { return nil }
+func (h *failingMemSourceHandle) Freeze() (time.Duration, error) { return 0, nil }
+func (h *failingMemSourceHandle) Serve() error                   { return nil }
+func (h *failingMemSourceHandle) SetMemSource(string) error      { return h.err }
+func (h *failingMemSourceHandle) FrozenFd() int                  { return -1 }
+func (h *failingMemSourceHandle) FrozenPage(uint64) bool         { return false }
+func (h *failingMemSourceHandle) FrozenBitmap() []byte           { return nil }
+func (h *failingMemSourceHandle) ChildImport(string) (fork.ChildMemfdImport, error) {
+	return fork.ChildMemfdImport{}, nil
+}
+func (h *failingMemSourceHandle) FaultCount() int64             { return 0 }
+func (h *failingMemSourceHandle) FreezeDuration() time.Duration { return 0 }
+func (h *failingMemSourceHandle) Close() error                  { return nil }
+
+// TestActivateInstanceFailsClosedWhenLazyMemSourceCannotArm proves the fail-closed
+// gate on the LAZY live-cow restore.
+//
+// The source Firecracker is launched with FIRECRACKER_MITOS_LAZY_RESTORE, so it maps
+// guest RAM as an EMPTY shared memfd and every page must arrive through the WP
+// handler's userfaultfd MISSING faults. If the handler cannot open the snapshot mem
+// file there is nothing to populate that memory: loading the snapshot anyway and
+// resuming the vCPUs would run the guest on all-zero RAM. activateInstance must
+// therefore abort BEFORE the load, leave the VM not active, and say why.
+func TestActivateInstanceFailsClosedWhenLazyMemSourceCannotArm(t *testing.T) {
+	vms := map[string]*fakeVMM{}
+	s := newMultiVMTestStub(t, vms)
+	s.liveCowFork = true
+	s.liveCowHandle = &failingMemSourceHandle{err: errors.New("open mem source: no such file")}
+
+	if err := s.prepareInstance(context.Background(), defaultVMID, "", nil); err != nil {
+		t.Fatalf("prepareInstance: %v", err)
+	}
+	res, err := s.activateInstance(context.Background(), defaultVMID, ActivateRequest{SnapshotDir: "/snap"})
+	if err == nil || res.OK {
+		t.Fatalf("activate must fail closed when the lazy mem source cannot arm; got ok=%v err=%v", res.OK, err)
+	}
+	if !strings.Contains(res.Error, "mem source") {
+		t.Errorf("activate error must name the failing step; got %q", res.Error)
+	}
+	if got := s.instances[defaultVMID].state; got == StateActive {
+		t.Errorf("VM must NOT be active after a failed lazy arm; state = %s", got)
+	}
+	// The snapshot must never have been loaded: a loaded-but-unpopulated VM is the
+	// exact hazard this gate exists to prevent.
+	if vm := vms[string(defaultVMID)]; vm != nil {
+		vm.mu.Lock()
+		loads := vm.loadCalls
+		vm.mu.Unlock()
+		if loads > 0 {
+			t.Errorf("snapshot was loaded %d time(s) despite the failed arm; must abort before the load", loads)
+		}
 	}
 }

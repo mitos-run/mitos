@@ -1,20 +1,43 @@
 #!/usr/bin/env bash
 # Swap in the Mitos-patched Firecracker VMM (live-fork: m1 memfd/MAP_SHARED guest
-# memory + m2 UFFD write-protect) over the STOCK firecracker that
+# memory + m2 UFFD write-protect + m4b restore-side arm + m5 child memfd import +
+# m6a vmstate-only snapshot) over the STOCK firecracker that
 # hack/install-firecracker.sh installed, while leaving the stock jailer untouched.
 #
 # Why this is a safe, always-on swap (NOT the live-fork wiring, that is m4b):
 #   - The patched binary is behaviour-identical to stock Firecracker v1.15.0
-#     UNLESS FIRECRACKER_MITOS_SHARED_MEM or FIRECRACKER_MITOS_WP_UDS are set at
-#     runtime. This PR sets neither anywhere, so the image behaves byte-for-byte
-#     like stock until m4b flips those env vars on. Installing it everywhere is
-#     therefore safe.
+#     UNLESS FIRECRACKER_MITOS_SHARED_MEM, FIRECRACKER_MITOS_WP_UDS or
+#     FIRECRACKER_MITOS_CHILD_MEMFD are set at runtime, OR a PUT /snapshot/create
+#     sends snapshot_type "MitosVmstateOnly". Full and Diff snapshots are
+#     byte-for-byte unchanged, so the image behaves like stock until those gates are
+#     used. Installing it everywhere is safe.
 #   - Provenance: built reproducibly in mitos-run/firecracker on branch
-#     ci/build-patched-fc via .github/workflows/build-patched-fc.yml
-#     (built commit 531a487cf69898a05091d4c7e5f48bec3132309b, green run
-#     https://github.com/mitos-run/firecracker/actions/runs/28848683507) and
-#     published as a GitHub release asset, pinned by sha256 below. A compromised
+#     mitos/lazy-restore-v1.15.0 via .github/workflows/build-patched-fc.yml
+#     (green run https://github.com/mitos-run/firecracker/actions/runs/29022392083)
+#     and published as a GitHub release asset, pinned by sha256 below. A compromised
 #     CDN or a network substitution cannot install a different binary.
+#
+#     This binary ALSO carries m7, the LAZY live-cow restore: guest_memory_from_file
+#     no longer COPIES the mem file into the shared memfd inside PUT /snapshot/load
+#     (which cost ~195ms of a ~218ms warm-claim activate on a 512 MiB guest, and gave
+#     every VM its own private 512 MiB of shmem). The memfd is created EMPTY and the
+#     husk's WP handler serves userfaultfd MISSING faults out of the mem file. The
+#     lazy path needs FIRECRACKER_MITOS_LAZY_RESTORE (which the husk sets only once it
+#     has opened a mem source) alongside FIRECRACKER_MITOS_WP_UDS, so an OLDER husk
+#     paired with this binary keeps the eager copy, and a failed arm aborts the restore
+#     rather than resuming vCPUs on all-zero guest RAM.
+#
+#     It also adds the m5 child-side memfd import (issue #832): a co-located fork child that
+#     is launched with FIRECRACKER_MITOS_CHILD_MEMFD boots its guest RAM by copying
+#     the source guest memfd's fork-time image into ANONYMOUS private RAM (divorced
+#     from the live memfd) plus the frozen overlay, and loads NO disk mem file, so the
+#     vmstate-only fork drops the create_snapshot mem write end to end. The eager copy
+#     replaces the earlier lazily file-backed MAP_PRIVATE, which let a RESUMED source's
+#     post-fork writes leak into the child and corrupt its kernel (stack-protector
+#     panic). It also keeps the m4b restore-side fix: a RESTORED source VM
+#     backs its guest RAM with a shared memfd, exports it, and offers write-protect
+#     during restore, so the live-cow fork arms on a restored source, not only a
+#     booted one.
 #   - Revert = drop the COPY + RUN that invokes this script from Dockerfile.forkd
 #     and Dockerfile.husk-stub (and the smoke-test fixture); the stock firecracker
 #     from hack/install-firecracker.sh then remains in place.
@@ -26,8 +49,8 @@ set -euo pipefail
 
 # --- single pinned provenance constants (audit + bump only here) -------------
 PATCHED_FC_VERSION="v1.15.0"
-PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-uffd-wp-v1.15.0/firecracker-v1.15.0-x86_64-mitos-uffd-wp"
-PATCHED_FC_SHA256="0209700d794acb7b77a919c0aa50506b2186642d80e5c0d13220ee51003b823b"
+PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-lazy-restore-v1.15.0/firecracker-v1.15.0-x86_64-mitos-lazy-restore"
+PATCHED_FC_SHA256="d341a8f3be0e0390e4080767946f2180f86eae267e6110c102cda537f60cad2f"
 # -----------------------------------------------------------------------------
 
 arch="$(uname -m)"
@@ -70,4 +93,4 @@ if [ "$fc_ver" != "$jl_ver" ]; then
 fi
 # Belt and braces: confirm the on-disk binary is exactly the pinned artifact.
 echo "${PATCHED_FC_SHA256}  /usr/local/bin/firecracker" | sha256sum -c -
-echo "install-firecracker-patched: installed Mitos-patched firecracker ${fc_ver} (x86_64); jailer left stock. Behaviour-identical to stock until FIRECRACKER_MITOS_* env is set (m4b)."
+echo "install-firecracker-patched: installed Mitos-patched firecracker ${fc_ver} (x86_64); jailer left stock. Behaviour-identical to stock until FIRECRACKER_MITOS_* env is set (m1/m2/m4b source arm, m5 child memfd import) or a MitosVmstateOnly snapshot is requested (m6a)."

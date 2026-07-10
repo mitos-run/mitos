@@ -33,14 +33,7 @@ func (k *K8sControlPlane) watchReady(ctx context.Context, w client.WithWatch, ns
 	watchCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var list v1.SandboxList
-	wi, err := w.Watch(watchCtx, &list,
-		client.InNamespace(ns),
-		// The api server filters to the single object server-side. The fake
-		// client ignores field selectors on Watch, so the loop below re-checks
-		// the name on every event regardless.
-		client.MatchingFieldsSelector{Selector: fields.OneTermEqualSelector("metadata.name", name)},
-	)
+	wi, err := establishSandboxWatch(watchCtx, w, ns, name)
 	if err != nil {
 		slog.Warn("could not establish the sandbox ready watch",
 			"namespace", ns, "sandbox", name, "error", err.Error())
@@ -50,7 +43,9 @@ func (k *K8sControlPlane) watchReady(ctx context.Context, w client.WithWatch, ns
 
 	// Authoritative read AFTER the watch is established: a phase flip between
 	// the Create and the Watch would otherwise never produce an event and the
-	// wait would idle until the fallback re-Get.
+	// wait would idle until the fallback re-Get. (The create hot path avoids
+	// this read entirely by establishing its watch BEFORE the Create; this
+	// path serves waits whose object predates the watch, such as fork.)
 	var sb v1.Sandbox
 	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &sb); err != nil {
 		return readSandboxError(ctx, err), true
@@ -58,8 +53,32 @@ func (k *K8sControlPlane) watchReady(ctx context.Context, w client.WithWatch, ns
 	if resp, done := k.sandboxOutcome(ctx, &sb, startedAt); done {
 		return resp, true
 	}
-	lastPhase := phaseOrUnknown(&sb)
 
+	return k.watchWait(ctx, wi, ns, name, startedAt, deadline, phaseOrUnknown(&sb))
+}
+
+// establishSandboxWatch opens the single-object watch backing the readiness
+// waits. The create hot path calls it BEFORE the Sandbox Create, so the create
+// event itself arrives on the stream and no authoritative re-read is needed to
+// close a missed-event window; watchReady calls it after, for objects that
+// already exist.
+func establishSandboxWatch(ctx context.Context, w client.WithWatch, ns, name string) (watch.Interface, error) {
+	var list v1.SandboxList
+	return w.Watch(ctx, &list,
+		client.InNamespace(ns),
+		// The api server filters to the single object server-side. The fake
+		// client ignores field selectors on Watch, so the event loop re-checks
+		// the name on every event regardless. Watching a name that does not
+		// exist yet is valid; events begin when the object is created.
+		client.MatchingFieldsSelector{Selector: fields.OneTermEqualSelector("metadata.name", name)},
+	)
+}
+
+// watchWait consumes an ALREADY-ESTABLISHED single-object watch until a
+// terminal create outcome, the deadline, or a closed stream (done=false: the
+// caller fails open to polling for the remaining deadline budget). lastPhase
+// seeds the phase a timeout envelope names before any event arrives.
+func (k *K8sControlPlane) watchWait(ctx context.Context, wi watch.Interface, ns, name string, startedAt time.Time, deadline time.Time, lastPhase string) (saas.ForwardResponse, bool) {
 	// The overall ready timeout: a non-positive remainder fires immediately.
 	timeout := time.NewTimer(deadline.Sub(k.now()))
 	defer timeout.Stop()

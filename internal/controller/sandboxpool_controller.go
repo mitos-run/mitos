@@ -51,6 +51,20 @@ type SandboxPoolReconciler struct {
 	// --live-cow-fork operator flag; DEFAULT OFF and SEPARATE from MultiVM so it
 	// canaries independently. A normal claim is unaffected.
 	LiveCowFork bool
+	// LiveCowChildImport passes --live-cow-child-import to warm husk pods so an armed
+	// live-cow fork takes the vmstate-only capture and the child boots from the source
+	// memfd. DEFAULT OFF; requires LiveCowFork and a child-import Firecracker binary.
+	LiveCowChildImport bool
+	// PrewarmChild passes --prewarm-child to warm husk pods so a fork adopts a
+	// pre-warmed dormant child. DEFAULT OFF; requires MultiVM.
+	PrewarmChild bool
+	// PrepareEgressLink passes --prepare-egress-link to warm husk pods so a dormant
+	// pod brings its default VM's tap up before any claim arrives, leaving only the
+	// atomic nft policy transaction on the warm-claim hot path. Requires MultiVMFork.
+	PrepareEgressLink bool
+	// PrepareRestore passes --prepare-restore so a dormant pod also loads its snapshot
+	// and resumes its guest before any claim arrives. Requires PrepareEgressLink.
+	PrepareRestore bool
 	// MultiVMForkVMs is how many co-located fork VMs a multi-VM warm pod reserves
 	// node memory for up front (beyond the source VM), so the co-location routing
 	// has room before a fork spills to a new pod. Only consulted when MultiVM is set;

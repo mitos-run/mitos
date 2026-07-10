@@ -190,6 +190,25 @@ type HuskPodOptions struct {
 	// (milestone m4b). Default off and SEPARATE from MultiVM so it canaries
 	// independently; off keeps the co-located fork on the disk restore byte-for-byte.
 	LiveCowFork bool
+	// LiveCowChildImport starts the husk stub with --live-cow-child-import so an
+	// armed live-cow fork takes the VMSTATE-ONLY capture (skip the ~364ms disk mem
+	// write) and the co-located child boots its guest RAM from the source shared
+	// memfd. REQUIRES LiveCowFork on and a child-side-import Firecracker binary;
+	// default off, fails closed to the disk restore.
+	LiveCowChildImport bool
+	// PrewarmChild starts the husk stub with --prewarm-child so a multi-vm pod keeps
+	// one dormant generic co-located child Firecracker pre-prepared and a fork adopts
+	// it (fc_boot off the hot path). DEFAULT OFF; requires MultiVM.
+	PrewarmChild bool
+	// PrepareEgressLink starts the husk stub with --prepare-egress-link (plus the
+	// in-pod link addresses it needs before an activate request arrives), so a warm
+	// pod brings its tap up while dormant and a claim pays only the nft transaction
+	// that installs the tenant's policy. Requires MultiVM. Default off.
+	PrepareEgressLink bool
+	// PrepareRestore starts the stub with --prepare-restore so a warm pod loads its
+	// default VM's snapshot and resumes its guest while dormant, leaving only the
+	// handshake on the warm-claim hot path. REQUIRES PrepareEgressLink (and MultiVM).
+	PrepareRestore bool
 	// MultiVMForkVMs is the number of ADDITIONAL fork-child VMs a multi-VM pod
 	// reserves node memory for up front (beyond the source VM), so the co-location
 	// routing has room to co-locate that many children before a fork spills to a new
@@ -547,6 +566,46 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 	if opts.LiveCowFork {
 		args = append(args, "--live-cow-fork")
 	}
+	if opts.LiveCowChildImport {
+		args = append(args, "--live-cow-child-import")
+	}
+	if opts.PrewarmChild {
+		args = append(args, "--prewarm-child")
+	}
+	// Gated on MultiVM as documented: the stub only brings the tap up on the multi-VM
+	// Prepare path, so emitting these to a single-VM stub would produce an unsupported
+	// pod shape whose flags do nothing. main rejects the flag combination outright; this
+	// is the second gate, at the boundary that actually builds the pod.
+	if opts.PrepareEgressLink && opts.MultiVM {
+		// The stub needs the in-pod link BEFORE a claim arrives, because the tap name
+		// derives from the guest IP. These are the same fixed values huskNotifyNetwork
+		// sends in the activate request; they are config, not secrets.
+		args = append(args,
+			"--prepare-egress-link",
+			"--in-pod-guest-ip", huskGuestIP,
+			"--in-pod-gateway-ip", huskGatewayIP,
+		)
+		// Prepare-time restore builds ON the prepared tap, so it is emitted only inside
+		// this block: --prepare-restore without --prepare-egress-link would have no tap
+		// at snapshot load. The stub also refuses that combination.
+		if opts.PrepareRestore {
+			args = append(args, "--prepare-restore")
+		}
+	}
+
+	// Live-cow write-protect needs a KERNEL-MODE userfaultfd over the guest RAM: the
+	// source Firecracker registers UFFD_WP so the KVM guest's own writes fault to the
+	// copy-before-unprotect handler (issue #832). The patched restore path creates
+	// that userfaultfd via the `/dev/userfaultfd` DEVICE (open + USERFAULTFD_IOC_NEW),
+	// NOT the `userfaultfd(2)` syscall: the container RuntimeDefault seccomp profile
+	// denies `userfaultfd(2)` with EPERM even when CAP_SYS_PTRACE is present, because
+	// CAP_SYS_PTRACE satisfies only the kernel gate, not the seccomp gate. The device
+	// is injected into every KVM husk pod by the kvm device plugin (mitos.run/kvm),
+	// which also sets the device-cgroup allow a plain hostPath cannot, and the ioctl
+	// device path is permitted by the same seccomp profile. So the husk-stub keeps the
+	// minimal NET_ADMIN-only capability set: no CAP_SYS_PTRACE is needed on a live-cow
+	// pool. Documented in docs/threat-model.md.
+	huskCaps := []corev1.Capability{"NET_ADMIN"}
 
 	// Name-based egress: when the operator configured DNS upstream(s), pass them
 	// to the stub so the per-pod DNS proxy resolves and pins allowlisted names.
@@ -870,8 +929,8 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: pool.Name + "-husk-",
 			Namespace:    pool.Namespace,
-			Labels: huskPodLabels(pool.Name, opts.MultiVM),
-			Annotations: annotations,
+			Labels:       huskPodLabels(pool.Name, opts.MultiVM),
+			Annotations:  annotations,
 		},
 		Spec: corev1.PodSpec{
 			// A husk pod is long-lived: it holds its dormant (then activated) VM
@@ -1039,8 +1098,10 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 							// the load-bearing control that gives the husk guest VM
 							// CNI-independent default-deny egress + the unconditional
 							// cloud-metadata block. Documented as a PSA exception in
-							// docs/threat-model.md.
-							Add: []corev1.Capability{"NET_ADMIN"},
+							// docs/threat-model.md. SYS_PTRACE is appended only for a
+							// live-cow pool (see huskCaps above), for the kernel-mode
+							// userfaultfd the write-protect fork needs.
+							Add: huskCaps,
 						},
 						SeccompProfile: &corev1.SeccompProfile{
 							Type: corev1.SeccompProfileTypeRuntimeDefault,
@@ -1360,16 +1421,20 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 			}
 		}
 		opts := HuskPodOptions{
-			MultiVM:         r.MultiVM,
-			LiveCowFork:     r.LiveCowFork,
-			MultiVMForkVMs:  r.MultiVMForkVMs,
-			StubImage:       r.HuskStubImage,
-			DNSUpstream:     r.HuskDNSUpstream,
-			KVMResourceName: r.KVMResourceName,
-			SnapshotID:      poolTemplateID(pool),
-			DataDir:         r.DataDir,
-			TLSSecretName:   r.HuskTLSSecretName,
-			CASecretName:    r.HuskCASecretName,
+			MultiVM:            r.MultiVM,
+			LiveCowFork:        r.LiveCowFork,
+			LiveCowChildImport: r.LiveCowChildImport,
+			PrewarmChild:       r.PrewarmChild,
+			PrepareEgressLink:  r.PrepareEgressLink,
+			PrepareRestore:     r.PrepareRestore,
+			MultiVMForkVMs:     r.MultiVMForkVMs,
+			StubImage:          r.HuskStubImage,
+			DNSUpstream:        r.HuskDNSUpstream,
+			KVMResourceName:    r.KVMResourceName,
+			SnapshotID:         poolTemplateID(pool),
+			DataDir:            r.DataDir,
+			TLSSecretName:      r.HuskTLSSecretName,
+			CASecretName:       r.HuskCASecretName,
 			// dedicatedNodes (#172): pin this pool's husk pods to the tenant's
 			// dedicated node set. Merged onto the KVM nodeSelector + snapshot-node
 			// affinity below.
@@ -1661,6 +1726,31 @@ func huskPodOwnedByPool(pod *corev1.Pod, pool *v1.SandboxPool) bool {
 // huskPodReady reports whether a husk pod is a usable dormant slot: Running,
 // with a Ready condition True, and a non-empty PodIP (so the controller can
 // dial its control channel and set a reachable endpoint).
+// huskPodNotReadyReason renders, in one short phrase, why a husk pod is not usable
+// yet. The fan-out and claim paths skip such a pod and retry; without a reason a
+// permanently stuck pod is indistinguishable from one that is still coming up.
+// Returns "" for a pod that IS ready.
+func huskPodNotReadyReason(p *corev1.Pod) string {
+	if p.Status.Phase != corev1.PodRunning {
+		return fmt.Sprintf("pod phase %s", p.Status.Phase)
+	}
+	if p.Status.PodIP == "" {
+		return "pod has no IP yet"
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			if c.Status == corev1.ConditionTrue {
+				return ""
+			}
+			if c.Reason != "" {
+				return "pod not ready: " + c.Reason
+			}
+			return "pod not ready"
+		}
+	}
+	return "pod has no Ready condition"
+}
+
 func huskPodReady(p *corev1.Pod) bool {
 	if p.Status.Phase != corev1.PodRunning || p.Status.PodIP == "" {
 		return false

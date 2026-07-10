@@ -1,0 +1,414 @@
+{
+  "skipped": [
+    {
+      "id": "ATR-2026-00001",
+      "scan_target": "mcp",
+      "total_conditions": 46,
+      "dropped_conditions": 4,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00002",
+      "scan_target": "mcp",
+      "total_conditions": 13,
+      "dropped_conditions": 2,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00011",
+      "scan_target": "mcp",
+      "total_conditions": 13,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00013",
+      "scan_target": "mcp",
+      "total_conditions": 15,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?=`"
+    },
+    {
+      "id": "ATR-2026-00051",
+      "scan_target": "mcp",
+      "total_conditions": 12,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00052",
+      "scan_target": "mcp",
+      "total_conditions": 11,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00060",
+      "scan_target": "mcp",
+      "total_conditions": 12,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00063",
+      "scan_target": "mcp",
+      "total_conditions": 4,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid named capture: `(?<![a-z])\\.(env|aws/credentials)|secrets?\\.json|private[_-]?key|id_rsa|kubeconfig)`"
+    },
+    {
+      "id": "ATR-2026-00070",
+      "scan_target": "mcp",
+      "total_conditions": 14,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?=`"
+    },
+    {
+      "id": "ATR-2026-00098",
+      "scan_target": "mcp",
+      "total_conditions": 9,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00099",
+      "scan_target": "mcp",
+      "total_conditions": 7,
+      "dropped_conditions": 2,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid named capture: `(?<!get_)(?<!list_)(?<!check_)(?<!view_)(?<!fetch_)(?<!query_)(pay|payment|transfer|transaction|purchase|buy|check"
+    },
+    {
+      "id": "ATR-2026-00114",
+      "scan_target": "mcp",
+      "total_conditions": 5,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00115",
+      "scan_target": "mcp",
+      "total_conditions": 5,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00161",
+      "scan_target": "mcp",
+      "total_conditions": 5,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00202",
+      "scan_target": "",
+      "total_conditions": 3,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00258",
+      "scan_target": "mcp",
+      "total_conditions": 5,
+      "dropped_conditions": 4,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00270",
+      "scan_target": "both",
+      "total_conditions": 5,
+      "dropped_conditions": 2,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00276",
+      "scan_target": "both",
+      "total_conditions": 5,
+      "dropped_conditions": 4,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00284",
+      "scan_target": "both",
+      "total_conditions": 4,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00286",
+      "scan_target": "mcp",
+      "total_conditions": 5,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid repeat count: `{20,2000}`"
+    },
+    {
+      "id": "ATR-2026-00288",
+      "scan_target": "mcp",
+      "total_conditions": 4,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00290",
+      "scan_target": "mcp",
+      "total_conditions": 4,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\1`"
+    },
+    {
+      "id": "ATR-2026-00301",
+      "scan_target": "mcp",
+      "total_conditions": 6,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00308",
+      "scan_target": "mcp",
+      "total_conditions": 3,
+      "dropped_conditions": 2,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00309",
+      "scan_target": "mcp",
+      "total_conditions": 4,
+      "dropped_conditions": 4,
+      "reason": "re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00310",
+      "scan_target": "mcp",
+      "total_conditions": 5,
+      "dropped_conditions": 3,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00311",
+      "scan_target": "mcp",
+      "total_conditions": 4,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00312",
+      "scan_target": "mcp",
+      "total_conditions": 5,
+      "dropped_conditions": 2,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00313",
+      "scan_target": "mcp",
+      "total_conditions": 5,
+      "dropped_conditions": 3,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00367",
+      "scan_target": "mcp",
+      "total_conditions": 3,
+      "dropped_conditions": 2,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00411",
+      "scan_target": "both",
+      "total_conditions": 5,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00433",
+      "scan_target": "both",
+      "total_conditions": 6,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00435",
+      "scan_target": "mcp",
+      "total_conditions": 4,
+      "dropped_conditions": 3,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00442",
+      "scan_target": "mcp",
+      "total_conditions": 3,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid named capture: `(?<![\"'])(?<!\\b(?:they|user|users|people|customer|customers|developer|developers|client|clients|when|if|whenever|c"
+    },
+    {
+      "id": "ATR-2026-00444",
+      "scan_target": "mcp",
+      "total_conditions": 3,
+      "dropped_conditions": 3,
+      "reason": "re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00448",
+      "scan_target": "both",
+      "total_conditions": 8,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?=`"
+    },
+    {
+      "id": "ATR-2026-00451",
+      "scan_target": "both",
+      "total_conditions": 8,
+      "dropped_conditions": 2,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?=`"
+    },
+    {
+      "id": "ATR-2026-00452",
+      "scan_target": "mcp",
+      "total_conditions": 3,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00454",
+      "scan_target": "mcp",
+      "total_conditions": 2,
+      "dropped_conditions": 2,
+      "reason": "re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00515",
+      "scan_target": "mcp",
+      "total_conditions": 7,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\u`"
+    },
+    {
+      "id": "ATR-2026-00524",
+      "scan_target": "both",
+      "total_conditions": 7,
+      "dropped_conditions": 5,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00531",
+      "scan_target": "mcp",
+      "total_conditions": 4,
+      "dropped_conditions": 3,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00532",
+      "scan_target": "mcp",
+      "total_conditions": 3,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00533",
+      "scan_target": "mcp",
+      "total_conditions": 3,
+      "dropped_conditions": 2,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00534",
+      "scan_target": "mcp",
+      "total_conditions": 3,
+      "dropped_conditions": 2,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00539",
+      "scan_target": "both",
+      "total_conditions": 7,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-00565",
+      "scan_target": "mcp",
+      "total_conditions": 3,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-01007",
+      "scan_target": "mcp",
+      "total_conditions": 3,
+      "dropped_conditions": 2,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid escape sequence: `\\1`"
+    },
+    {
+      "id": "ATR-2026-01451",
+      "scan_target": "mcp",
+      "total_conditions": 3,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    },
+    {
+      "id": "ATR-2026-01454",
+      "scan_target": "mcp",
+      "total_conditions": 4,
+      "dropped_conditions": 2,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid named capture: `(?<!!)\\[[^\\]]{0,60}\\]\\(https?://(?:attacker|evil|exfil|collect|malicious|pwn|steal|grab|harvest)\\.[a-z]{2,}[^)]{0,"
+    },
+    {
+      "id": "ATR-2026-01463",
+      "scan_target": "mcp",
+      "total_conditions": 4,
+      "dropped_conditions": 1,
+      "reason": "partial_re2_incompatible",
+      "sample_error": "error parsing regexp: invalid or unsupported Perl syntax: `(?!`"
+    }
+  ],
+  "source_sha": "f49ddd904b50b33e804d3000f95a6d75864f0034",
+  "spec": "ATR-SPEC-v1"
+}

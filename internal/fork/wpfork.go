@@ -28,8 +28,14 @@ type WPForkHandle interface {
 	// Freeze write-protects the whole guest region at the fork point and returns
 	// how long that took (the parent-pause contributor). Resume the parent after.
 	Freeze() (time.Duration, error)
-	// Serve runs the write-protect fault loop until Close.
+	// Serve runs the write-protect fault loop until Close. On a lazily restored
+	// source it also serves MISSING faults out of the mem source.
 	Serve() error
+	// SetMemSource points the handler at the snapshot mem file a LAZILY restored
+	// source pulls its guest RAM from. It MUST be called before the source loads the
+	// snapshot. Failing to call it while Firecracker was launched with
+	// EnvLazyRestore leaves the guest with empty RAM, so callers fail closed.
+	SetMemSource(path string) error
 	// FrozenFd returns the descriptor of the private FROZEN memfd a co-located
 	// child MAP_PRIVATEs (with the frozen bitmap) to read clobbered pages at their
 	// fork-time value. -1 before Receive.
@@ -39,6 +45,19 @@ type WPForkHandle interface {
 	// child consults this per-page source selector: a frozen page is read from the
 	// FROZEN memfd (fork-time value), an unfrozen page from the live shared memfd.
 	FrozenPage(pageIndex uint64) bool
+	// FrozenBitmap returns a COPY of the 1-bit-per-page frozen bitmap at the instant
+	// of the call: bit p set means a co-located child must source page p from the
+	// FROZEN memfd. A copy so the caller reads a stable snapshot while Serve keeps
+	// marking pages. Nil before Receive.
+	FrozenBitmap() []byte
+	// ChildImport returns the coordinates a co-located fork child needs to boot its
+	// guest RAM from the parent's live memory: the parent shared memfd (from the m1
+	// export), this handler's FROZEN memfd, and this handler's LIVE frozen bitmap
+	// memfd (so the child reads the CURRENT per-page selector at attach time, not a
+	// stale copy), plus each descriptor's identity and the page size. It is the
+	// ChildImportProvider the husk consults on a live-cow child spawn. Fails before
+	// Receive (no memfd/bitmap yet).
+	ChildImport(dir string) (ChildMemfdImport, error)
 	// FaultCount returns how many write-protect faults Serve has resolved.
 	FaultCount() int64
 	// FreezeDuration returns the recorded fork-point freeze duration.
@@ -118,6 +137,13 @@ const (
 	// Firecracker CONNECTS to, over which Firecracker sends the uffd + region
 	// layout via SCM_RIGHTS (m2).
 	EnvWPUDS = "FIRECRACKER_MITOS_WP_UDS"
+	// EnvLazyRestore opts the patched Firecracker into the LAZY live-cow restore:
+	// guest RAM comes back as an EMPTY shared memfd and every page is pulled from the
+	// snapshot mem file on a userfaultfd MISSING fault, instead of the eager
+	// O(guest RAM) copy that ran inside PUT /snapshot/load. Firecracker requires BOTH
+	// this and EnvWPUDS, so a husk that cannot serve MISSING faults (an older build,
+	// or one that failed to open the mem source) keeps the eager copy.
+	EnvLazyRestore = "FIRECRACKER_MITOS_LAZY_RESTORE"
 )
 
 // WPForkConfig configures the parent-side live-cow fork handler. UDSPath is the
@@ -144,6 +170,9 @@ func LiveCowParentEnv(wpUDS, memExport string) []string {
 		EnvSharedMem + "=1",
 		EnvSharedMemExport + "=" + memExport,
 		EnvWPUDS + "=" + wpUDS,
+		// The stub calls WPForkHandle.SetMemSource before it loads the snapshot, and
+		// fails the activate if it cannot, so the handler can always serve MISSING.
+		EnvLazyRestore + "=1",
 	}
 }
 
@@ -184,6 +213,27 @@ func frozenBitmapBytes(memSize, pageSize uint64) uint64 {
 	}
 	npages := (memSize + pageSize - 1) / pageSize
 	return (npages + 7) / 8
+}
+
+// setBit and testBit are the plain bit primitives the handler's two bitmaps share:
+// the per-page FROZEN selector and the per-chunk POPULATED map of the lazy restore.
+// They carry no epoch or fork semantics, so a reader cannot mistake "populated" for
+// "frozen". Out-of-range indices are ignored (defensive: a fault outside the mapped
+// range is a fault the handler skips).
+func setBit(bm []byte, i uint64) {
+	byteIdx := i / 8
+	if byteIdx >= uint64(len(bm)) {
+		return
+	}
+	bm[byteIdx] |= 1 << (i % 8)
+}
+
+func testBit(bm []byte, i uint64) bool {
+	byteIdx := i / 8
+	if byteIdx >= uint64(len(bm)) {
+		return false
+	}
+	return bm[byteIdx]&(1<<(i%8)) != 0
 }
 
 // setFrozenBit marks page index i frozen in bm. Out-of-range indices are ignored

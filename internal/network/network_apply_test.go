@@ -52,11 +52,13 @@ func TestSetupCommandOrder(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
+	// A leftover tap is removed first so the create is idempotent (#428): link del,
 	// tap create, addr add, link up, nft apply shared table, nft apply chain.
-	if len(rr.calls) != 5 {
-		t.Fatalf("expected 5 commands, got %d: %+v", len(rr.calls), rr.calls)
+	if len(rr.calls) != 6 {
+		t.Fatalf("expected 6 commands, got %d: %+v", len(rr.calls), rr.calls)
 	}
 	wantArgv := [][]string{
+		netconf.LinkDelArgs(id.TapName),
 		netconf.TapAddArgs(id.TapName),
 		netconf.AddrAddArgs(id.HostIP, id.TapName),
 		netconf.LinkUpArgs(id.TapName),
@@ -69,16 +71,16 @@ func TestSetupCommandOrder(t *testing.T) {
 		}
 	}
 	// The first nft apply installs the idempotent shared table skeleton.
-	if rr.calls[3].stdin != netconf.RenderSharedTable() {
-		t.Errorf("shared-table stdin mismatch\ngot:\n%s\nwant:\n%s", rr.calls[3].stdin, netconf.RenderSharedTable())
+	if rr.calls[4].stdin != netconf.RenderSharedTable() {
+		t.Errorf("shared-table stdin mismatch\ngot:\n%s\nwant:\n%s", rr.calls[4].stdin, netconf.RenderSharedTable())
 	}
 	// The second nft apply installs this sandbox's chain + dispatch element.
 	wantChain := netconf.RenderSandboxChain(id.TapName, id.GuestIP, v1.EgressDeny, allow, resolver)
-	if rr.calls[4].stdin != wantChain {
-		t.Errorf("sandbox-chain stdin mismatch\ngot:\n%s\nwant:\n%s", rr.calls[4].stdin, wantChain)
+	if rr.calls[5].stdin != wantChain {
+		t.Errorf("sandbox-chain stdin mismatch\ngot:\n%s\nwant:\n%s", rr.calls[5].stdin, wantChain)
 	}
-	// The tap/addr/link commands carry no stdin.
-	for i := 0; i < 3; i++ {
+	// The link-del/tap/addr/link commands carry no stdin.
+	for i := 0; i < 4; i++ {
 		if rr.calls[i].stdin != "" {
 			t.Errorf("call %d unexpectedly has stdin %q", i, rr.calls[i].stdin)
 		}
@@ -100,10 +102,10 @@ func TestSetupWithForwardingAndMasquerade(t *testing.T) {
 		t.Error("expected forwarding enabler to be called")
 	}
 	// tap, addr, link, nft shared table, nft chain, masquerade.
-	if len(rr.calls) != 6 {
-		t.Fatalf("expected 6 commands, got %d", len(rr.calls))
+	if len(rr.calls) != 7 {
+		t.Fatalf("expected 7 commands, got %d", len(rr.calls))
 	}
-	last := rr.calls[5].argv
+	last := rr.calls[6].argv
 	wantMasq := netconf.MasqueradeAddArgs("10.200.0.0/16", "eth0")
 	if !reflect.DeepEqual(last, wantMasq) {
 		t.Errorf("last call = %v, want masquerade %v", last, wantMasq)
@@ -124,14 +126,14 @@ func TestSetupRendersEgressProxyRules(t *testing.T) {
 
 	// tap, addr, link, nft shared table, nft chain (with proxy accept folded in),
 	// nft proxy DNAT.
-	if len(rr.calls) != 6 {
-		t.Fatalf("expected 6 commands, got %d: %+v", len(rr.calls), rr.calls)
+	if len(rr.calls) != 7 {
+		t.Fatalf("expected 7 commands, got %d: %+v", len(rr.calls), rr.calls)
 	}
 
 	// The chain apply must carry the proxy accept rule, and that accept must come
 	// BEFORE the terminal drop verdict (the proxy enforces upstream policy, not
 	// the per-sandbox chain).
-	chainStdin := rr.calls[4].stdin
+	chainStdin := rr.calls[5].stdin
 	wantAccept := netconf.RenderProxyAccept(netconf.SharedTableName(), netconf.SandboxChainName(id.TapName), id.GuestIP, id.HostIP, 3128)
 	if !strings.Contains(chainStdin, wantAccept) {
 		t.Fatalf("chain stdin missing proxy accept rule\ngot:\n%s\nwant substring:\n%s", chainStdin, wantAccept)
@@ -158,8 +160,8 @@ func TestSetupRendersEgressProxyRules(t *testing.T) {
 	// The last apply installs the prerouting DNAT redirecting the sentinel to the
 	// fork's gateway.
 	wantDNAT := netconf.RenderProxyDNAT(id.TapName, sentinel, 3128, id.HostIP)
-	if rr.calls[5].stdin != wantDNAT {
-		t.Fatalf("proxy DNAT stdin mismatch\ngot:\n%s\nwant:\n%s", rr.calls[5].stdin, wantDNAT)
+	if rr.calls[6].stdin != wantDNAT {
+		t.Fatalf("proxy DNAT stdin mismatch\ngot:\n%s\nwant:\n%s", rr.calls[6].stdin, wantDNAT)
 	}
 }
 
@@ -171,9 +173,9 @@ func TestSetupStopsOnError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from addr add")
 	}
-	// tap create then the failing addr add; nothing after.
-	if len(rr.calls) != 2 {
-		t.Errorf("expected 2 calls before stop, got %d", len(rr.calls))
+	// link del (idempotent create), tap create, then the failing addr add; nothing after.
+	if len(rr.calls) != 3 {
+		t.Errorf("expected 3 calls before stop, got %d", len(rr.calls))
 	}
 }
 
@@ -320,21 +322,21 @@ func TestSecondSandboxSetupIsIdempotent(t *testing.T) {
 	}
 
 	// Both Setups apply the identical shared-table skeleton (idempotent).
-	if rrA.calls[3].stdin != rrB.calls[3].stdin {
+	if rrA.calls[4].stdin != rrB.calls[4].stdin {
 		t.Errorf("shared-table skeleton differs between sandboxes:\nA:\n%s\nB:\n%s",
-			rrA.calls[3].stdin, rrB.calls[3].stdin)
+			rrA.calls[4].stdin, rrB.calls[4].stdin)
 	}
-	if !strings.Contains(rrA.calls[3].stdin, "add table inet "+netconf.SharedTableName()) {
-		t.Errorf("shared table not idempotently added\n%s", rrA.calls[3].stdin)
+	if !strings.Contains(rrA.calls[4].stdin, "add table inet "+netconf.SharedTableName()) {
+		t.Errorf("shared table not idempotently added\n%s", rrA.calls[4].stdin)
 	}
 	// Each sandbox installs its OWN chain, never the other's.
-	if !strings.Contains(rrA.calls[4].stdin, netconf.SandboxChainName(idA.TapName)) ||
-		strings.Contains(rrA.calls[4].stdin, netconf.SandboxChainName(idB.TapName)) {
-		t.Errorf("sandbox A chain leaks into/omits its own chain\n%s", rrA.calls[4].stdin)
+	if !strings.Contains(rrA.calls[5].stdin, netconf.SandboxChainName(idA.TapName)) ||
+		strings.Contains(rrA.calls[5].stdin, netconf.SandboxChainName(idB.TapName)) {
+		t.Errorf("sandbox A chain leaks into/omits its own chain\n%s", rrA.calls[5].stdin)
 	}
-	if !strings.Contains(rrB.calls[4].stdin, netconf.SandboxChainName(idB.TapName)) ||
-		strings.Contains(rrB.calls[4].stdin, netconf.SandboxChainName(idA.TapName)) {
-		t.Errorf("sandbox B chain leaks into/omits its own chain\n%s", rrB.calls[4].stdin)
+	if !strings.Contains(rrB.calls[5].stdin, netconf.SandboxChainName(idB.TapName)) ||
+		strings.Contains(rrB.calls[5].stdin, netconf.SandboxChainName(idA.TapName)) {
+		t.Errorf("sandbox B chain leaks into/omits its own chain\n%s", rrB.calls[5].stdin)
 	}
 
 	// Tearing down A touches only A's chain + dispatch element.
@@ -365,5 +367,41 @@ func TestFakeManagerRecords(t *testing.T) {
 	}
 	if len(fm.Teardowns) != 1 || fm.Teardowns[0].TapName != "sbtap0" {
 		t.Errorf("Teardowns not recorded: %+v", fm.Teardowns)
+	}
+}
+
+// TestSetupRemovesALeftoverTapBeforeCreatingIt pins the fix for a production outage.
+// A tap left behind by a build or fork that died before its teardown ran makes the next
+// create fail with `ioctl(TUNSETIFF): Device or resource busy`. On the template-build
+// path that wedged the pool permanently: it reported BuildFailed forever, and a pool
+// whose template is not built serves no warm husk pods, so every create went Pending.
+// The husk egress path has removed a leftover tap before creating since #428; forkd's
+// path did not.
+func TestSetupRemovesALeftoverTapBeforeCreatingIt(t *testing.T) {
+	rr := &recordingRunner{}
+	id := testIdentity()
+
+	if err := setup(context.Background(), rr.run, func() error { return nil },
+		id, netconf.SandboxPolicy{Egress: v1.EgressDeny}, nil, applyOptions{}); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	if !reflect.DeepEqual(rr.calls[0].argv, netconf.LinkDelArgs(id.TapName)) {
+		t.Fatalf("first command = %v, want a link delete of %s", rr.calls[0].argv, id.TapName)
+	}
+	if !reflect.DeepEqual(rr.calls[1].argv, netconf.TapAddArgs(id.TapName)) {
+		t.Fatalf("second command = %v, want the tap create", rr.calls[1].argv)
+	}
+}
+
+// TestSetupSurvivesADeleteOfAnAbsentTap: on a clean node the delete finds nothing, which
+// is the normal case and must never fail the setup.
+func TestSetupSurvivesADeleteOfAnAbsentTap(t *testing.T) {
+	rr := &recordingRunner{failOn: "link del", failErr: errors.New("Cannot find device \"sbtap0\"")}
+	id := testIdentity()
+
+	if err := setup(context.Background(), rr.run, func() error { return nil },
+		id, netconf.SandboxPolicy{Egress: v1.EgressDeny}, nil, applyOptions{}); err != nil {
+		t.Fatalf("a failing delete of an absent tap must not fail setup: %v", err)
 	}
 }

@@ -41,13 +41,20 @@ The split between *rate* units and *counter* units is load-bearing:
   trapezoid-free (left-rectangle: each sample's level holds until the next
   sample). Per-second granularity.
 - **Counter units** (egress bytes, GPU-seconds) are already cumulative on the
-  source. The pipeline sums the positive steps between consecutive in-window
-  samples, so a missed scrape never loses counter progress and a duplicate scrape
-  never adds it twice. A DECREASE between consecutive samples means the cumulative
+  source. The pipeline sums the positive steps between consecutive samples, so a
+  missed scrape never loses counter progress and a duplicate scrape never adds it
+  twice. Each step is attributed to the EARLIER sample's window, so a step whose
+  two samples straddle a window boundary (the last sample of one window to the
+  first sample of the next) is billed to that earlier window, not dropped.
+  Attributing to the earlier window keeps this stable under the collector's
+  rolling, pruned sample buffer: the later sample is newer than the earlier one,
+  so a window's counter total recomputes to the same value every cycle until the
+  window is pruned. A DECREASE between consecutive samples means the cumulative
   counter RESET (a sandbox restart zeroes its nftables egress / GPU counter): the
   post-reset value is counted as fresh progress from zero, never a negative bill.
-  For a counter that never resets this is exactly last-minus-first; the
-  step-sum is what keeps a restart within the window honest rather than negative.
+  For a counter that never resets this telescopes to exactly last-minus-first over
+  the whole lifetime; the step-sum is what keeps a restart honest rather than
+  negative.
 
 ## Time integration
 

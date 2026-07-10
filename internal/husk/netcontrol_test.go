@@ -1,6 +1,7 @@
 package husk
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -389,6 +390,99 @@ func TestServeTLSDispatchesDehydrateAndHydrateWorkspace(t *testing.T) {
 	}
 	if agent.untarPath != workspace.WorkspacePath {
 		t.Fatalf("hydrate did not untar into the guest workspace, got %q", agent.untarPath)
+	}
+}
+
+// TestServeTLSKeepAliveMultipleRequests proves the control server serves MORE
+// than one request on a SINGLE authenticated connection: the mTLS handshake and
+// the controller-identity authorization happen ONCE, then two fork-snapshot ops
+// are pipelined request-response on the same conn and BOTH succeed. This is the
+// server half of the controller connection pool: one handshake, many RPCs. It
+// also proves no frame desync across requests, because each result decodes
+// cleanly after the previous one on the shared stream.
+func TestServeTLSKeepAliveMultipleRequests(t *testing.T) {
+	p := newNetTestPKI(t)
+	f := &fakeVMM{}
+	stub := &Stub{state: StateActive, vm: f}
+
+	addr, stop := startServer(t, stub, p)
+	defer stop()
+
+	dialer := &tls.Dialer{Config: p.clientConf(t, p.ctrlCert)}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	// A persistent reader for the reused stream: results must decode one line at a
+	// time without over-reading into the next response.
+	br := bufio.NewReader(conn)
+	for i := 0; i < 3; i++ {
+		dir := t.TempDir()
+		if err := WriteControlOp(conn, OpForkSnapshot); err != nil {
+			t.Fatalf("req %d WriteControlOp: %v", i, err)
+		}
+		if err := WriteForkSnapshotRequest(conn, ForkSnapshotRequest{ForkID: "fork", SnapshotDir: dir}); err != nil {
+			t.Fatalf("req %d WriteForkSnapshotRequest: %v", i, err)
+		}
+		res, err := ReadForkSnapshotResultReader(br)
+		if err != nil {
+			t.Fatalf("req %d ReadForkSnapshotResultReader: %v", i, err)
+		}
+		if !res.OK {
+			t.Fatalf("req %d fork-snapshot not OK: %+v", i, res)
+		}
+		// The echoed dir proves this response belongs to THIS request (no desync).
+		if res.SnapshotDir != dir {
+			t.Fatalf("req %d result dir = %q, want %q (frame desync)", i, res.SnapshotDir, dir)
+		}
+	}
+}
+
+// TestServeTLSKeepAliveClosesOnPeerEOF proves a one-shot client stays byte-for-
+// byte compatible: a client that sends a single request and closes drives one
+// iteration, and the server loop then sees EOF and closes without error. The
+// server goroutine must not wedge or panic on the closed connection.
+func TestServeTLSKeepAliveClosesOnPeerEOF(t *testing.T) {
+	p := newNetTestPKI(t)
+	stub := &Stub{state: StateActive, vm: &fakeVMM{}}
+	addr, stop := startServer(t, stub, p)
+	defer stop()
+
+	logged := captureStderr(t, func() {
+		dir := t.TempDir()
+		res, err := func() (ForkSnapshotResult, error) {
+			dialer := &tls.Dialer{Config: p.clientConf(t, p.ctrlCert)}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			conn, derr := dialer.DialContext(ctx, "tcp", addr)
+			if derr != nil {
+				return ForkSnapshotResult{}, derr
+			}
+			defer conn.Close()
+			if werr := WriteControlOp(conn, OpForkSnapshot); werr != nil {
+				return ForkSnapshotResult{}, werr
+			}
+			if werr := WriteForkSnapshotRequest(conn, ForkSnapshotRequest{ForkID: "fork", SnapshotDir: dir}); werr != nil {
+				return ForkSnapshotResult{}, werr
+			}
+			return ReadForkSnapshotResult(conn)
+		}()
+		if err != nil {
+			t.Fatalf("one-shot fork-snapshot: %v", err)
+		}
+		if !res.OK {
+			t.Fatalf("one-shot fork-snapshot not OK: %+v", res)
+		}
+		// Let the server loop observe the peer close and exit its iteration.
+		time.Sleep(50 * time.Millisecond)
+	})
+	// A clean peer close is NOT an error and must not be logged as one.
+	if strings.Contains(logged, "read control op") {
+		t.Fatalf("clean one-shot close logged a read error:\n%s", logged)
 	}
 }
 
