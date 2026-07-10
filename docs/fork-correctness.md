@@ -423,7 +423,9 @@ clone of the sandbox that captured it; it gets the same per-restore reseed an
 engine fork or a husk fork child gets (sections 1 and 2). The Python-level PRNG
 caveat in section 1 applies to a resumed sandbox identically (a long-lived
 interpreter that seeded its PRNG before the checkpoint keeps that PRNG state
-across the resume; reseed in-process after wake if it matters).
+across the resume; reseed in-process after wake if it matters). The run_code
+kernel reseeds itself on the post-fork SIGUSR2, so it is covered; any other
+long-lived interpreter is not.
 
 Disk/memory consistency: the resume pairs the memory image with the SAME
 workspace filesystem state it was captured against (the revision's
@@ -525,7 +527,7 @@ in this phase and run on every KVM CI run (the `firecracker-test` job), so they
 are observed on KVM, not only unit-asserted. The N=8 variant remains a
 follow-up.
 
-**run_code kernel caveat.** A forked VM inherits the LIVE run_code kernel
+**run_code kernel.** A forked VM inherits the LIVE run_code kernel
 (`/opt/mitos/kernel_driver.py`) and its entire Python namespace, because the
 kernel process is part of the snapshot. Two ways the kernel gets into the
 snapshot: by default it starts lazily on the first `run_code` (so a template
@@ -534,23 +536,46 @@ snapshotted before any `run_code` has NO kernel and every fork cold-starts it,
 (CreateTemplateRequest.warm_kernel), the template build runs one trivial cell
 (`pass`) through `Sandbox.RunCodeStream` right before the snapshot, so the
 kernel is captured ALREADY RUNNING and forks answer their first `run_code`
-warm. The warmup cell deliberately draws no randomness and imports nothing:
-CPython seeds its Mersenne Twister lazily from `os.urandom` on first use, so
-an untouched `random` (and numpy) stays UNSEEDED in the snapshot and each fork
-seeds it fresh, after the per-fork CRNG reseed, on its own first draw
-(pinned by `TestWarmKernelCode_NeverDrawsRandomness`).
+warm. The hosted `python` pool sets it.
 
-The post-fork `NotifyForked` reseed handles the kernel CRNG (`/dev/urandom`)
-and signals userspace, but a Python-level PRNG that was already seeded INSIDE
-the kernel before the fork (`random.seed(...)`, `numpy.random.seed(...)`, or
-the implicit module-global `random` state once drawn from, e.g. by user code
-run against the template or a pre-fork sandbox) is captured in the snapshot
-and is therefore IDENTICAL across all forks until reseeded. This is the same
-class as item 1 for any already-started runtime; it is not a host boundary,
-and the warm_kernel warmup neither causes nor fixes it. Remediation: callers
-who need per-fork randomness in the kernel should reseed after a fork
-(`random.seed()`, `np.random.seed()` with no argument reseeds from fresh OS
-entropy), or avoid seeding the PRNG before the fork point.
+**This document previously claimed that the inert warmup cell was sufficient,
+on the grounds that CPython seeds its Mersenne Twister lazily on first use. That
+is FALSE.** `random.Random` seeds itself from `os.urandom` in its CONSTRUCTOR,
+and the `random` module builds its shared instance at IMPORT. ipykernel's own
+import chain imports `random` (and `numpy`), so the Mersenne state is already
+fixed by the time the warmup cell runs, and it is captured in the snapshot.
+Measured against production with `warmKernel: true`, three INDEPENDENT sandboxes
+each returned:
+
+```text
+random.random() == 0.993005259705148
+```
+
+while `os.urandom()` and `numpy.random.random()` diverged correctly (the kernel
+CRNG is credibly reseeded per fork; numpy's global RandomState seeds lazily from
+it). `TestWarmKernelCode_NeverDrawsRandomness` pinned the warmup CELL, not the
+invariant, so it never caught this.
+
+**Mitigation (in the guest, not the host).** `kernel_driver.py` installs a
+SIGUSR2 handler, opting in to the agent's post-fork broadcast, which the agent
+sends AFTER the credited CRNG reseed and ONLY to processes that installed a
+handler (an unhandled SIGUSR2 terminates a process, which is why the handler
+lives in the driver and not in the ipykernel subprocess). The handler only sets a
+flag; before the next cell runs, the driver executes a silent, history-free cell
+that reseeds `random` from `os.urandom(32)` and, when numpy is already imported,
+`numpy.random` as well. A cell already executing when the fork lands keeps its
+pre-fork PRNG state; the next one does not. Pinned by
+`guest/rootfs/kernel_driver_test.py` (`ForkReseedTest`).
+
+Keeping the warmup cell inert still matters: it keeps the snapshot free of
+randomness the driver does not know how to reseed.
+
+**Still NOT covered.** `PYTHONHASHSEED` is fixed at interpreter start, so sibling
+forks of a warm kernel share hash randomization. Any library that seeded its own
+PRNG into its own state before the snapshot (other than `random` and `numpy`) is
+not reseeded; a caller who explicitly ran `random.seed(1234)` before the fork
+point has asked for a deterministic stream and gets one. Remediation for those:
+reseed after the fork, or avoid seeding before the fork point.
 
 ## 2. Clock correctness
 

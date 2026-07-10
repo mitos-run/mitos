@@ -128,9 +128,14 @@ def parse_run_code_connect(
     ex = Execution()
     saw_exit = False
     for frame in frames:
+        if saw_exit:
+            # Nothing legal follows the terminal exitCode frame. Keep pulling anyway:
+            # breaking here abandoned the response body short of EOF, so the transport
+            # could not pool the connection and the NEXT call re-handshaked TLS. Draining
+            # lets the reader reach the Connect end-stream frame and release the socket.
+            continue
         if _apply_run_code_frame(ex, frame, on_stdout, on_stderr, on_result):
             saw_exit = True
-            break
     if not saw_exit:
         raise RuntimeError(_TRUNCATED_RUN_CODE)
     return ex
@@ -147,9 +152,12 @@ async def aparse_run_code_connect(
     ex = Execution()
     saw_exit = False
     async for frame in frames:
+        if saw_exit:
+            # See parse_run_code_connect: draining past the exitCode frame is what
+            # lets the transport pool this connection.
+            continue
         if _apply_run_code_frame(ex, frame, on_stdout, on_stderr, on_result):
             saw_exit = True
-            break
     if not saw_exit:
         raise RuntimeError(_TRUNCATED_RUN_CODE)
     return ex
