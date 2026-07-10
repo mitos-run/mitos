@@ -238,7 +238,7 @@ def _drain(frames: Iterator[tuple[int, bytes]]) -> None:
     try:
         for _ in frames:
             pass
-    except Exception:  # noqa: BLE001 - connection reuse is best effort
+    except Exception:  # noqa: BLE001,S110 - connection reuse is best effort
         pass
 
 
@@ -247,7 +247,7 @@ async def _adrain(stream: AsyncIterator[bytes]) -> None:
     try:
         async for _ in stream:
             pass
-    except Exception:  # noqa: BLE001 - connection reuse is best effort
+    except Exception:  # noqa: BLE001,S110 - connection reuse is best effort
         pass
 
 

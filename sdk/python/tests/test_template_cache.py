@@ -15,6 +15,7 @@ The cache is per process and keyed by (base URL, image, api key). It must:
 from __future__ import annotations
 
 import json
+import time
 
 import httpx
 import pytest
@@ -179,3 +180,62 @@ def test_the_cache_key_holds_no_material_derived_from_the_api_key():
     # leaked id cannot be correlated back to a key across runs.
     direct.close_http_pools()
     assert direct._template_key("http://testserver", "python", secret)[2] != opaque
+
+
+def test_concurrent_creates_for_one_key_ensure_the_template_once(monkeypatch):
+    """Two threads creating the same image must not both fire ensure_template.
+
+    The check-then-act around the cache was not atomic: both threads saw a miss, both
+    paid the network ensure, and the round trip the cache exists to remove was paid
+    twice. Parallel creates at process start are the realistic case.
+
+    The first thread is held INSIDE the ensure while the second one runs, so a
+    non-atomic check cannot serialize its way to a passing result. Both threads are
+    joined before asserting, so a slow second thread cannot make this pass by accident:
+    without the per-key lock it reaches the ensure eventually, and the count is 2.
+    """
+    import threading
+
+    rec = _Recorder()
+    entered = threading.Event()
+    proceed = threading.Event()
+    real_handle = rec.handle_request
+
+    def slow(request):
+        if request.url.path == "/v1/templates":
+            entered.set()
+            proceed.wait(timeout=5)
+        return real_handle(request)
+
+    rec.handle_request = slow
+    monkeypatch.setattr(direct, "_transport", lambda: rec)
+
+    errors: list[BaseException] = []
+
+    def go():
+        try:
+            mitos.create("python", api_key="sk-a", base_url="http://testserver")
+        except BaseException as exc:  # noqa: BLE001 - surfaced below
+            errors.append(exc)
+
+    first = threading.Thread(target=go)
+    first.start()
+    assert entered.wait(timeout=5), "the first create never reached ensure_template"
+
+    second = threading.Thread(target=go)
+    second.start()
+    # Give the second thread time to reach the cache check while the first is still
+    # inside the ensure. Without the per-key lock it walks straight through to a second
+    # ensure; with it, it blocks on the lock.
+    time.sleep(0.25)
+    proceed.set()
+
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    assert not errors, errors
+    assert _ensures(rec) == 1, (
+        "concurrent creates ensured the template %d times; the cache check is not atomic"
+        % _ensures(rec)
+    )
+    assert rec.paths.count("/v1/fork") == 2

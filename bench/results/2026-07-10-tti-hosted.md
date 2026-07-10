@@ -61,8 +61,13 @@ request together with the identity of the socket it went out on.
 | the pool was keyed by `(base URL, timeout)`, and create uses a 60 s client while the first exec uses a 30 s one, so the two never shared a socket. In httpx the connections live in the transport, not the client | one extra TLS handshake per sandbox |
 | `create()` called `ensure_template` before every fork, re-resolving the identical template each time | ~50 ms per create |
 
-Afterwards every request of an iteration (`/v1/templates`, `/v1/fork`,
-`RunCodeStream`, `DELETE`) rides ONE socket for the whole process.
+In the measured run afterwards, every request of every iteration (`/v1/templates`,
+`/v1/fork`, `RunCodeStream`, `DELETE`) went out on the SAME socket for the whole
+process, logged by socket identity. That is an observation, not a guarantee: a shared
+transport gives a process-wide pool, and a server idle timeout, a connection failure, or
+concurrent requests can still rotate the socket. The regression tests assert the
+property that matters and can be guaranteed, by counting TCP accepts on an in-process
+keep-alive server: three streaming RPCs must open exactly one connection.
 
 ### The environment: Nagle, and a 37 ms tax on every request
 
@@ -132,15 +137,53 @@ Read that table with three caveats, all of which cut against us claiming a win f
 1. **Different probe.** ComputeSDK runs `node -v`; our row runs `print(1)` through the
    Python template, which pays interpreter startup inside the guest.
 2. **Different pacing.** ComputeSDK runs 100 iterations back to back. Our row is paced
-   13 s apart to stay under the free tier's 5 creates/minute, so it never benefits from
-   a hot path warmed by the previous iteration.
-3. **Different clients and regions.** Their harness, their runner, their network.
+   13 s apart to stay under the free tier's 5 creates/minute.
+3. **Different clients and regions.** Their harness, their runner (`namespace-profile-default`),
+   their network. Proximity to that runner is a large share of any provider's score.
 
-The only clean statement available today is the ordering against E2B, the one peer that
-documents the same isolation primitive (Firecracker microVMs): mitos 307.7 ms P50 vs
-E2B 365.6 ms. We have not verified the isolation model of the faster entries, and the
-sub-40 ms rows (isorun, declaw) are far below the cost of restoring a microVM at all on
-this hardware, so they are almost certainly not booting one per request.
+Our row is therefore NOT a measured position in their leaderboard. It is our number,
+from our harness, printed beside theirs for scale. Even the ordering against E2B
+(307.7 ms vs 365.6 ms), the one peer documenting the same isolation primitive
+(Firecracker microVMs), is directional and unverified: it was not produced by the same
+harness on the same client. To claim a position we have to ship an adapter to
+`computesdk/computesdk` `packages/mitos` and be measured by their runner.
+
+## What the sequential table does and does not measure
+
+ComputeSDK also publishes a BURST run (`results/burst_tti/latest.json`, same 100
+iterations, fired concurrently). Dividing burst P50 by sequential P50 separates
+providers that hand out a pre-warmed sandbox from providers that provision one per
+request. Both computed from their raw data:
+
+| provider | seq P50 | burst P50 | burst/seq |
+|---|---|---|---|
+| isorun | 12.8 | 48.2 | 3.8x |
+| declaw | 37.7 | 225.8 | 6.0x |
+| northflank | 95.9 | 189.0 | 2.0x |
+| daytona | 136.2 | 705.0 | 5.2x |
+| upstash | 258.3 | 2055.2 | 8.0x |
+| e2b | 365.6 | 471.0 | 1.3x |
+| modal | 470.9 | 565.4 | 1.2x |
+| cloud-run | 433.3 | 506.4 | 1.2x |
+
+The providers whose latency barely moves under burst (e2b, modal, cloud-run) are doing
+the same amount of work per request either way. The providers that degrade several fold
+are serving the sequential run from a warm pool that the burst run drains. That is a
+property of the measurement, not an accusation: ComputeSDK's own methodology counts
+"infrastructure allocation ... boot ... health check polling" inside TTI, and a pool
+checkout skips all of it.
+
+Two things follow, and both are about us:
+
+- **mitos is a pool checkout too.** A warm claim activates an already-booted, dormant
+  husk pod. So the comparison against Daytona (also 5.2x under burst) is a fair fight
+  between two checkouts, and our checkout is simply more expensive today.
+- **We would degrade badly under their burst run.** The prod pool is `warm.min: 8` on a
+  single KVM node, and a drained pool refills by booting a VM. That is a capacity fact
+  to fix before submitting an adapter, not a number to quote.
+
+We have not verified the isolation model of the faster entries and make no claim about
+it here.
 
 ComputeSDK also publishes a `snapshot-fork` benchmark, but it measures OBJECT STORAGE
 (S3, R2, Azure Blob, Tigris), not VM fork, so there is still no public apples-to-apples

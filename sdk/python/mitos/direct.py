@@ -340,6 +340,7 @@ def close_http_pools() -> None:
         # Drop the api-key -> opaque-id map too: it is the only place the SDK holds a
         # key value beyond the life of a request.
         _KEY_IDS.clear()
+        _TEMPLATE_KEY_LOCKS.clear()
 
 
 # --- per-process template cache ---------------------------------------------------
@@ -363,6 +364,14 @@ _TEMPLATE_LOCK = threading.Lock()
 # same exposure it already has on SandboxServer._api_key and on every request header.
 _KEY_IDS: dict[str, str] = {}
 
+# One lock PER cache key. The check-then-act around _TEMPLATES_ENSURED is not atomic on
+# its own: two threads creating the same image both saw a miss and both paid the network
+# ensure, which is exactly the round trip the cache exists to remove, and parallel
+# creates at process start are the realistic case. A single global lock would fix that
+# by serializing every create in the process behind one network call, including creates
+# for unrelated images and orgs. Per key keeps those parallel.
+_TEMPLATE_KEY_LOCKS: dict[tuple[str, str, str], threading.Lock] = {}
+
 
 def _key_identity(api_key: Optional[str]) -> str:
     """A stable, opaque, per-process id for this API key. Never derived from its value."""
@@ -377,6 +386,37 @@ def _key_identity(api_key: Optional[str]) -> str:
 
 def _template_key(base_url: str, image: str, api_key: Optional[str]) -> tuple[str, str, str]:
     return (base_url.rstrip("/"), image, _key_identity(api_key))
+
+
+def _template_key_lock(cache_key: tuple[str, str, str]) -> threading.Lock:
+    """The lock guarding one template key. Created on first use."""
+    with _TEMPLATE_LOCK:
+        lock = _TEMPLATE_KEY_LOCKS.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _TEMPLATE_KEY_LOCKS[cache_key] = lock
+        return lock
+
+
+def _ensure_template_once(cache_key: Optional[tuple[str, str, str]], ensure: Callable[[], None]) -> None:
+    """Run ensure at most once per key in this process, serialized per key.
+
+    An unshaped key is checked, then double-checked under its own lock, so a thread that
+    lost the race skips the network call the winner already made. Nothing is marked
+    ensured until the call actually succeeded: a raising ensure leaves the key absent so
+    the next caller retries it.
+    """
+    if cache_key is None:
+        ensure()
+        return
+    if cache_key in _TEMPLATES_ENSURED:
+        return
+    with _template_key_lock(cache_key):
+        if cache_key in _TEMPLATES_ENSURED:
+            return
+        ensure()
+        with _TEMPLATE_LOCK:
+            _TEMPLATES_ENSURED.add(cache_key)
 
 
 class DirectSandboxFiles:
@@ -522,11 +562,7 @@ class DirectSandbox:
                 image, network=network, workload=workload, resources=resources
             )
 
-        if cache_key is None or cache_key not in _TEMPLATES_ENSURED:
-            _ensure()
-            if cache_key is not None:
-                with _TEMPLATE_LOCK:
-                    _TEMPLATES_ENSURED.add(cache_key)
+        _ensure_template_once(cache_key, _ensure)
 
         try:
             return server.fork(image, id=id, idempotency_key=idempotency_key, region=region)
@@ -538,9 +574,7 @@ class DirectSandbox:
                 raise
             with _TEMPLATE_LOCK:
                 _TEMPLATES_ENSURED.discard(cache_key)
-            _ensure()
-            with _TEMPLATE_LOCK:
-                _TEMPLATES_ENSURED.add(cache_key)
+            _ensure_template_once(cache_key, _ensure)
             return server.fork(image, id=id, idempotency_key=idempotency_key, region=region)
 
     def _auth_headers(self) -> dict[str, str]:
