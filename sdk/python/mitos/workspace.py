@@ -243,6 +243,31 @@ class Workspace:
     # checkout is an alias for revert: make a past state the new head.
     checkout = revert
 
+    def set_git(self, git: object) -> None:
+        """Declare this workspace's ``spec.git`` in place (issue #619).
+
+        Accepts a :class:`~mitos.git.GitSpec` from ``mitos.git(paths=[...])`` or a
+        bare list of paths. Patches ``spec.git`` on the existing Workspace so a
+        caller declares the repo paths that get version history and the
+        rendezvous remote first-class, instead of hand-patching the CRD. Prefer
+        :meth:`AgentRun.create_workspace` with ``git=`` to set it at create time.
+        """
+        from mitos.git import coerce_git
+
+        git_spec = coerce_git(git).to_spec()
+        # patch_namespaced_custom_object uses JSON merge-patch (RFC 7396), so an
+        # omitted key preserves the server's current value. Send the optional
+        # credential fields as explicit null when unset so a set_git that drops
+        # credentials actually clears any previously stored reference.
+        git_spec.setdefault("credentialsSecretRef", None)
+        git_spec.setdefault("credentialsUsername", None)
+
+        self._api.patch_namespaced_custom_object(
+            group=API_GROUP, version=API_VERSION, namespace=self.namespace,
+            plural="workspaces", name=self.name,
+            body={"spec": {"git": git_spec}},
+        )
+
     def serve(
         self,
         *,
