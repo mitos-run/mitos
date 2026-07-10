@@ -261,6 +261,14 @@ func grpcError(err error) error {
 	if errors.Is(err, fork.ErrAtCapacity) {
 		return status.Error(codes.ResourceExhausted, err.Error())
 	}
+	// A build already running for this template is a RETRY-LATER signal, not a
+	// failure: the in-flight build is still going to finish. Flattening it to Internal
+	// made the controller report the pool BuildFailed on every re-reconcile while a
+	// slow build was still working, and a pool whose template is not built serves no
+	// warm husk pods.
+	if errors.Is(err, fork.ErrTemplateBuildInProgress) {
+		return status.Error(codes.Unavailable, err.Error())
+	}
 	if strings.Contains(err.Error(), "not found") {
 		return status.Error(codes.NotFound, err.Error())
 	}
