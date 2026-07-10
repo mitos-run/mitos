@@ -322,7 +322,7 @@ func (b *checkoutBuffer) refillOne(ctx context.Context, pool string) error {
 	}
 	resp, err := b.k.createSandboxAndAwait(ctx, sb, b.k.now())
 	if err != nil {
-		return err
+		return fmt.Errorf("buffered create for pool %q: %w", pool, err)
 	}
 	if resp.Status != http.StatusCreated {
 		return fmt.Errorf("buffered create for pool %q did not become ready (status %d)", pool, resp.Status)

@@ -94,13 +94,15 @@ Checkout (the hot path):
    path.
 3. Return 201 {id, endpoint, token, phase Ready} from cache. fork_time_ms is the
    observed wall time of this request, honestly tiny.
-4. Async: patch the husk pod org label (billing); kick refill.
+4. The CR patch's watch event triggers the controller's reconcile, which
+   propagates the org onto the backing husk pod (billing); refill happens on
+   the buffer's own periodic reconcile pass, not from this request.
 
 Adopt (gateway start): LIST buffered sandboxes, read each token Secret, rebuild
 the memory cache.
 
 Janitor (each reconcile pass): prune non-Ready entries; terminate entries older
-than maxAge; re-patch pods for claimed CRs still missing the pod org label.
+than maxAge.
 
 ## Security
 
