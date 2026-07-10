@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	fakeclient "sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -32,6 +34,9 @@ func seedBuffered(t *testing.T, c client.Client, name string) bufferedSandbox {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: "mitos",
 			Labels: map[string]string{BufferedLabelKey: "true", bufferedPoolLabelKey: "python"},
+			// The fake client does not stamp CreationTimestamp (a real
+			// apiserver always does), and the reap path needs a real age.
+			CreationTimestamp: metav1.Now(),
 		},
 		Spec: v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "python"}}},
 	}
@@ -295,6 +300,98 @@ func TestRefillBacksOffAfterFailure(t *testing.T) {
 	cp.checkout.reconcilePool(context.Background(), "python")
 	if n := creates.Load(); n != 1 {
 		t.Fatalf("pass during backoff made a create attempt (total %d), want none", n)
+	}
+}
+
+// TestReconcileAdoptsExistingBufferedSandboxes asserts a replica whose memory
+// is empty (a restart, or the other replica refilled) rebuilds a claimable
+// entry from the cluster: endpoint and pod from status, token from the
+// controller-owned Secret.
+func TestReconcileAdoptsExistingBufferedSandboxes(t *testing.T) {
+	c := newFakeClient(t, poolInNs("mitos", "python"))
+	cp := New(c,
+		WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second),
+		WithSingleTenantNamespace("mitos"),
+		WithCheckout(CheckoutConfig{Pools: []string{"python"}, Floor: 1, Cap: 4, MaxAge: 10 * time.Minute}))
+
+	e := seedBuffered(t, c, "sb-adopt")
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "sb-adopt" + tokenSecretSuffix, Namespace: "mitos"},
+		Data:       map[string][]byte{"token": []byte("tok-sb-adopt"), "endpoint": []byte(e.endpoint)},
+	}
+	if err := c.Create(context.Background(), sec); err != nil {
+		t.Fatalf("seed secret: %v", err)
+	}
+
+	cp.checkout.reconcilePool(context.Background(), "python")
+
+	got, ok := cp.checkout.pop("python")
+	if !ok {
+		t.Fatal("nothing adopted")
+	}
+	if got.name != "sb-adopt" || got.token != "tok-sb-adopt" || got.endpoint != e.endpoint || got.resourceVersion == "" {
+		t.Fatalf("adopted entry incomplete: %+v", got)
+	}
+}
+
+// TestReconcilePrunesFailedBufferedSandboxes asserts a buffered CR that is
+// not Ready and not merely in flight (Failed) is deleted and never cached.
+func TestReconcilePrunesFailedBufferedSandboxes(t *testing.T) {
+	c := newFakeClient(t, poolInNs("mitos", "python"))
+	cp := New(c,
+		WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second),
+		WithSingleTenantNamespace("mitos"),
+		WithCheckout(CheckoutConfig{Pools: []string{"python"}, Floor: 0, Cap: 4, MaxAge: 10 * time.Minute}))
+	// Floor 0 keeps this pass from refilling, isolating the prune assertion.
+	cp.checkout.cfg.Floor = 0
+
+	fail := &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+		Name: "sb-failed", Namespace: "mitos",
+		Labels: map[string]string{BufferedLabelKey: "true", bufferedPoolLabelKey: "python"},
+	}, Spec: v1.SandboxSpec{Source: v1.SandboxSource{PoolRef: &v1.LocalObjectReference{Name: "python"}}}}
+	if err := c.Create(context.Background(), fail); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	fail.Status.Phase = v1.SandboxFailed
+	if err := c.Status().Update(context.Background(), fail); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	cp.checkout.reconcilePool(context.Background(), "python")
+
+	var gone v1.Sandbox
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "mitos", Name: "sb-failed"}, &gone); !apierrors.IsNotFound(err) {
+		t.Fatalf("failed buffered sandbox not deleted: err=%v", err)
+	}
+	if _, ok := cp.checkout.pop("python"); ok {
+		t.Fatal("a failed buffered sandbox was cached as claimable")
+	}
+}
+
+// TestReconcileReapsOverAgeBufferedSandboxes asserts a buffered CR older than
+// MaxAge is recycled (deleted and dropped), bounding how stale a handed-out
+// sandbox can be.
+func TestReconcileReapsOverAgeBufferedSandboxes(t *testing.T) {
+	c := newFakeClient(t, poolInNs("mitos", "python"))
+	cp := New(c,
+		WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second),
+		WithSingleTenantNamespace("mitos"),
+		WithCheckout(CheckoutConfig{Pools: []string{"python"}, Floor: 1, Cap: 4, MaxAge: 10 * time.Minute}))
+	cp.checkout.cfg.Floor = 0 // no refill noise
+
+	e := seedBuffered(t, c, "sb-old")
+	cp.checkout.add(e)
+	// Age is CreationTimestamp-based; step the control plane clock past MaxAge.
+	cp.now = func() time.Time { return time.Now().Add(11 * time.Minute) }
+
+	cp.checkout.reconcilePool(context.Background(), "python")
+
+	var gone v1.Sandbox
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "mitos", Name: "sb-old"}, &gone); !apierrors.IsNotFound(err) {
+		t.Fatalf("over-age buffered sandbox not reaped: err=%v", err)
+	}
+	if _, ok := cp.checkout.pop("python"); ok {
+		t.Fatal("an over-age buffered sandbox stayed claimable")
 	}
 }
 

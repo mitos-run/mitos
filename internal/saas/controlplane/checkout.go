@@ -170,9 +170,10 @@ const (
 	refillBackoffCap  = time.Minute
 )
 
-// reconcilePool is one pass of the buffer loop for one pool: count the
-// cluster's buffered sandboxes and refill toward the floor, at most one
-// create per pass so two replicas converge without a thundering herd.
+// reconcilePool is one pass of the buffer loop for one pool: sync the cache
+// against the cluster (the CRs are the truth: adopt unknown Ready entries,
+// prune failed ones, reap over-age ones), then refill toward the floor, at
+// most one create per pass so two replicas converge without a thundering herd.
 func (b *checkoutBuffer) reconcilePool(ctx context.Context, pool string) {
 	ns := b.k.singleTenantNamespace
 	var list v1.SandboxList
@@ -181,7 +182,36 @@ func (b *checkoutBuffer) reconcilePool(ctx context.Context, pool string) {
 		slog.Warn("checkout buffer list failed", "pool", pool, "error", err.Error())
 		return
 	}
-	count := len(list.Items)
+
+	known := make(map[string]bool)
+	b.mu.Lock()
+	for _, e := range b.entries[pool] {
+		known[e.name] = true
+	}
+	b.mu.Unlock()
+
+	count := 0
+	for i := range list.Items {
+		sb := &list.Items[i]
+		age := b.k.now().Sub(sb.CreationTimestamp.Time)
+		switch {
+		case !sb.CreationTimestamp.IsZero() && age > b.cfg.MaxAge:
+			// Bounded staleness: a buffered VM runs live while it waits, so
+			// entries past MaxAge are recycled, never handed to a tenant.
+			b.dropAndDelete(ctx, pool, sb)
+		case sb.Status.Phase == v1.SandboxFailed:
+			b.dropAndDelete(ctx, pool, sb)
+		case sb.Status.Phase != v1.SandboxReady:
+			// In flight (a refill mid-activation): neither adoptable nor
+			// reapable yet; it counts toward the floor so no over-refill.
+			count++
+		default:
+			count++
+			if !known[sb.Name] {
+				b.adopt(ctx, pool, sb)
+			}
+		}
+	}
 	if count >= b.cfg.Floor || count >= b.cfg.Cap {
 		return
 	}
@@ -207,6 +237,74 @@ func (b *checkoutBuffer) reconcilePool(ctx context.Context, pool string) {
 	b.refillFails[pool] = 0
 	delete(b.nextRefill, pool)
 	b.mu.Unlock()
+}
+
+// dropAndDelete removes sb from the cache and deletes the CR (recycle). The
+// delete tolerates NotFound: an idle or lifetime reaper getting there first
+// is fine, the pool refills either way.
+func (b *checkoutBuffer) dropAndDelete(ctx context.Context, pool string, sb *v1.Sandbox) {
+	b.mu.Lock()
+	q := b.entries[pool][:0]
+	for _, e := range b.entries[pool] {
+		if e.name != sb.Name {
+			q = append(q, e)
+		}
+	}
+	b.entries[pool] = q
+	b.mu.Unlock()
+	if err := b.k.c.Delete(ctx, sb); err != nil && !apierrors.IsNotFound(err) {
+		slog.Warn("checkout recycle failed", "sandbox", sb.Name, "error", err.Error())
+	}
+}
+
+// adopt rebuilds a cache entry from the cluster after a gateway restart (or
+// for a CR the other replica refilled): endpoint and pod from status, token
+// from the controller-owned Secret. A failed Secret read leaves the CR for
+// the next pass rather than caching an unusable entry.
+func (b *checkoutBuffer) adopt(ctx context.Context, pool string, sb *v1.Sandbox) {
+	token, err := b.k.readToken(ctx, sb.Namespace, sb.Name+tokenSecretSuffix)
+	if err != nil {
+		slog.Warn("checkout adopt could not read the token secret; leaving for the next pass",
+			"sandbox", sb.Name, "error", err.Error())
+		return
+	}
+	b.add(bufferedSandbox{
+		name:            sb.Name,
+		pool:            pool,
+		endpoint:        sb.Status.Endpoint,
+		token:           token,
+		resourceVersion: sb.ResourceVersion,
+		podName:         sb.Status.Pod,
+		createdAt:       sb.CreationTimestamp.Time,
+	})
+}
+
+// checkoutReconcileInterval paces the buffer loop; the hot path never waits
+// on it (claim reads only the cache).
+const checkoutReconcileInterval = 15 * time.Second
+
+// StartCheckout starts the buffer's reconcile loop for the server's
+// lifetime. A no-op when the checkout feature is off.
+func (k *K8sControlPlane) StartCheckout(ctx context.Context) {
+	if k.checkout == nil {
+		return
+	}
+	go k.checkout.run(ctx)
+}
+
+func (b *checkoutBuffer) run(ctx context.Context) {
+	t := time.NewTicker(checkoutReconcileInterval)
+	defer t.Stop()
+	for {
+		for _, pool := range b.cfg.Pools {
+			b.reconcilePool(ctx, pool)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 // refillOne creates ONE buffered sandbox through the normal create machinery
