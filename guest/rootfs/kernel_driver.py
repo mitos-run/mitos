@@ -29,6 +29,7 @@ single threaded regardless).
 """
 import base64
 import json
+import signal
 import sys
 import time
 
@@ -37,6 +38,82 @@ from jupyter_client.manager import start_new_kernel
 # MIME types whose payload ipykernel delivers already base64-encoded as bytes
 # we keep as-is (image/png, image/jpeg). Everything else is text we pass through.
 _BINARY_MIMES = {"image/png", "image/jpeg"}
+
+# --- fork correctness -------------------------------------------------------------
+#
+# The kernel is started EAGERLY, before the template snapshot is taken, so a restored
+# sandbox does not pay ~70 ms of interpreter startup on its first run_code. That means
+# every fork of that snapshot inherits ONE already-imported interpreter, and therefore
+# the same seeded state in random.Random: without this, two children of the same
+# snapshot would emit identical random.random() sequences.
+#
+# The guest agent broadcasts SIGUSR2 to userspace processes after a fork, AFTER it has
+# credibly reseeded the kernel CRNG (RNDADDENTROPY), so os.urandom() below already
+# returns per-fork divergent bytes. The broadcast is gated on a process having
+# installed a SIGUSR2 handler (SIGUSR2 terminates a process that has not), which is why
+# this handler exists here in the DRIVER: the ipykernel subprocess installs none, so it
+# is never signalled and never killed.
+#
+# The handler only sets a flag. The reseed runs as a silent cell before the next
+# execution, because a signal handler cannot safely drive jupyter_client while a cell
+# is mid-flight. A cell already running when the fork happens keeps its pre-fork RNG
+# state; the next one does not.
+#
+# NOT covered: PYTHONHASHSEED (fixed at interpreter start, so sibling forks share hash
+# randomization) and any PRNG a library seeded into its own state before the snapshot
+# other than numpy. See docs/fork-correctness.md.
+_reseed_pending = False
+
+_RESEED_SRC = """
+def __mitos_reseed():
+    import os, random, sys
+    random.seed(os.urandom(32))
+    numpy = sys.modules.get("numpy")
+    if numpy is not None:
+        numpy.random.seed(int.from_bytes(os.urandom(4), "little"))
+__mitos_reseed()
+del __mitos_reseed
+"""
+
+
+def _on_sigusr2(_signum, _frame):
+    """Record that this VM was forked. Reseeding happens before the next cell."""
+    global _reseed_pending
+    _reseed_pending = True
+
+
+def _install_fork_handler():
+    """Opt in to the agent's post-fork SIGUSR2 broadcast.
+
+    The agent only signals processes that installed a handler, so this call is what
+    makes the broadcast reach us at all. It must run in the driver, never in the
+    ipykernel subprocess: an unhandled SIGUSR2 terminates a process.
+    """
+    signal.signal(signal.SIGUSR2, _on_sigusr2)
+
+
+def _maybe_reseed(km, client):
+    """Reseed the kernel once per fork, before the next cell. Returns whether it ran."""
+    global _reseed_pending
+    if not _reseed_pending:
+        return False
+    _reseed_pending = False
+    _reseed_kernel(km, client)
+    return True
+
+
+def _reseed_kernel(km, client):
+    """Reseed the kernel's PRNGs from the (already fork-reseeded) CRNG.
+
+    Runs silently: no history, no output frames. A failure here must not fail the
+    caller's cell, but it MUST be visible, because a silently unseeded fork emits
+    predictable, duplicated randomness.
+    """
+    try:
+        msg_id = client.execute(_RESEED_SRC, store_history=False, silent=True)
+        _drain_to_idle(km, client, msg_id)
+    except Exception as exc:  # noqa: BLE001 - never fail the user's cell over this
+        print("mitos: kernel PRNG reseed after fork failed: %r" % (exc,), file=sys.stderr)
 
 # Wall-clock budget applied to a single run when the request omits a positive
 # timeout. Bounds a runaway cell (e.g. while True: pass) so it cannot wedge the
@@ -175,6 +252,7 @@ def main():
     # start_new_kernel returns (KernelManager, BlockingKernelClient) with the
     # client already connected and channels started.
     km, client = start_new_kernel(kernel_name="python3")
+    _install_fork_handler()
     # Route matplotlib to the inline backend so figures become image/png
     # display_data instead of trying to open a GUI window.
     client.execute(
@@ -189,6 +267,7 @@ def main():
             if not line:
                 continue
             req = json.loads(line)
+            _maybe_reseed(km, client)
             _run_one(km, client, req.get("id", ""), req.get("code", ""), req.get("timeout", 0))
     finally:
         client.stop_channels()
