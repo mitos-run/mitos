@@ -205,6 +205,10 @@ type HuskPodOptions struct {
 	// pod brings its tap up while dormant and a claim pays only the nft transaction
 	// that installs the tenant's policy. Requires MultiVM. Default off.
 	PrepareEgressLink bool
+	// PrepareRestore starts the stub with --prepare-restore so a warm pod loads its
+	// default VM's snapshot and resumes its guest while dormant, leaving only the
+	// handshake on the warm-claim hot path. REQUIRES PrepareEgressLink (and MultiVM).
+	PrepareRestore bool
 	// MultiVMForkVMs is the number of ADDITIONAL fork-child VMs a multi-VM pod
 	// reserves node memory for up front (beyond the source VM), so the co-location
 	// routing has room to co-locate that many children before a fork spills to a new
@@ -581,6 +585,12 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 			"--in-pod-guest-ip", huskGuestIP,
 			"--in-pod-gateway-ip", huskGatewayIP,
 		)
+		// Prepare-time restore builds ON the prepared tap, so it is emitted only inside
+		// this block: --prepare-restore without --prepare-egress-link would have no tap
+		// at snapshot load. The stub also refuses that combination.
+		if opts.PrepareRestore {
+			args = append(args, "--prepare-restore")
+		}
 	}
 
 	// Live-cow write-protect needs a KERNEL-MODE userfaultfd over the guest RAM: the
@@ -1416,6 +1426,7 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 			LiveCowChildImport: r.LiveCowChildImport,
 			PrewarmChild:       r.PrewarmChild,
 			PrepareEgressLink:  r.PrepareEgressLink,
+			PrepareRestore:     r.PrepareRestore,
 			MultiVMForkVMs:     r.MultiVMForkVMs,
 			StubImage:          r.HuskStubImage,
 			DNSUpstream:        r.HuskDNSUpstream,

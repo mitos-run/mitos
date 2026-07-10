@@ -104,7 +104,14 @@ type vmInstance struct {
 	// activate installs the tenant policy on it and skips the link setup. Cleared
 	// whenever the tap is torn down, so a retry re-ensures it.
 	preparedLinkTap string
-	dnsProxy        *dnsproxy.Server
+	// preRestored is set when this instance loaded its snapshot and RESUMED its guest
+	// while dormant (Options.PrepareRestore), so activate skips the restore/resume/
+	// guest-ready and pays only the fork-correctness handshake. preRestoredSnapshotDir
+	// is the snapshot the dormant restore used; activate FAILS CLOSED if the claim's
+	// snapshot dir differs, because a resumed guest cannot be reloaded.
+	preRestored            bool
+	preRestoredSnapshotDir string
+	dnsProxy               *dnsproxy.Server
 
 	// childUFFDPlan carries a co-located live-cow fork child's LAZY UFFD import
 	// intent from SpawnVM to activateInstance: the ChildMemfdImport coordinates (the
@@ -627,6 +634,15 @@ type Options struct {
 	// derives from the guest IP. Config, never secrets.
 	InPodGuestIP   string
 	InPodGatewayIP string
+	// PrepareRestore opts a multi-VM pod's DEFAULT VM into loading its snapshot and
+	// resuming its guest while the pod is DORMANT, so a claim pays only the fork-
+	// correctness handshake instead of the snapshot restore, the resume, and the guest-
+	// ready wait (measured ~55 ms of the ~113 ms warm-claim activate, plus the demand
+	// fault-in that makes the first run_code cold). REQUIRES PrepareEgressLink (the tap
+	// must exist before LoadSnapshot) and InPodGuestIP. Default off. The dormant guest
+	// serves no tenant and is reseeded fail-closed at the claim's NotifyForked, exactly
+	// as a restore-at-activate guest is. See docs/superpowers/plans/2026-07-10-prepare-time-restore.md.
+	PrepareRestore bool
 	// PrewarmChild opts into keeping ONE dormant, generic co-located child
 	// Firecracker pre-prepared (booted, and snapshot-verified when a template
 	// snapshot is configured) in a multi-VM pod, so a co-located fork that does
@@ -753,6 +769,7 @@ type Stub struct {
 
 	// prepareEgressLink / inPodGuestIP / inPodGatewayIP back Options.PrepareEgressLink.
 	prepareEgressLink bool
+	prepareRestore    bool
 	inPodGuestIP      string
 	inPodGatewayIP    string
 	// prewarmChild keeps ONE dormant, generic co-located child Firecracker
@@ -833,6 +850,7 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		liveCowFork:        opts.LiveCowFork,
 		liveCowChildImport: opts.LiveCowChildImport,
 		prepareEgressLink:  opts.PrepareEgressLink,
+		prepareRestore:     opts.PrepareRestore,
 		inPodGuestIP:       opts.InPodGuestIP,
 		inPodGatewayIP:     opts.InPodGatewayIP,
 		prewarmChild:       opts.PrewarmChild,

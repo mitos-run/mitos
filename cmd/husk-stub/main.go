@@ -196,6 +196,7 @@ func run() error {
 		prepareEgressLink  = flag.Bool("prepare-egress-link", false, "EXPERIMENTAL, DEFAULT OFF: bring the pod's default-VM tap up while the pod is DORMANT, under a default-deny policy, so a claim pays only the atomic nft transaction that installs the tenant's policy instead of also paying the tap create (measured: the link half is about two thirds of the egress_filter stage). Requires --multi-vm and --in-pod-guest-ip. Off keeps the whole filter on the activate path byte-for-byte. Not a secret.")
 		inPodGuestIP       = flag.String("in-pod-guest-ip", "", "the fixed in-pod guest IP of this pod's default VM (the same value the controller sends in the activate request). Needed BEFORE that request arrives by --prepare-egress-link, because the tap name derives from it. Config, not a secret.")
 		inPodGatewayIP     = flag.String("in-pod-gateway-ip", "", "the fixed in-pod gateway IP paired with --in-pod-guest-ip. Config, not a secret.")
+		prepareRestore     = flag.Bool("prepare-restore", false, "EXPERIMENTAL, DEFAULT OFF: load the default VM's snapshot and RESUME its guest while the pod is DORMANT, so a claim pays only the fork-correctness handshake instead of the restore, resume, and guest-ready wait. REQUIRES --prepare-egress-link (the tap must exist before the snapshot load). Off keeps the whole restore on the activate path byte-for-byte. Not a secret.")
 		prewarmChild       = flag.Bool("prewarm-child", false, "EXPERIMENTAL, DEFAULT OFF: keep ONE dormant generic co-located child Firecracker pre-prepared per multi-vm pod so a fork ADOPTS the ready child (fc_boot=0, prepare off the hot path) instead of booting one at fork time. Requires --multi-vm; a fresh slot re-warms async, a miss falls back to the on-demand prepare. Not a secret.")
 		liveCowChildImport = flag.Bool("live-cow-child-import", false, "EXPERIMENTAL, default false: opt the live-cow fork onto the VMSTATE-ONLY capture (skip the ~364ms disk mem write). REQUIRES a shipped child-side memfd-import Firecracker patch: the co-located child boots its guest RAM from the source shared memfd instead of the disk fork snapshot. The currently shipped patched binary patches the SOURCE (restore) side only, so leave this OFF; with it off an armed --live-cow-fork source still writes the disk mem, so every co-located child restores from disk and the fork never hangs. Turn on ONLY once a child-side import binary is shipped. Not a secret.")
 	)
@@ -441,6 +442,7 @@ func run() error {
 		LiveCowChildImport: *liveCowChildImport,
 		PrewarmChild:       *prewarmChild,
 		PrepareEgressLink:  *prepareEgressLink,
+		PrepareRestore:     *prepareRestore,
 		InPodGuestIP:       *inPodGuestIP,
 		InPodGatewayIP:     *inPodGatewayIP,
 	})
