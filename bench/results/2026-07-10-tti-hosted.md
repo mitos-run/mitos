@@ -19,61 +19,102 @@ error.
 | API | `https://api.mitos.run` (hosted, free tier) |
 | client | `mitos-bench1`, Hetzner bare metal, same region as the API |
 | template | `python`, guest 2 vCPU / 512 MiB |
-| probe | `print(1)` via `run_code`, matching ComputeSDK's `node -v` |
+| probe | `print(1)` via `run_code` |
 | pacing | 13 s between iterations (free tier allows 5 creates/minute) |
+| httpx | 0.28.1 / httpcore 1.0.9 (the SDK requires `httpx>=0.27.0`) |
 | command | `MITOS_API_KEY=... python3 bench/tti-latency.py 20` |
 
 Measuring from a laptop across the public internet mostly measures the internet: an
 unrouted 404 costs 250 ms or more from a random location and 6 ms from inside the
-cluster.
+cluster. The httpx version is part of the setup, not a footnote: see below.
 
-## Time to Interactive, ms, N=20
+## Result, ms, N=20, 20/20 success
 
-| | before | after |
-|---|---|---|
-| min | 460.2 | **273.4** |
-| P50 | 495.0 | **340.7** |
-| P90 | 555.6 | 373.3 |
-| P95 | 567.8 | 438.2 |
-| max | 613.1 | 448.7 |
-| mean | 510.0 | 343.8 |
-| success | 20/20 | 20/20 |
+| | |
+|---|---|
+| min | **265.7** |
+| P50 | **307.7** |
+| P90 | 348.4 |
+| P95 | 380.8 |
+| max | 413.1 |
+| mean | 315.1 |
 
-Split after: create median 231.5 ms, first exec median 102.1 ms.
+Split: create median 195.5 ms, first exec median 117.8 ms.
 
-"Before" and "after" ran against the SAME server build. Every millisecond of the
-difference is client side, found by logging each HTTP request with the identity of
-the socket it went out on:
+## How it got here
+
+The starting point was 495.0 ms P50. Every millisecond of the improvement is client
+side; the server build never changed. Each defect was found by logging every HTTP
+request together with the identity of the socket it went out on.
+
+| | P50 |
+|---|---|
+| starting point | 495.0 |
+| after the three client fixes (same environment) | 340.7 |
+| after correcting the environment to a supported httpx | **307.7** |
+
+### The three client fixes
 
 | defect | cost |
 |---|---|
-| a streaming Connect RPC never returned its connection to the pool (body not read to EOF), so every exec re-handshaked TLS | ~70 ms per exec |
-| the pool was keyed by `(base URL, timeout)`, so create (60 s client) and the first exec (30 s client) never shared a socket | one extra handshake per sandbox |
-| `create()` re-resolved the identical template on every call | ~50 ms per create |
+| a streaming Connect RPC never returned its connection to the pool, because the reader stopped at the terminal frame and left the body short of EOF. `run_code` was worse: it stopped at the `exitCode` MESSAGE frame, so the end-stream frame was never read at all | ~70 ms per exec |
+| the pool was keyed by `(base URL, timeout)`, and create uses a 60 s client while the first exec uses a 30 s one, so the two never shared a socket. In httpx the connections live in the transport, not the client | one extra TLS handshake per sandbox |
+| `create()` called `ensure_template` before every fork, re-resolving the identical template each time | ~50 ms per create |
 
-After the fixes, all four requests of an iteration (`/v1/templates`, `/v1/fork`,
-`RunCodeStream`, `DELETE`) ride ONE socket for the whole process.
+In the measured run afterwards, every request of every iteration (`/v1/templates`,
+`/v1/fork`, `RunCodeStream`, `DELETE`) went out on the SAME socket for the whole
+process, logged by socket identity. That is an observation, not a guarantee: a shared
+transport gives a process-wide pool, and a server idle timeout, a connection failure, or
+concurrent requests can still rotate the socket. The regression tests assert the
+property that matters and can be guaranteed, by counting TCP accepts on an in-process
+keep-alive server: three streaming RPCs must open exactly one connection.
 
-## Where the remaining 341 ms goes
+### The environment: Nagle, and a 37 ms tax on every request
+
+The 340.7 ms run was measured against `httpx 0.23.3`, which is BELOW the SDK's own
+declared floor of `httpx>=0.27.0`. That turned out to matter a great deal.
+
+`httpcore 0.16` (shipped with httpx 0.23) does not set `TCP_NODELAY`. Because httpcore
+writes the request headers and the body as separate segments, the second one waits on
+the peer's delayed ACK. Interleaved call by call over the same warm connection to the
+same sandbox, alternating clients so that server-side drift hits both equally:
+
+| client | `exec true` median | min |
+|---|---|---|
+| `http.client` (stdlib, sets `TCP_NODELAY`) | 25.1 ms | 19.8 ms |
+| `httpx 0.23.3` (`httpcore 0.16.3`, Nagle ON) | 61.8 ms | 56.6 ms |
+| `httpx 0.28.1` (`httpcore 1.0.9`, Nagle OFF) | 26.7 ms | 20.6 ms |
+
+37 ms on EVERY request, which for an agent is every tool call. The SDK now passes
+`socket_options=[(IPPROTO_TCP, TCP_NODELAY, 1)]` to the transport it owns, so the
+invariant no longer depends on a transitive default. A test asserts `TCP_NODELAY` is
+set on a pooled connection.
+
+## Where the remaining 308 ms goes
 
 | | ms | what it is |
 |---|---|---|
-| create | 231 | gateway ~20, control plane ~139, engine restore 60 to 76 |
-| first exec | 102 | gateway, vsock to the guest agent, and the Python interpreter |
+| create | 196 | gateway, control plane, engine restore |
+| first exec | 118 | gateway, vsock to the guest agent, and the Python interpreter |
 
 The engine's own warm-claim activate is 60 to 76 ms P50 on this hardware
 (`bench/husk-activate-latency.sh`, see
-[2026-07-09-lazy-livecow-restore.md](2026-07-09-lazy-livecow-restore.md)). It is
-therefore a minority of TTI: most of what a user waits for is the Kubernetes control
-plane, not Firecracker.
+[2026-07-09-lazy-livecow-restore.md](2026-07-09-lazy-livecow-restore.md)), so it is a
+minority of TTI. Most of what a user waits for is the Kubernetes control plane, not
+Firecracker.
+
+On the exec leg, a warm `exec true` (the cheapest possible guest round trip) costs
+about 25 ms end to end from this client, of which the guest itself reports ~21 ms. The
+Python interpreter accounts for most of the difference between that and `print(1)`.
 
 ## Peer set
 
 Context, NOT a controlled comparison. The numbers below are P50s we computed from the
 raw per-iteration data ComputeSDK publishes, run `2026-07-09T01:03:05Z`, 100
 iterations per provider, `results/sequential_tti/latest.json` in
-`computesdk/benchmarks`. They were produced on ComputeSDK's runner against each
-vendor's own hardware; we did not re-run them.
+`computesdk/benchmarks`. Reproduce with [`bench/peer-tti.py`](../peer-tti.py). They
+were produced on ComputeSDK's runner against each vendor's own hardware; we did not
+re-run them.
 
 | provider | TTI P50 | P90 | min |
 |---|---|---|---|
@@ -83,7 +124,7 @@ vendor's own hardware; we did not re-run them.
 | daytona | 136.2 | 300.7 | 97.0 |
 | archil | 201.0 | 372.7 | 133.9 |
 | upstash | 258.3 | 275.9 | 235.6 |
-| **mitos** | **340.7** | 373.3 | 273.4 |
+| **mitos** | **307.7** | 348.4 | 265.7 |
 | e2b | 365.6 | 501.1 | 288.8 |
 | beam | 377.9 | 388.6 | 175.1 |
 | vercel | 392.7 | 503.3 | 241.4 |
@@ -91,21 +132,58 @@ vendor's own hardware; we did not re-run them.
 | cloudflare | 1758.7 | 2139.8 | 1027.7 |
 | codesandbox | 2215.8 | 2513.5 | 1938.5 |
 
-Read that table with three caveats, all of which cut against us being able to claim a
-win from it:
+Read that table with three caveats, all of which cut against us claiming a win from it:
 
 1. **Different probe.** ComputeSDK runs `node -v`; our row runs `print(1)` through the
    Python template, which pays interpreter startup inside the guest.
 2. **Different pacing.** ComputeSDK runs 100 iterations back to back. Our row is paced
-   13 s apart to stay under the free tier's 5 creates/minute, so it never benefits from
-   a hot path warmed by the previous iteration.
-3. **Different clients and regions.** Their harness, their runner, their network.
+   13 s apart to stay under the free tier's 5 creates/minute.
+3. **Different clients and regions.** Their harness, their runner (`namespace-profile-default`),
+   their network. Proximity to that runner is a large share of any provider's score.
 
-The only clean statement available today is the ordering against E2B, the one peer that
-documents the same isolation primitive (Firecracker microVMs): mitos 340.7 ms P50 vs
-E2B 365.6 ms. We have not verified the isolation model of the faster entries, and the
-sub-40 ms rows (isorun, declaw) are far below the cost of restoring a microVM at all on
-this hardware, so they are almost certainly not booting one per request.
+Our row is therefore NOT a measured position in their leaderboard. It is our number,
+from our harness, printed beside theirs for scale. Even the ordering against E2B
+(307.7 ms vs 365.6 ms), the one peer documenting the same isolation primitive
+(Firecracker microVMs), is directional and unverified: it was not produced by the same
+harness on the same client. To claim a position we have to ship an adapter to
+`computesdk/computesdk` `packages/mitos` and be measured by their runner.
+
+## What the sequential table does and does not measure
+
+ComputeSDK also publishes a BURST run (`results/burst_tti/latest.json`, same 100
+iterations, fired concurrently). Dividing burst P50 by sequential P50 separates
+providers that hand out a pre-warmed sandbox from providers that provision one per
+request. Both computed from their raw data:
+
+| provider | seq P50 | burst P50 | burst/seq |
+|---|---|---|---|
+| isorun | 12.8 | 48.2 | 3.8x |
+| declaw | 37.7 | 225.8 | 6.0x |
+| northflank | 95.9 | 189.0 | 2.0x |
+| daytona | 136.2 | 705.0 | 5.2x |
+| upstash | 258.3 | 2055.2 | 8.0x |
+| e2b | 365.6 | 471.0 | 1.3x |
+| modal | 470.9 | 565.4 | 1.2x |
+| cloud-run | 433.3 | 506.4 | 1.2x |
+
+The providers whose latency barely moves under burst (e2b, modal, cloud-run) are doing
+the same amount of work per request either way. The providers that degrade several fold
+are serving the sequential run from a warm pool that the burst run drains. That is a
+property of the measurement, not an accusation: ComputeSDK's own methodology counts
+"infrastructure allocation ... boot ... health check polling" inside TTI, and a pool
+checkout skips all of it.
+
+Two things follow, and both are about us:
+
+- **mitos is a pool checkout too.** A warm claim activates an already-booted, dormant
+  husk pod. So the comparison against Daytona (also 5.2x under burst) is a fair fight
+  between two checkouts, and our checkout is simply more expensive today.
+- **We would degrade badly under their burst run.** The prod pool is `warm.min: 8` on a
+  single KVM node, and a drained pool refills by booting a VM. That is a capacity fact
+  to fix before submitting an adapter, not a number to quote.
+
+We have not verified the isolation model of the faster entries and make no claim about
+it here.
 
 ComputeSDK also publishes a `snapshot-fork` benchmark, but it measures OBJECT STORAGE
 (S3, R2, Azure Blob, Tigris), not VM fork, so there is still no public apples-to-apples
