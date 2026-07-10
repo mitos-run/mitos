@@ -147,11 +147,14 @@ func TestWarmKernelGRPC_DrainsToExitZero(t *testing.T) {
 	}
 }
 
-// TestWarmKernelCode_NeverDrawsRandomness pins the fork-correctness invariant:
-// the warmup cell must NOT touch random or numpy (or import anything at all).
-// CPython seeds its Mersenne Twister lazily from os.urandom on first use;
-// keeping it unseeded at snapshot time means each fork seeds fresh after the
-// per-fork CRNG reseed instead of inheriting one shared PRNG state.
+// TestWarmKernelCode_NeverDrawsRandomness pins that the warmup cell draws no
+// randomness. That is hygiene, NOT the fork-correctness guarantee it was once
+// documented to be: random.Random seeds itself in its constructor and the random module
+// builds its shared instance at import, so ipykernel's own imports already fix the
+// Mersenne state before this cell runs. The guarantee lives in the guest, where
+// kernel_driver.py reseeds the kernel's PRNGs on the post-fork SIGUSR2 (see
+// guest/rootfs/kernel_driver_test.py). Keeping this cell inert keeps the snapshot free
+// of randomness the driver does not know how to reseed.
 func TestWarmKernelCode_NeverDrawsRandomness(t *testing.T) {
 	for _, banned := range []string{"random", "numpy", "np.", "import", "uuid", "secrets"} {
 		if strings.Contains(warmKernelCode, banned) {
