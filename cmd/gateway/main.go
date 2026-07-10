@@ -101,6 +101,8 @@ func main() {
 	allowStub := flag.Bool("allow-stub", false, "DEV ONLY: forward to an in-memory stub control plane that creates nothing; the default is the real control plane")
 	readyTimeout := flag.Duration("ready-timeout", 120*time.Second, "how long a create waits for the sandbox to become Ready before returning a timeout error")
 	readyPollInterval := flag.Duration("ready-poll-interval", 25*time.Millisecond, "status poll interval for the create readiness FALLBACK loop. Readiness is normally observed by a watch on the sandbox; this interval is used only when the watch cannot be established.")
+	var orgTierFlags multiFlag
+	flag.Var(&orgTierFlags, "org-tier", "grant one org a tier above the fail-closed free default, as <orgID>=<tier> (tiers: free, starter, pro). Repeatable. OPERATOR configuration only; an org not named here stays on the tightest tier. Note that the pro tier also opens the sandbox egress posture.")
 	defaultPool := flag.String("default-pool", "", "fallback pool name used when a create request names neither a pool nor an image")
 	singleTenantNS := flag.String("single-tenant-namespace", os.Getenv("MITOS_GATEWAY_SINGLE_TENANT_NAMESPACE"), "pin all sandbox operations to this fixed namespace instead of the per-org mitos-org-<id> namespace; use for QA deployments where per-org namespaces are not provisioned and a shared SandboxPool exists in this namespace; empty (the default) keeps per-org namespacing; org-label authz is preserved regardless")
 	databaseDSN := flag.String("database-dsn", "", "Postgres DSN for durable persistence (accounts, orgs, memberships, API keys). Falls back to the "+pgstore.EnvDSN+" env var. Empty means in-memory persistence (DEV ONLY). The value is a secret and is never logged.")
@@ -183,7 +185,14 @@ func main() {
 	// AllowAllQuota when explicitly disabled. The same suspension store backs the
 	// enforcer, the abuse kill-switch, and the billing suspender, so a suspended org
 	// is blocked at the gateway. The mode is logged so the posture is never silent.
-	encfg := enforcementConfig{enabled: *enforceQuota, trustedProxyHops: *trustedProxyHops, suspensions: suspensions, live: liveUsage}
+	orgTiers, err := parseOrgTiers(orgTierFlags)
+	if err != nil {
+		// Fail closed and loudly: a malformed or unknown tier must never fall back to a
+		// silently different set of limits.
+		logger.Error("invalid --org-tier", "err", err)
+		os.Exit(1)
+	}
+	encfg := enforcementConfig{enabled: *enforceQuota, trustedProxyHops: *trustedProxyHops, suspensions: suspensions, live: liveUsage, orgTiers: orgTiers}
 	wiring := buildQuotaEnforcer(encfg)
 	logEnforcementMode(logger, encfg, wiring)
 	_ = wiring.killSwitch       // operator emergency-stop / abuse-signal driver (wired into the suspension store).
