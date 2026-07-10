@@ -1506,3 +1506,33 @@ func TestReconcileHuskPodsThreadsMultiVM(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildHuskPodThreadsPrepareEgressLink proves the prepare-time link flag reaches the
+// stub together with the in-pod addresses it cannot work without: the tap name derives
+// from the guest IP, and the stub needs it BEFORE an activate request arrives. Off (the
+// default) the pod is byte-for-byte the current activate-time filter.
+func TestBuildHuskPodThreadsPrepareEgressLink(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true, PrepareEgressLink: true})
+	args := on.Spec.Containers[0].Args
+	for _, want := range []string{"--prepare-egress-link", "--in-pod-guest-ip", "--in-pod-gateway-ip"} {
+		if !argsContain(args, want) {
+			t.Errorf("husk args missing %s when prepare-egress-link is enabled: %v", want, args)
+		}
+	}
+	// The addresses must be the ones the activate request carries, or the stub would
+	// bring up a tap the claim never resolves to and the skip would silently not apply.
+	if !argsContain(args, "10.200.0.2") || !argsContain(args, "10.200.0.1") {
+		t.Errorf("husk args do not carry the fixed in-pod /30: %v", args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true})
+	for _, unwanted := range []string{"--prepare-egress-link", "--in-pod-guest-ip", "--in-pod-gateway-ip"} {
+		if argsContain(off.Spec.Containers[0].Args, unwanted) {
+			t.Errorf("husk args must omit %s by default: %v", unwanted, off.Spec.Containers[0].Args)
+		}
+	}
+}
