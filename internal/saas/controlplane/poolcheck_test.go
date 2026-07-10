@@ -35,14 +35,14 @@ func poolGetCountingClient(t *testing.T, gets *atomic.Int64, objs ...client.Obje
 	})
 }
 
-// createOnce drives one create through Forward, flipping the sandbox Ready in
-// the background, and returns the response.
-func createOnce(t *testing.T, cp *K8sControlPlane, c client.Client, pool string) saas.ForwardResponse {
+// createOnce drives one create through Forward as org, flipping the sandbox
+// Ready in the background, and returns the response.
+func createOnce(t *testing.T, cp *K8sControlPlane, c client.Client, org, pool string) saas.ForwardResponse {
 	t.Helper()
-	stop := flipToReadyWhenCreated(t, c, orgA, "10.1.2.3:9091", "tok-pool")
+	stop := flipToReadyWhenCreated(t, c, org, "10.1.2.3:9091", "tok-pool")
 	defer stop()
 	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
-		OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"` + pool + `"}`),
+		OrgID: org, Op: "sandbox.create", Body: []byte(`{"pool":"` + pool + `"}`),
 	})
 	if err != nil {
 		t.Fatalf("Forward: %v", err)
@@ -62,14 +62,34 @@ func TestRepeatCreateSkipsThePoolPreCheckRoundTrip(t *testing.T) {
 	c := poolGetCountingClient(t, &poolGets, poolIn(orgA, "default"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
 
-	if resp := createOnce(t, cp, c, "default"); resp.Status != http.StatusCreated {
+	if resp := createOnce(t, cp, c, orgA, "default"); resp.Status != http.StatusCreated {
 		t.Fatalf("first create status = %d, body = %s", resp.Status, resp.Body)
 	}
-	if resp := createOnce(t, cp, c, "default"); resp.Status != http.StatusCreated {
+	if resp := createOnce(t, cp, c, orgA, "default"); resp.Status != http.StatusCreated {
 		t.Fatalf("second create status = %d, body = %s", resp.Status, resp.Body)
 	}
 	if n := poolGets.Load(); n != 1 {
 		t.Fatalf("two creates of one stable pool performed %d SandboxPool Get(s), want 1: the positive pre-check must be cached", n)
+	}
+}
+
+// TestPoolPreCheckCacheIsNamespaceScoped asserts a positive cache entry for
+// one org's namespace never satisfies the pre-check for the SAME pool name in
+// another org's namespace: the cache key carries the namespace, so each tenant
+// pays (and proves) its own existence check.
+func TestPoolPreCheckCacheIsNamespaceScoped(t *testing.T) {
+	var poolGets atomic.Int64
+	c := poolGetCountingClient(t, &poolGets, poolIn(orgA, "default"), poolIn(orgB, "default"))
+	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
+
+	if resp := createOnce(t, cp, c, orgA, "default"); resp.Status != http.StatusCreated {
+		t.Fatalf("org A create status = %d, body = %s", resp.Status, resp.Body)
+	}
+	if resp := createOnce(t, cp, c, orgB, "default"); resp.Status != http.StatusCreated {
+		t.Fatalf("org B create status = %d, body = %s", resp.Status, resp.Body)
+	}
+	if n := poolGets.Load(); n != 2 {
+		t.Fatalf("two orgs creating the same pool name performed %d SandboxPool Get(s), want 2: a cache hit must never cross namespaces", n)
 	}
 }
 
@@ -107,7 +127,7 @@ func TestPoolPreCheckCacheExpires(t *testing.T) {
 	c := poolGetCountingClient(t, &poolGets, poolIn(orgA, "default"))
 	cp := New(c, WithPollInterval(5*time.Millisecond), WithReadyTimeout(2*time.Second))
 
-	if resp := createOnce(t, cp, c, "default"); resp.Status != http.StatusCreated {
+	if resp := createOnce(t, cp, c, orgA, "default"); resp.Status != http.StatusCreated {
 		t.Fatalf("first create status = %d, body = %s", resp.Status, resp.Body)
 	}
 
@@ -115,7 +135,7 @@ func TestPoolPreCheckCacheExpires(t *testing.T) {
 	// sane because the offset is constant.
 	cp.now = func() time.Time { return time.Now().Add(poolCheckTTL + time.Second) }
 
-	if resp := createOnce(t, cp, c, "default"); resp.Status != http.StatusCreated {
+	if resp := createOnce(t, cp, c, orgA, "default"); resp.Status != http.StatusCreated {
 		t.Fatalf("second create status = %d, body = %s", resp.Status, resp.Body)
 	}
 	if n := poolGets.Load(); n != 2 {
