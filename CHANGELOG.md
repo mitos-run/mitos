@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.40.0](https://github.com/mitos-run/mitos/compare/v1.39.1...v1.40.0) (2026-07-11)
+
+
+### Features
+
+* **cli:** agent automation contract with JSON output, documented exit codes, and wait/timeout flags ([#825](https://github.com/mitos-run/mitos/issues/825)) ([b6abee2](https://github.com/mitos-run/mitos/commit/b6abee24284468934aaad00b29dcff4cffa5868a))
+* **sdk-python:** first-class spec.git helper for durable workspaces ([#823](https://github.com/mitos-run/mitos/issues/823)) ([045dd0b](https://github.com/mitos-run/mitos/commit/045dd0bca8067e71a27bcf6c63897d641ec11d54))
+
 ## [1.39.1](https://github.com/mitos-run/mitos/compare/v1.39.0...v1.39.1) (2026-07-10)
 
 
