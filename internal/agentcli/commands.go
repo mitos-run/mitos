@@ -27,18 +27,18 @@ func cmdRun(ctx context.Context, args []string, backend Backend, out, errw io.Wr
 	timeout := fs.Int("timeout", 0, "exec timeout in seconds (0 = backend default)")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(errw, usage)
-		return 2
+		return ExitUsage
 	}
 	command := strings.Join(fs.Args(), " ")
 	if command == "" {
 		fmt.Fprintf(errw, "run: a command is required\n\n%s", usage)
-		return 2
+		return ExitUsage
 	}
 
 	id, err := backend.Create(ctx, *pool)
 	if err != nil {
 		fmt.Fprintf(errw, "create sandbox: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
 
 	result, execErr := backend.Exec(ctx, id, command, *timeout)
@@ -52,7 +52,7 @@ func cmdRun(ctx context.Context, args []string, backend Backend, out, errw io.Wr
 
 	if execErr != nil {
 		fmt.Fprintf(errw, "exec: %v\n", execErr)
-		return 1
+		return exitCodeFor(execErr)
 	}
 	if result.Stdout != "" {
 		fmt.Fprint(out, result.Stdout)
@@ -67,7 +67,7 @@ func cmdRun(ctx context.Context, args []string, backend Backend, out, errw io.Wr
 func cmdSandbox(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintf(errw, "sandbox: a subcommand is required\n\n%s", usage)
-		return 2
+		return ExitUsage
 	}
 	switch args[0] {
 	case "create":
@@ -82,33 +82,43 @@ func cmdSandbox(ctx context.Context, args []string, backend Backend, out, errw i
 		return cmdSandboxTerminate(ctx, args[1:], backend, out, errw)
 	default:
 		fmt.Fprintf(errw, "unknown sandbox subcommand %q\n\n%s", args[0], usage)
-		return 2
+		return ExitUsage
 	}
 }
 
 func cmdSandboxCreate(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
 	fs := newFlagSet("sandbox create", errw)
 	pool := fs.String("pool", "", "pool to create the sandbox from")
+	wait := fs.Bool("wait", true, "wait for the sandbox to become Ready before returning")
+	noWait := fs.Bool("no-wait", false, "return as soon as the sandbox is created; do not wait for Ready")
+	timeout := fs.Int("timeout", 0, "max seconds to wait for Ready (0 = backend default)")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprint(errw, usage)
-		return 2
+		return ExitUsage
 	}
-	id, err := backend.Create(ctx, *pool)
+	octx, cancel := lifecycleContext(ctx, *wait, *noWait, *timeout)
+	defer cancel()
+	id, err := backend.Create(octx, *pool)
 	if err != nil {
 		fmt.Fprintf(errw, "create sandbox: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
 	fmt.Fprintln(out, id)
-	return 0
+	return ExitOK
 }
 
 func cmdSandboxLs(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
+	jsonOut, rest, ferr := extractOutputFlag(args)
+	if ferr != nil {
+		fmt.Fprintf(errw, "sandbox ls: %v\n", ferr)
+		return ExitUsage
+	}
 	fs := newFlagSet("sandbox ls", errw)
 	namespace := fs.String("n", "", "namespace")
 	allNamespaces := fs.Bool("A", false, "all namespaces")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		fmt.Fprint(errw, usage)
-		return 2
+		return ExitUsage
 	}
 	ns := *namespace
 	if *allNamespaces {
@@ -117,23 +127,24 @@ func cmdSandboxLs(ctx context.Context, args []string, backend Backend, out, errw
 	infos, err := backend.List(ctx, ns)
 	if err != nil {
 		fmt.Fprintf(errw, "list sandboxes: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
-	fmt.Fprint(out, formatSandboxInfos(infos))
-	return 0
+	return renderList(out, errw, "sandbox ls", jsonOut,
+		func() (string, error) { return jsonSandboxInfos(infos) },
+		func() string { return formatSandboxInfos(infos) })
 }
 
 func cmdSandboxExec(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
 	if len(args) < 2 {
 		fmt.Fprintf(errw, "sandbox exec: <id> and a command are required\n\n%s", usage)
-		return 2
+		return ExitUsage
 	}
 	id := args[0]
 	command := strings.Join(args[1:], " ")
 	result, err := backend.Exec(ctx, id, command, 0)
 	if err != nil {
 		fmt.Fprintf(errw, "exec: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
 	if result.Stdout != "" {
 		fmt.Fprint(out, result.Stdout)
@@ -145,53 +156,65 @@ func cmdSandboxExec(ctx context.Context, args []string, backend Backend, out, er
 }
 
 func cmdSandboxFork(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
-	// Accept the sandbox id either before or after the flags, so both
-	// `fork sbx-1 --replicas 3` and `fork --replicas 3 sbx-1` work. The stdlib
-	// flag parser stops at the first non-flag token, so split the id out first.
-	id, rest := splitFirstPositional(args)
 	fs := newFlagSet("sandbox fork", errw)
 	// --count is the documented flag (#311); --replicas is kept as a back-compat
 	// alias. --count wins when set (default 0 means "not set, use --replicas").
 	count := fs.Int("count", 0, "number of forks (alias of --replicas)")
 	replicas := fs.Int("replicas", 1, "number of forks")
-	if err := fs.Parse(rest); err != nil {
+	wait := fs.Bool("wait", true, "wait for the forks to become Ready before returning")
+	noWait := fs.Bool("no-wait", false, "return as soon as the forks are created; do not wait for Ready")
+	timeout := fs.Int("timeout", 0, "max seconds to wait for Ready (0 = backend default)")
+	// Accept the sandbox id either before or after the flags, so both
+	// `fork sbx-1 --count 3` and `fork --count 3 sbx-1` parse correctly.
+	id, err := parseLeadingID(fs, args)
+	if err != nil {
 		fmt.Fprint(errw, usage)
-		return 2
-	}
-	if id == "" && fs.NArg() > 0 {
-		id = fs.Arg(0)
+		return ExitUsage
 	}
 	if id == "" {
 		fmt.Fprintf(errw, "sandbox fork: a sandbox id is required\n\n%s", usage)
-		return 2
+		return ExitUsage
 	}
 	n := *replicas
 	if *count > 0 {
 		n = *count
 	}
-	ids, err := backend.Fork(ctx, id, n)
+	octx, cancel := lifecycleContext(ctx, *wait, *noWait, *timeout)
+	defer cancel()
+	ids, err := backend.Fork(octx, id, n)
 	if err != nil {
 		fmt.Fprintf(errw, "fork: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
 	for _, fid := range ids {
 		fmt.Fprintln(out, fid)
 	}
-	return 0
+	return ExitOK
 }
 
 func cmdSandboxTerminate(ctx context.Context, args []string, backend Backend, out, errw io.Writer) int {
-	if len(args) < 1 {
-		fmt.Fprintf(errw, "sandbox terminate: a sandbox id is required\n\n%s", usage)
-		return 2
+	fs := newFlagSet("sandbox terminate", errw)
+	// terminate is asynchronous: the object is deleted and the controller reaps
+	// it. --timeout bounds the delete call itself; waiting until the sandbox is
+	// fully reaped is a named follow-up, so --wait is not offered here yet.
+	timeout := fs.Int("timeout", 0, "max seconds to bound the delete call (0 = no bound)")
+	id, err := parseLeadingID(fs, args)
+	if err != nil {
+		fmt.Fprint(errw, usage)
+		return ExitUsage
 	}
-	id := args[0]
-	if err := backend.Terminate(ctx, id); err != nil {
+	if id == "" {
+		fmt.Fprintf(errw, "sandbox terminate: a sandbox id is required\n\n%s", usage)
+		return ExitUsage
+	}
+	octx, cancel := lifecycleContext(ctx, true, false, *timeout)
+	defer cancel()
+	if err := backend.Terminate(octx, id); err != nil {
 		fmt.Fprintf(errw, "terminate: %v\n", err)
-		return 1
+		return exitCodeFor(err)
 	}
 	fmt.Fprintf(out, "terminated %s\n", id)
-	return 0
+	return ExitOK
 }
 
 // cmdDev validates the `dev up|down` arguments. The dev orchestration shells out
@@ -202,33 +225,38 @@ func cmdSandboxTerminate(ctx context.Context, args []string, backend Backend, ou
 func cmdDev(_ context.Context, args []string, _, errw io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintf(errw, "dev: 'up' or 'down' is required\n\n%s", usage)
-		return 2
+		return ExitUsage
 	}
 	switch args[0] {
 	case "up", "down":
 		fmt.Fprintf(errw, "dev %s: run via the mitos binary, which wires the kind/kubectl runner\n", args[0])
-		return 1
+		return ExitError
 	default:
 		fmt.Fprintf(errw, "unknown dev subcommand %q\n\n%s", args[0], usage)
-		return 2
+		return ExitUsage
 	}
 }
 
-// splitFirstPositional returns the first argument that is not a flag (does not
-// start with "-") and the remaining args with that token removed, so a leading
-// positional id can appear before flags that the stdlib flag parser would
-// otherwise stop at. If there is no positional token, id is empty and rest is
-// args unchanged.
-func splitFirstPositional(args []string) (id string, rest []string) {
-	for i, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			rest = make([]string, 0, len(args)-1)
-			rest = append(rest, args[:i]...)
-			rest = append(rest, args[i+1:]...)
-			return a, rest
-		}
+// parseLeadingID parses fs from args when the command takes a single positional
+// id that may appear either before or after its flags. The stdlib flag parser
+// stops at the first non-flag token, so a single parse mis-reads a flag value as
+// the id (`fork --count 2 sbx-1` would take "2"). This parses once to consume any
+// leading flags, lifts the first remaining positional as the id, then parses the
+// tokens that followed the id so trailing flags (`fork sbx-1 --count 2`) are
+// still honored. It returns an empty id when no positional is present.
+func parseLeadingID(fs *flag.FlagSet, args []string) (id string, err error) {
+	if err = fs.Parse(args); err != nil {
+		return "", err
 	}
-	return "", args
+	pos := fs.Args()
+	if len(pos) == 0 {
+		return "", nil
+	}
+	id = pos[0]
+	if err = fs.Parse(pos[1:]); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 // formatSandboxInfos renders SandboxInfo rows as an aligned table with columns

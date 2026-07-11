@@ -51,26 +51,38 @@ func runWs(ctx context.Context, args []string, b WorkspaceBackend, out, errw io.
 		fmt.Fprintln(out, args[1])
 		return 0
 	case "ls":
-		ns := parseNamespace(args[1:])
+		jsonOut, rest, ferr := extractOutputFlag(args[1:])
+		if ferr != nil {
+			fmt.Fprintf(errw, "ws ls: %v\n", ferr)
+			return ExitUsage
+		}
+		ns := parseNamespace(rest)
 		infos, err := b.ListWorkspaces(ctx, ns)
 		if err != nil {
 			fmt.Fprintf(errw, "ws ls: %v\n", err)
-			return 1
+			return exitCodeFor(err)
 		}
-		fmt.Fprint(out, formatWorkspaceList(infos))
-		return 0
+		return renderList(out, errw, "ws ls", jsonOut,
+			func() (string, error) { return jsonWorkspaceInfos(infos) },
+			func() string { return formatWorkspaceList(infos) })
 	case "log":
-		if len(args) < 2 {
-			fmt.Fprint(errw, "ws log: a workspace is required\n\n"+wsUsage)
-			return 2
+		jsonOut, rest, ferr := extractOutputFlag(args[1:])
+		if ferr != nil {
+			fmt.Fprintf(errw, "ws log: %v\n", ferr)
+			return ExitUsage
 		}
-		revs, err := b.Log(ctx, args[1])
+		if len(rest) < 1 {
+			fmt.Fprint(errw, "ws log: a workspace is required\n\n"+wsUsage)
+			return ExitUsage
+		}
+		revs, err := b.Log(ctx, rest[0])
 		if err != nil {
 			fmt.Fprintf(errw, "ws log: %v\n", err)
-			return 1
+			return exitCodeFor(err)
 		}
-		fmt.Fprint(out, formatRevisionLog(revs))
-		return 0
+		return renderList(out, errw, "ws log", jsonOut,
+			func() (string, error) { return jsonRevisionLog(revs) },
+			func() string { return formatRevisionLog(revs) })
 	case "diff":
 		if len(args) < 3 {
 			fmt.Fprint(errw, "ws diff: a workspace and a revision are required\n\n"+wsUsage)

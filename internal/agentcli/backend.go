@@ -80,6 +80,18 @@ type FakeCall struct {
 	Content    string
 	Replicas   int
 	Namespace  string
+	// NoWait records whether the call carried the no-wait lifecycle signal
+	// (set by --no-wait / --wait=false). HasDeadline records whether the call
+	// context carried a deadline (set by --timeout).
+	NoWait      bool
+	HasDeadline bool
+}
+
+// ctxLifecycle extracts the no-wait signal and deadline presence from ctx so
+// the fake can record what the CLI threaded through the lifecycle flags.
+func ctxLifecycle(ctx context.Context) (noWait, hasDeadline bool) {
+	_, hasDeadline = ctx.Deadline()
+	return noWaitRequested(ctx), hasDeadline
 }
 
 // FakeBackend is a test double that records every call and returns canned
@@ -166,8 +178,9 @@ func (f *FakeBackend) RecordedCalls() []FakeCall {
 }
 
 // Create implements Backend.
-func (f *FakeBackend) Create(_ context.Context, pool string) (string, error) {
-	f.record(FakeCall{Method: "create", Pool: pool})
+func (f *FakeBackend) Create(ctx context.Context, pool string) (string, error) {
+	noWait, hasDeadline := ctxLifecycle(ctx)
+	f.record(FakeCall{Method: "create", Pool: pool, NoWait: noWait, HasDeadline: hasDeadline})
 	if e := f.err("create"); e != nil {
 		return "", e
 	}
@@ -199,8 +212,9 @@ func (f *FakeBackend) WriteFile(_ context.Context, sandboxID, path, content stri
 }
 
 // Fork implements Backend.
-func (f *FakeBackend) Fork(_ context.Context, sandboxID string, n int) ([]string, error) {
-	f.record(FakeCall{Method: "fork", SandboxID: sandboxID, Replicas: n})
+func (f *FakeBackend) Fork(ctx context.Context, sandboxID string, n int) ([]string, error) {
+	noWait, hasDeadline := ctxLifecycle(ctx)
+	f.record(FakeCall{Method: "fork", SandboxID: sandboxID, Replicas: n, NoWait: noWait, HasDeadline: hasDeadline})
 	if e := f.err("fork"); e != nil {
 		return nil, e
 	}
@@ -208,8 +222,9 @@ func (f *FakeBackend) Fork(_ context.Context, sandboxID string, n int) ([]string
 }
 
 // Terminate implements Backend.
-func (f *FakeBackend) Terminate(_ context.Context, sandboxID string) error {
-	f.record(FakeCall{Method: "terminate", SandboxID: sandboxID})
+func (f *FakeBackend) Terminate(ctx context.Context, sandboxID string) error {
+	_, hasDeadline := ctxLifecycle(ctx)
+	f.record(FakeCall{Method: "terminate", SandboxID: sandboxID, HasDeadline: hasDeadline})
 	return f.err("terminate")
 }
 

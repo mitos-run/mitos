@@ -144,9 +144,9 @@ func (g *hostedGateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			id = raw
 		}
 		writeJSON(http.StatusOK, map[string]any{
-			"id":          id,
-			"template_id": c.Body["template"],
-			"endpoint":    "sandbox-endpoint:9091",
+			"id":           id,
+			"template_id":  c.Body["template"],
+			"endpoint":     "sandbox-endpoint:9091",
 			"fork_time_ms": 12.5,
 		})
 
