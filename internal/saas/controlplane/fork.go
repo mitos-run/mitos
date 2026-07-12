@@ -181,10 +181,15 @@ func (k *K8sControlPlane) fork(ctx context.Context, req saas.ForwardRequest) (sa
 	// Purely observational: it does not change the fork control flow.
 	createdAt := k.now()
 	resp, err := k.pollReady(ctx, ns, name, startedAt)
+	// ok discriminates the latency stream: pollReady reports ready-timeouts and
+	// failed sandboxes as an error ENVELOPE with a nil error, so err alone would
+	// count a timed-out wait as served and skew every percentile derived here.
 	slog.Info("fork served",
 		"sandbox", name,
 		"submitToCreateMs", createdAt.Sub(startedAt).Milliseconds(),
 		"submitToReadyMs", k.now().Sub(startedAt).Milliseconds(),
+		"ok", err == nil && resp.Status < 400,
+		"status", resp.Status,
 	)
 	return resp, err
 }
