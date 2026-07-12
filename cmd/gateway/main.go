@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -75,7 +77,7 @@ func newScheme() *runtime.Scheme {
 // the poll interval governs only the fail-open fallback loop. The client is
 // returned alongside so main can wire the SAME client into the quota
 // enforcer's live sandbox counter.
-func newControlPlane(readyTimeout, readyPollInterval time.Duration, defaultPool, singleTenantNS string) (saas.ControlPlane, client.Client, error) {
+func newControlPlane(readyTimeout, readyPollInterval time.Duration, defaultPool, singleTenantNS string, checkout controlplane.CheckoutConfig) (*controlplane.K8sControlPlane, client.Client, error) {
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("load kubeconfig for the control-plane client: %w", err)
@@ -92,7 +94,42 @@ func newControlPlane(readyTimeout, readyPollInterval time.Duration, defaultPool,
 		opts = append(opts, controlplane.WithDefaultPool(defaultPool))
 	}
 	opts = append(opts, controlplane.WithSingleTenantNamespace(singleTenantNS))
+	if len(checkout.Pools) > 0 {
+		opts = append(opts, controlplane.WithCheckout(checkout))
+	}
 	return controlplane.New(c, opts...), c, nil
+}
+
+// splitNonEmpty splits a comma-separated flag value into trimmed, non-empty
+// items.
+func splitNonEmpty(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// envInt and envDuration read an env default for a numeric flag; any parse
+// problem keeps the compiled-in default.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
 }
 
 func main() {
@@ -108,6 +145,10 @@ func main() {
 	databaseDSN := flag.String("database-dsn", "", "Postgres DSN for durable persistence (accounts, orgs, memberships, API keys). Falls back to the "+pgstore.EnvDSN+" env var. Empty means in-memory persistence (DEV ONLY). The value is a secret and is never logged.")
 	enforceQuota := flag.Bool("enforce-quota", true, "enforce per-organization quotas, rate limits, and the abuse kill-switch before forwarding. Default on (the hosted profile). Set to false only for a trusted single-tenant deployment; the bypass is logged at startup.")
 	trustedProxyHops := flag.Int("trusted-proxy-hops", 0, "number of trusted reverse-proxy hops in front of the gateway for client-IP resolution. 0 (the default) does NOT trust X-Forwarded-For and uses the connection RemoteAddr. Set to the count of trusted proxies (for example 1 behind a single ingress) so the per-IP rate limit keys on the real client; a too-short or spoofed X-Forwarded-For fails closed to RemoteAddr.")
+	checkoutPools := flag.String("checkout-pools", os.Getenv("MITOS_GATEWAY_CHECKOUT_POOLS"), "comma-separated pool names served by the pre-claimed checkout buffer (empty disables the feature); requires --single-tenant-namespace")
+	checkoutFloor := flag.Int("checkout-floor", envInt("MITOS_GATEWAY_CHECKOUT_FLOOR", 2), "buffered sandboxes to keep ready per checkout pool")
+	checkoutCap := flag.Int("checkout-cap", envInt("MITOS_GATEWAY_CHECKOUT_CAP", 4), "hard ceiling of buffered sandboxes per checkout pool")
+	checkoutMaxAge := flag.Duration("checkout-max-age", envDuration("MITOS_GATEWAY_CHECKOUT_MAX_AGE", 10*time.Minute), "buffered sandboxes older than this are recycled")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -144,11 +185,29 @@ func main() {
 		logger.Warn("gateway running with the DEV stub control plane; no sandboxes are created (--allow-stub)")
 		cp = stubControlPlane{}
 	} else {
-		real, k8sClient, err := newControlPlane(*readyTimeout, *readyPollInterval, *defaultPool, *singleTenantNS)
+		checkoutCfg := controlplane.CheckoutConfig{
+			Pools:  splitNonEmpty(*checkoutPools),
+			Floor:  *checkoutFloor,
+			Cap:    *checkoutCap,
+			MaxAge: *checkoutMaxAge,
+		}
+		real, k8sClient, err := newControlPlane(*readyTimeout, *readyPollInterval, *defaultPool, *singleTenantNS, checkoutCfg)
 		if err != nil {
 			log.Fatalf("build control plane: %v", err)
 		}
 		cp = real
+		// The checkout buffer's refill/janitor loop runs for the server's
+		// lifetime; the hot path only ever reads its cache. Not being silent
+		// about a half-configured feature: --checkout-pools without
+		// --single-tenant-namespace leaves the buffer off by design (see the
+		// spec's per-org-namespace migration note), and that must be loud.
+		switch {
+		case len(checkoutCfg.Pools) > 0 && *singleTenantNS == "":
+			logger.Warn("checkout pools configured but --single-tenant-namespace is unset; the pre-claimed checkout stays OFF", "pools", *checkoutPools)
+		case len(checkoutCfg.Pools) > 0:
+			real.StartCheckout(context.Background())
+			logger.Info("pre-claimed checkout enabled", "pools", *checkoutPools, "floor", *checkoutFloor, "cap", *checkoutCap, "max_age", checkoutMaxAge.String())
+		}
 		// The counter shares the control plane's client and namespace model
 		// (per-org, or the pinned single-tenant namespace) so it counts exactly
 		// where the control plane creates.
