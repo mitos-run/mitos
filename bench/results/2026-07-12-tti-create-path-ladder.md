@@ -15,7 +15,7 @@ dies with its session.
 | A | v1.39.1 | baseline (2026-07-11) | 20 | 327.2 | 189.3 | 136.8 | 20/20 |
 | B | v1.40.0 | gateway round-trip cuts (#895) | 20 | 349.0 | 191.4 | 166.4 | 20/20 |
 | B' | v1.40.0 | same, higher power | 100 | 349.9 | 190.9 | 163.1 | 96/100 |
-| C | v1.41.0 + checkout | pre-claimed checkout (#896) | | pending | | | |
+| C | v1.41.0 + checkout | pre-claimed checkout (#896) | 20 | 254.9 | **32.9** | 210.0 | **16/20** |
 
 Full per-iteration outputs for each rung are reproducible with the command
 above; the harness prints them and this table quotes its summary lines.
@@ -47,17 +47,41 @@ attributed, because the gateway forward log records neither status nor
 duration. Filed as the observability gap it is (#901); #868 (client-correlated
 fork latency logging) landed the same day and covers part of the fork path.
 
-## What rung C tests
+## Rung C: the create win is proven, the exec leg is the new problem
 
 The pre-claimed checkout (#896) serves an eligible create from a buffer of
 already-activated sandboxes: the hot path becomes the gateway front plus ONE
 resourceVersion-guarded label patch, skipping the Sandbox write, the watch
 wake-ups, the reconcile, and the (currently regressed) activate entirely;
-buffered sandboxes pay activation at refill time, off the hot path. The
-before/after lands here once v1.41.0 rolls with
-`gateway.checkout.pools={python}`, including a burst-shaped run to measure the
-buffer-miss fallback cost honestly (the same honesty bar the peer table's
-burst ratios apply to Daytona).
+buffered sandboxes pay activation at refill time, off the hot path.
+
+Measured 2026-07-13 with `gateway.checkout.pools={python}` on v1.41.0: every
+buffer-served create landed at 25 to 45 ms (median 32.9, against 190.9 on the
+classic path), and the controller log confirms the refill loop replaced each
+popped entry within its 15 s cadence. The design does what it claims.
+
+Two things stop this rung from being the headline:
+
+1. **First exec regressed to 210 ms median.** A buffered sandbox idles minutes
+   before its first exec (oldest-first pop), and a controlled repro (create,
+   idle 360 s, first exec, three rounds each, no buffer involved) shows the
+   FIRST exec against an idle-activated sandbox costs 228 to 302 ms against
+   122 to 294 ms fresh: idle working-set decay, roughly a 2x tax, filed with
+   the data as #903. This affects ANY create-then-think-then-exec user, not
+   just the buffer; the buffer merely pays it every time.
+2. **4/20 iterations failed with client read timeouts** (the rung B' signature
+   at 5x the rate). Server-side is clean for every failure (all claims Ready
+   in at most 179 ms, all requests forwarded, zero errors), so attribution
+   needs the #901 gateway instrumentation. The idle repro produced 0 stalls in
+   6, so idleness alone does not explain them (#903 finding 2).
+
+The checkout is therefore DISABLED in the hosted deployment again (config
+revert, same day) until #903 is root-caused: a 20 percent iteration failure
+rate is not a shippable trade for a 158 ms create cut, and the boring-failure
+principle outranks the leaderboard. The burst-shaped fallback measurement is
+deferred to the re-enable. Net honest position after rung C: the architecture
+hits its latency target and the remaining work is an exec-leg bug plus
+instrumentation, both filed and owned.
 
 ## Peer context
 
