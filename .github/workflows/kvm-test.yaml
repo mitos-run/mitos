@@ -2644,6 +2644,163 @@ jobs:
             /tmp/mitos-test/husk-stub/latencies.txt
           if-no-files-found: warn
 
+      # Prepare-time restore KVM gate (slices 1+2 of
+      # docs/superpowers/plans/2026-07-10-prepare-time-restore.md). With
+      # --prepare-egress-link and --prepare-restore ON, a husk stub must:
+      #   (a) bring the default VM's tap up and RESTORE + RESUME its guest while
+      #       DORMANT (proven by the "prepare-restore ... resumed dormant guest"
+      #       stderr marker appearing BEFORE any activate request);
+      #   (b) serve the claim from the pre-restored guest: the activate result's
+      #       vmstate_restore stage must be ~0 (the fast path skips the load; the
+      #       stage is two clock reads apart, so <10ms is generous even on shared
+      #       CI) and a real exec must work through the activated guest agent;
+      #   (c) FAIL CLOSED on a snapshot-dir mismatch (a resumed guest cannot be
+      #       reloaded) with no side effects: the SAME stub must then activate
+      #       fine when asked for the snapshot it actually pre-restored.
+      # This needs a snapshot with the BAKED placeholder NIC (Firecracker binds
+      # it to the prepared tap at restore), which is exactly what the net-fork
+      # phase's engine-built template is; the bench template is built without
+      # networking and has no NIC, so it plays the MISMATCH role only. Tap and
+      # nftables mutations need root, so the stub runs under sudo, mirroring the
+      # networked live-fork phase. A missing snapshot or a control socket that
+      # never appears is a SETUP flake (PREP-RESTORE-SETUP), distinct from a real
+      # gate failure (PREP-RESTORE-FAILED).
+      - name: Prepare-time restore, dormant resume then fast-path activate and fail-closed mismatch
+        timeout-minutes: 10
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+          command -v nft >/dev/null || sudo apt-get install -y nftables
+
+          NET_SNAP=/tmp/mitos-test/net-fork-data/templates/nf-tmpl/snapshot
+          BENCH_SNAP=/tmp/mitos-test/bench-data/templates/bench/snapshot
+          WORKBASE=/tmp/mitos-test/prep-restore
+          mkdir -p $WORKBASE
+
+          fail_setup() { echo "PREP-RESTORE-SETUP: $1"; exit 1; }
+          fail_gate()  { echo "PREP-RESTORE-FAILED: $1"; exit 1; }
+
+          [ -f "$NET_SNAP/mem" ] && [ -f "$NET_SNAP/vmstate" ] || \
+            fail_setup "networked template snapshot not present at $NET_SNAP (net-fork phase did not complete)"
+          [ -f "$BENCH_SNAP/mem" ] || \
+            fail_setup "bench snapshot not present at $BENCH_SNAP (needed as the mismatch snapshot)"
+
+          go build -o /tmp/husk-stub ./cmd/husk-stub/
+          go build -o /tmp/test-agent ./cmd/test-agent/
+
+          # start_stub <n>: fresh dormant stub in its own workdir with BOTH
+          # prepare flags on. Prepare now includes the snapshot load, resume,
+          # and guest-ready wait, so the control socket appears only after the
+          # dormant restore finished; the wait is sized for that.
+          start_stub() {
+            local n=$1
+            local workdir=$WORKBASE/vm$n
+            mkdir -p $workdir
+            rm -f $WORKBASE/control$n.sock
+            sudo /tmp/husk-stub \
+              --firecracker /usr/local/bin/firecracker \
+              --workdir $workdir \
+              --control-socket $WORKBASE/control$n.sock \
+              --sandbox-listen 127.0.0.1:$((19290 + n)) \
+              --mem-mib 256 \
+              --multi-vm \
+              --prepare-egress-link \
+              --prepare-restore \
+              --in-pod-guest-ip 10.200.0.2 \
+              --in-pod-gateway-ip 10.200.0.1 \
+              --snapshot-dir $NET_SNAP \
+              --allow-unverified-snapshots \
+              > $WORKBASE/stub$n.log 2>&1 &
+            STUB_PID=$!
+            local ready=0
+            for i in $(seq 1 120); do
+              if [ -S "$WORKBASE/control$n.sock" ]; then ready=1; break; fi
+              if ! sudo kill -0 $STUB_PID 2>/dev/null; then break; fi
+              sleep 0.5
+            done
+            if [ "$ready" -ne 1 ]; then
+              echo "=== stub$n log ==="; cat $WORKBASE/stub$n.log || true
+              sudo kill $STUB_PID 2>/dev/null || true
+              fail_gate "stub $n never went dormant with --prepare-restore on (restore-at-prepare failed or hung)"
+            fi
+          }
+
+          stop_stub() {
+            sudo kill $STUB_PID 2>/dev/null || true
+            sleep 0.5
+          }
+          trap 'sudo kill $STUB_PID 2>/dev/null || true' EXIT
+
+          echo "================================"
+          echo "  (a) dormant restore happens at Prepare"
+          echo "================================"
+          start_stub 1
+          grep -q 'prepare-restore vm .* resumed dormant guest' $WORKBASE/stub1.log || {
+            echo "=== stub1 log ==="; cat $WORKBASE/stub1.log
+            fail_gate "stub went dormant but never logged the prepare-restore marker; the restore did not happen at Prepare"
+          }
+
+          echo "================================"
+          echo "  (b) activate takes the fast path and exec works"
+          echo "================================"
+          if ! sudo /tmp/husk-stub --activate --control-socket $WORKBASE/control1.sock --snapshot-dir $NET_SNAP > $WORKBASE/result1.json 2>$WORKBASE/activate1.err; then
+            echo "=== activate1 stderr ==="; cat $WORKBASE/activate1.err || true
+            echo "=== stub1 log ==="; cat $WORKBASE/stub1.log || true
+            fail_gate "activate against the pre-restored snapshot did not return OK"
+          fi
+          cat $WORKBASE/result1.json
+          OK=$(jq -r '.ok' $WORKBASE/result1.json)
+          RESTORE_MS=$(jq -r '.stages.vmstate_restore // empty' $WORKBASE/result1.json)
+          VSOCK=$(jq -r '.vsock_path' $WORKBASE/result1.json)
+          [ "$OK" = "true" ] || fail_gate "activate result ok=$OK"
+          [ -n "$RESTORE_MS" ] || fail_gate "activate result carries no vmstate_restore stage; cannot prove the fast path"
+          awk "BEGIN{exit !($RESTORE_MS < 10)}" || \
+            fail_gate "vmstate_restore=${RESTORE_MS}ms at activate; the fast path did not engage (a pre-restored guest must skip the load)"
+          echo "fast path proven: vmstate_restore=${RESTORE_MS}ms"
+          if ! sudo timeout 60 /tmp/test-agent "$VSOCK"; then
+            echo "=== stub1 log ==="; cat $WORKBASE/stub1.log || true
+            fail_gate "exec through the pre-restored, activated guest FAILED; the VM was reported active but is not usable"
+          fi
+          echo "PASS: exec works through the pre-restored VM"
+          stop_stub
+
+          echo "================================"
+          echo "  (c) mismatched snapshot dir is refused fail-closed, then the right one activates"
+          echo "================================"
+          start_stub 2
+          if sudo /tmp/husk-stub --activate --control-socket $WORKBASE/control2.sock --snapshot-dir $BENCH_SNAP > $WORKBASE/result2a.json 2>/dev/null; then
+            echo "=== result2a ==="; cat $WORKBASE/result2a.json || true
+            fail_gate "activate for a snapshot this pod did NOT pre-restore was accepted; the identity gate is broken"
+          fi
+          grep -q 'pre-restored' $WORKBASE/result2a.json || {
+            echo "=== result2a ==="; cat $WORKBASE/result2a.json || true
+            fail_gate "mismatch was refused but not by the pre-restored identity gate (wrong error)"
+          }
+          echo "PASS: mismatched snapshot refused"
+          if ! sudo /tmp/husk-stub --activate --control-socket $WORKBASE/control2.sock --snapshot-dir $NET_SNAP > $WORKBASE/result2b.json 2>$WORKBASE/activate2b.err; then
+            echo "=== activate2b stderr ==="; cat $WORKBASE/activate2b.err || true
+            echo "=== result2b ==="; cat $WORKBASE/result2b.json || true
+            echo "=== stub2 log ==="; cat $WORKBASE/stub2.log || true
+            fail_gate "activate with the CORRECT snapshot failed AFTER a refused mismatch; the refusal had side effects"
+          fi
+          [ "$(jq -r '.ok' $WORKBASE/result2b.json)" = "true" ] || fail_gate "post-refusal activate returned ok=false"
+          echo "PASS: refusal was side-effect free; the correct snapshot activated"
+          stop_stub
+
+          echo "================================"
+          echo "  Prepare-time restore proven: dormant resume, fast-path activate, fail-closed mismatch"
+          echo "================================"
+
+      - name: Upload prepare-restore gate artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: prepare-restore-gate
+          path: |
+            /tmp/mitos-test/prep-restore/result*.json
+            /tmp/mitos-test/prep-restore/stub*.log
+          if-no-files-found: warn
+
       # Multi-VM-per-pod L1.4 proof: with MultiVM ON, ONE husk Stub spawns TWO
       # REAL Firecracker processes from the SAME bench template snapshot, both
       # reach Active, and each execs INDEPENDENTLY over its OWN vsock. This is the

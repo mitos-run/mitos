@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.41.0](https://github.com/mitos-run/mitos/compare/v1.40.0...v1.41.0) (2026-07-12)
+
+
+### Features
+
+* **controlplane:** log client-correlated fork submit-to-ready latency ([#868](https://github.com/mitos-run/mitos/issues/868)) ([b8e440e](https://github.com/mitos-run/mitos/commit/b8e440e9431e1f0a20e72552f7c41048068eed8b))
+* **saas:** pre-claimed checkout, the gateway hands out an already-activated sandbox ([#896](https://github.com/mitos-run/mitos/issues/896)) ([3e4306c](https://github.com/mitos-run/mitos/commit/3e4306c4a90adc64397107850f95aaa7fdf870cf))
+
+
+### Bug Fixes
+
+* **computer-use:** move the Chromium pin to 150.0.7871.114, 147 left the archive ([#899](https://github.com/mitos-run/mitos/issues/899)) ([bb5f4a5](https://github.com/mitos-run/mitos/commit/bb5f4a57fca2ecc1779a2597f87cd481d6cf9581))
+
 ## [1.40.0](https://github.com/mitos-run/mitos/compare/v1.39.1...v1.40.0) (2026-07-11)
 
 
