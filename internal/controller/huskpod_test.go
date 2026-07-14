@@ -1617,3 +1617,49 @@ func TestBuildHuskPodThreadsPrepareKernelPrefault(t *testing.T) {
 		t.Errorf("husk args must omit --prepare-kernel-prefault by default: %v", off.Spec.Containers[0].Args)
 	}
 }
+
+// TestPrepareRestorePodGetsSnapshotDirWithoutDigest pins the prod gap found at
+// the rung D canary (2026-07-14): on a pre-digest pool (no recorded template
+// digest, the hosted python pool's shape), the builder emitted --snapshot-dir
+// only together with --expected-digest, so a --prepare-restore stub had no
+// PrepareSnapshotDir and the dormant restore SILENTLY no-opped; every claim
+// kept paying the full restore while the flags claimed otherwise. A
+// prepare-restore pod must always know its snapshot dir; the verify posture
+// (digest verify vs --allow-unverified-snapshots) is unchanged and separate.
+func TestPrepareRestorePodGetsSnapshotDirWithoutDigest(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	// Pre-digest pool + prepare-restore: the snapshot dir must be threaded.
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareRestore: true,
+	})
+	args := on.Spec.Containers[0].Args
+	if !argsContain(args, "--snapshot-dir") {
+		t.Errorf("prepare-restore pod on a pre-digest pool missing --snapshot-dir; the dormant restore silently no-ops without it: %v", args)
+	}
+	if !argsContain(args, "--allow-unverified-snapshots") {
+		t.Errorf("pre-digest pool must keep the unverified escape hatch (verify posture unchanged): %v", args)
+	}
+	if argsContain(args, "--expected-digest") {
+		t.Errorf("no digest exists; --expected-digest must not be invented: %v", args)
+	}
+
+	// A fork child is never pre-restored; it must not gain the flag.
+	child := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareRestore: true,
+		ForkSnapshotID: "fk-1",
+	})
+	if argsContain(child.Spec.Containers[0].Args, "--snapshot-dir") {
+		t.Errorf("fork-child pod must not carry --snapshot-dir: %v", child.Spec.Containers[0].Args)
+	}
+
+	// Without prepare-restore, the pre-digest render is byte-for-byte unchanged.
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true,
+	})
+	if argsContain(off.Spec.Containers[0].Args, "--snapshot-dir") {
+		t.Errorf("--snapshot-dir leaked into the flags-off pre-digest render: %v", off.Spec.Containers[0].Args)
+	}
+}
