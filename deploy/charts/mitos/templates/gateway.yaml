@@ -46,6 +46,9 @@ spec:
             - --checkout-cap={{ int .Values.gateway.checkout.cap }}
             - --checkout-max-age={{ .Values.gateway.checkout.maxAge }}
             {{- end }}
+            {{- range $org, $tier := .Values.gateway.orgTiers }}
+            - --org-tier={{ $org }}={{ $tier }}
+            {{- end }}
           {{- if or .Values.database.dsnSecretRef.name (and .Values.telemetry.enabled .Values.telemetry.endpoint) .Values.gateway.singleTenantNamespace .Values.saas.apiKeyPepperSecret.name }}
           env:
             {{- include "mitos.database.env" . | nindent 12 }}

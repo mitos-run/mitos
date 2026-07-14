@@ -731,6 +731,12 @@ console:
 # programmatic counterpart to the console.
 gateway:
   enabled: true
+  # Operator tier grants (issue #881 wiring): map of orgID to tier name (free,
+  # starter, pro). Each entry renders one repeatable --org-tier flag; an org
+  # not named here stays on the fail-closed free default. Note the pro tier
+  # also opens the sandbox egress posture. Org ids and tier names are not
+  # secrets.
+  orgTiers: {}
   image:
     repository: mitos-gateway
     tag: ""

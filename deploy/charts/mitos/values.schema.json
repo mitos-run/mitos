@@ -914,6 +914,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "orgTiers": {
+          "description": "Operator tier grants (issue #881): map of orgID to tier name. Each entry renders one --org-tier=<org>=<tier> gateway flag; unlisted orgs stay on the fail-closed free default. The pro tier also opens the sandbox egress posture.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["free", "starter", "pro"]
+          }
+        },
         "enabled": {
           "description": "Render the gateway Deployment, Service, and RBAC.",
           "type": "boolean"
