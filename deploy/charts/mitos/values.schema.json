@@ -192,6 +192,18 @@
           "description": "EXPERIMENTAL, default off. With liveCowFork on, render --live-cow-child-import so an armed live-cow fork takes the vmstate-only capture (skip the ~364ms disk mem write) and the co-located child boots its guest RAM from the source shared memfd. Requires a child-side-import patched Firecracker; off keeps the armed source writing the disk mem.",
           "type": "boolean"
         },
+        "huskPrepareEgressLink": {
+          "description": "EXPERIMENTAL, default off. With multiVMFork on, render --husk-prepare-egress-link so warm husk pods bring their default VM's tap up while dormant under a default-deny policy; a claim pays only the atomic nft transaction that installs the tenant policy.",
+          "type": "boolean"
+        },
+        "huskPrepareRestore": {
+          "description": "EXPERIMENTAL, default off. With huskPrepareEgressLink on, render --husk-prepare-restore so warm husk pods load their default VM's snapshot and resume its guest while dormant; a claim pays only the fork-correctness handshake.",
+          "type": "boolean"
+        },
+        "huskPrepareKernelPrefault": {
+          "description": "EXPERIMENTAL, default off. With huskPrepareRestore on, render --husk-prepare-kernel-prefault so a pre-restored dormant pod runs the inert warm cell once, making the run_code kernel's working set resident before the first tenant cell. Fails open on a kernel-less template.",
+          "type": "boolean"
+        },
         "prewarmChild": {
           "description": "EXPERIMENTAL, default off. With multiVMFork on, render --prewarm-child so each multi-vm husk pod keeps one dormant generic co-located child Firecracker pre-prepared and a fork adopts it (fc_boot off the hot path) instead of booting one at fork time. A miss falls back to on-demand prepare.",
           "type": "boolean"
