@@ -95,6 +95,24 @@ controller:
   # pre-prepared and a fork adopts it (fc_boot off the hot path) instead of booting one
   # at fork time. A fresh slot re-warms async; a miss falls back to on-demand prepare.
   prewarmChild: false
+
+  # EXPERIMENTAL, default off. When true (and multiVMFork on), render
+  # --husk-prepare-egress-link so warm husk pods bring their default VM's tap up while
+  # DORMANT under a default-deny policy; a claim then pays only the atomic nft
+  # transaction that installs the tenant policy, not the tap create.
+  huskPrepareEgressLink: false
+
+  # EXPERIMENTAL, default off. When true (and huskPrepareEgressLink on), render
+  # --husk-prepare-restore so warm husk pods load their default VM's snapshot and
+  # RESUME its guest while DORMANT; a claim then pays only the fork-correctness
+  # handshake instead of the restore, resume, and guest-ready wait.
+  huskPrepareRestore: false
+
+  # EXPERIMENTAL, default off. When true (and huskPrepareRestore on), render
+  # --husk-prepare-kernel-prefault so a pre-restored dormant pod runs the template
+  # build's inert warm cell once, making the run_code kernel's working set resident
+  # before the first tenant cell. Fails open in the pod on a kernel-less template.
+  huskPrepareKernelPrefault: false
   # Value for --husk-data-dir: the node template snapshot root the husk pods
   # mount; must match forkd's --data-dir.
   huskDataDir: /var/lib/mitos
