@@ -10,15 +10,18 @@ dies with its session.
 
 ## The ladder
 
-| rung | prod version | change under test | N | TTI P50 | create med | first exec med | success |
+| rung | prod version | change under test | N | TTI P50 (ms) | create med (ms) | first exec med (ms) | success |
 |---|---|---|---|---|---|---|---|
 | A | v1.39.1 | baseline (2026-07-11) | 20 | 327.2 | 189.3 | 136.8 | 20/20 |
 | B | v1.40.0 | gateway round-trip cuts (#895) | 20 | 349.0 | 191.4 | 166.4 | 20/20 |
 | B' | v1.40.0 | same, higher power | 100 | 349.9 | 190.9 | 163.1 | 96/100 |
 | C | v1.41.0 + checkout | pre-claimed checkout (#896) | 20 | 254.9 | **32.9** | 210.0 | **16/20** |
 
-Full per-iteration outputs for each rung are reproducible with the command
-above; the harness prints them and this table quotes its summary lines.
+Full per-iteration outputs for each rung are reproducible with the harness
+invocation from the method doc
+(`MITOS_API_KEY=... python3 bench/tti-latency.py <N>`, environment per
+[2026-07-10-tti-hosted.md](2026-07-10-tti-hosted.md)); the harness prints them
+and this table quotes its summary lines.
 
 ## Rung B read honestly: two effects cancelled
 
