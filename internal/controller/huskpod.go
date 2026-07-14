@@ -651,6 +651,16 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		args = append(args, "--snapshot-dir", huskSnapshotMountPath, "--expected-digest", opts.ExpectedDigest)
 	} else {
 		args = append(args, "--allow-unverified-snapshots")
+		// Prepare-time restore needs the snapshot dir at STARTUP, digest or no
+		// digest: without it the dormant restore silently no-ops and every claim
+		// keeps paying the full restore while the flags claim otherwise (found
+		// live at the first prod canary). The verify posture is unchanged; this
+		// branch stays --allow-unverified-snapshots, only the dir is threaded.
+		// A fork child restores its own node-local fork snapshot at spawn and is
+		// never pre-restored, so it keeps no --snapshot-dir.
+		if opts.PrepareRestore && opts.ForkSnapshotID == "" {
+			args = append(args, "--snapshot-dir", huskSnapshotMountPath)
+		}
 	}
 
 	// Volumes + mounts: the mTLS Secret, the node's template snapshot subdir
