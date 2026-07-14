@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.42.1](https://github.com/mitos-run/mitos/compare/v1.42.0...v1.42.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* **controller:** prepare-restore pods on a pre-digest pool get --snapshot-dir, ending the silent no-op ([#911](https://github.com/mitos-run/mitos/issues/911)) ([aa4ed70](https://github.com/mitos-run/mitos/commit/aa4ed7077878d44ae923ca96d342acb660fbd785))
+
 ## [1.42.0](https://github.com/mitos-run/mitos/compare/v1.41.0...v1.42.0) (2026-07-14)
 
 
