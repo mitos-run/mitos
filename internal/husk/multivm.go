@@ -430,6 +430,7 @@ func (s *Stub) prepareRestoreDefaultVM(ctx context.Context, id vmID, inst *vmIns
 	}
 	// PrepareRestore requires PrepareEgressLink; the stub, pod builder, and controller
 	// all enforce that, and preparedLinkTap being set is the runtime proof the tap is up.
+	start := time.Now()
 	memFile := filepath.Join(s.prepareSnapshotDir, "mem")
 	vmStateFile := filepath.Join(s.prepareSnapshotDir, "vmstate")
 	// The baked NIC is remapped onto the prepared tap, the same override activate builds
@@ -461,6 +462,11 @@ func (s *Stub) prepareRestoreDefaultVM(ctx context.Context, id vmID, inst *vmIns
 	}
 	inst.preRestored = true
 	inst.preRestoredSnapshotDir = s.prepareSnapshotDir
+	// The one observable marker that the dormant restore happened and what it cost;
+	// the KVM CI gate and the prod canary both key on this line. Paths and durations
+	// only, never secrets.
+	fmt.Fprintf(os.Stderr, "husk: prepare-restore vm %q resumed dormant guest from %s in %.2fms\n",
+		id, s.prepareSnapshotDir, float64(time.Since(start).Microseconds())/1000.0)
 	return nil
 }
 
