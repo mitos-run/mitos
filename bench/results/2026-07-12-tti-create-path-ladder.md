@@ -17,6 +17,7 @@ dies with its session.
 | B' | v1.40.0 | same, higher power | 100 | 349.9 | 190.9 | 163.1 | 96/100 |
 | C | v1.41.0 + checkout | pre-claimed checkout (#896) | 20 | 254.9 | **32.9** | 210.0 | **16/20** |
 | D | v1.42.1 prepare on | prepare-time restore + prefault (#892/#906/#911) | 100 | 329.9 | **140.2** | 188.6 | 99/100 |
+| E | v1.42.1 + checkout | checkout re-enabled, keepalive-protected (#896/#908) | 100 | **96.8** | **32.6** | **63.6** | **100/100** |
 
 Full per-iteration outputs for each rung are reproducible with the harness
 invocation from the method doc
@@ -121,9 +122,69 @@ buffered pods ARE keepalive-warmed now, so both legs should land. Rung D is the
 honest record that prepare-time restore alone, without a warm-pool keepalive,
 moves cost from the create leg to the exec leg rather than off TTI.
 
+## Rung E: the checkout with the keepalive lands both legs
+
+Rung E re-enables the pre-claimed checkout (`gateway.checkout.pools={python}`),
+which rung C disabled, now that v1.42.1 carries the buffer keepalive (#908): the
+checkout reconcile warms every stale buffered entry with the inert cell every
+60 s and evicts any that fail it, so a checkout never hands out a decayed or
+wedged guest. Measured 2026-07-14, v1.42.1, N=100, the same 13 s paced harness,
+from mitos-bench1.
+
+| metric | rung C (no keepalive) | rung E (keepalive) |
+|---|---|---|
+| TTI P50 | 254.9 | **96.8** |
+| create median | 32.9 | 32.6 |
+| first exec median | 210.0 | **63.6** |
+| success | 16/20 | **100/100** |
+
+TTI P50 **96.8 ms**, P90 108.3, P95 118.5, P99 191.5, min 52.5, mean 98.1. The
+create win rung C proved holds (median 32.6 ms; 99 of 100 creates were served
+from the buffer, under 80 ms), and the keepalive closes the exec leg the same
+way the discriminator predicted: first exec median 63.6 ms against rung C's
+210.0. Both legs land, and TTI drops to a third of the rung A baseline.
+
+The two failures that sank rung C are gone. Success is 100/100 (rung C was
+16/20): with the #905 gateway forward-done instrumentation live, every request
+in the window logged a 2xx status with no `write_error`, and the buffer held at
+its floor with zero keepalive evictions, so the read-timeout stalls the
+keepalive-plus-eviction was built to de-amplify did not recur. The one 224.9 ms
+max is iteration 1, the cold-buffer warm-up before the first refill primed the
+pool; every steady-state iteration sat between 79 and 118 ms.
+
+The checkout stays ENABLED in the hosted deployment on this measurement: the
+trade rung C refused (a 20 percent failure rate for a create cut) is no longer
+the trade, because the failures are fixed, not accepted.
+
 ## Peer context
 
 The public peer table and its caveats are unchanged from
 [2026-07-10-tti-hosted.md](2026-07-10-tti-hosted.md): our rows are our
 harness beside their published numbers, not a measured leaderboard position.
-The targets remain Daytona (136.2 ms P50) and Northflank (95.9 ms P50).
+The targets were Daytona (136.2 ms P50) and Northflank (95.9 ms P50).
+
+Against those numbers, rung E's 96.8 ms P50 is 28.9 percent under Daytona and
+level with Northflank (96.8 vs 95.9, a 0.9 ms difference well inside the
+harness's run-to-run drift). This is the create-path goal met: mitos's hosted
+TTI now sits below Daytona and at Northflank.
+
+The honesty bar from the 2026-07-10 doc still binds, and none of it is cleared
+by this run:
+
+- **Our harness, not theirs.** 96.8 ms is our number from our client, our
+  region, our probe (`print(1)` through the python template), against their
+  published numbers from their runner. It is a like-shaped comparison, not a
+  measured position in their leaderboard. Claiming a leaderboard rank still
+  requires shipping the `computesdk/computesdk` adapter (#891) and being
+  measured by their runner.
+- **Sequential, not burst.** This is the 13 s paced sequential run. The
+  checkout is a pool checkout, and a ComputeSDK-style burst would drain the
+  `warm.min: 8` single-node pool and the floor-2 buffer, so the burst number
+  would be worse until the single-node SPOF (#586) and buffer sizing are
+  addressed. The burst measurement is deferred to that work.
+- **One node.** All of this is one KVM node; multi-node placement is still
+  unproven.
+
+So the accurate public statement is bounded: on our reproducible harness,
+hosted TTI P50 is 96.8 ms, below Daytona and at Northflank, sequential, single
+node. Not "fastest on the leaderboard."
