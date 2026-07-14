@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -200,11 +201,21 @@ const checkoutKeepAliveTimeout = 15 * time.Second
 const checkoutKeepAliveCell = "pass"
 
 // warmStale runs the keepalive in every cached entry for pool whose lastWarm
-// is older than the interval. Success refreshes lastWarm; failure EVICTS the
-// entry and recycles its CR, because a sandbox that cannot run the inert cell
-// must never be handed to a tenant (this is also the finding-2 de-amplifier:
-// a wedged buffered sandbox is caught here, not at a customer's first exec).
-func (b *checkoutBuffer) warmStale(ctx context.Context, pool string) {
+// is older than the interval, CONCURRENTLY (a wedged guest costs one bounded
+// call, never a serialized reconcile pass). Success refreshes lastWarm;
+// failure EVICTS the entry and recycles its CR, because a sandbox that cannot
+// run the inert cell must never be handed to a tenant (this is also the
+// finding-2 de-amplifier: a wedged buffered sandbox is caught here, not at a
+// customer's first exec). It returns how many entries it evicted so the
+// caller can refill on the SAME pass instead of a cycle later.
+//
+// Eviction is guarded against racing a concurrent checkout (a claim can pop
+// and stamp the entry while the warm is in flight) THREE ways: the entry must
+// still be cached (a pop removes it), the LIVE CR must still carry the
+// buffered label, and the delete carries a resourceVersion precondition from
+// that same fresh read, so a claim landing between the read and the delete
+// conflicts instead of destroying a tenant-owned sandbox.
+func (b *checkoutBuffer) warmStale(ctx context.Context, pool string) int {
 	warm := b.warm
 	if warm == nil {
 		warm = warmBufferedGRPC
@@ -218,26 +229,74 @@ func (b *checkoutBuffer) warmStale(ctx context.Context, pool string) {
 		}
 	}
 	b.mu.Unlock()
+
+	var evicted atomic.Int64
+	var wg sync.WaitGroup
 	for _, e := range stale {
-		wctx, cancel := context.WithTimeout(ctx, checkoutKeepAliveTimeout)
-		err := warm(wctx, e)
-		cancel()
-		if err != nil {
+		wg.Add(1)
+		go func(e bufferedSandbox) {
+			defer wg.Done()
+			wctx, cancel := context.WithTimeout(ctx, checkoutKeepAliveTimeout)
+			err := warm(wctx, e)
+			cancel()
+			if err == nil {
+				b.mu.Lock()
+				for i := range b.entries[pool] {
+					if b.entries[pool][i].name == e.name {
+						b.entries[pool][i].lastWarm = b.k.now()
+					}
+				}
+				b.mu.Unlock()
+				return
+			}
+			// Drop from the cache first; if the entry is ALREADY gone, a
+			// checkout popped it mid-warm and the sandbox belongs to a tenant
+			// now: leave the CR strictly alone.
+			b.mu.Lock()
+			still := false
+			q := b.entries[pool][:0]
+			for _, cur := range b.entries[pool] {
+				if cur.name == e.name {
+					still = true
+					continue
+				}
+				q = append(q, cur)
+			}
+			b.entries[pool] = q
+			b.mu.Unlock()
+			if !still {
+				slog.Info("checkout keepalive lost its entry to a concurrent claim; leaving the sandbox alone",
+					"sandbox", e.name, "pool", pool)
+				return
+			}
 			slog.Warn("checkout keepalive failed; evicting the buffered sandbox so the refill loop replaces it",
 				"sandbox", e.name, "pool", pool, "error", err.Error())
-			b.dropAndDelete(ctx, pool, &v1.Sandbox{ObjectMeta: metav1.ObjectMeta{
-				Name: e.name, Namespace: b.k.singleTenantNamespace,
-			}})
-			continue
-		}
-		b.mu.Lock()
-		for i := range b.entries[pool] {
-			if b.entries[pool][i].name == e.name {
-				b.entries[pool][i].lastWarm = b.k.now()
+			// Fresh read: the CR must STILL be buffered, and the delete is
+			// preconditioned on the resourceVersion of this read (a cached RV
+			// would spuriously conflict on benign status churn). A checkout
+			// stamping the org between the read and the delete bumps the RV,
+			// so the delete conflicts and the tenant keeps the sandbox.
+			var cur v1.Sandbox
+			ns := b.k.singleTenantNamespace
+			if gerr := b.k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: e.name}, &cur); gerr != nil {
+				evicted.Add(1)
+				return
 			}
-		}
-		b.mu.Unlock()
+			if _, buffered := cur.Labels[BufferedLabelKey]; !buffered {
+				slog.Info("checkout keepalive raced a claim; the sandbox is tenant-owned and stays",
+					"sandbox", e.name, "pool", pool)
+				return
+			}
+			rv := cur.ResourceVersion
+			if derr := b.k.c.Delete(ctx, &cur, client.Preconditions{ResourceVersion: &rv}); derr != nil &&
+				!apierrors.IsNotFound(derr) && !apierrors.IsConflict(derr) {
+				slog.Warn("checkout keepalive recycle failed", "sandbox", e.name, "error", derr.Error())
+			}
+			evicted.Add(1)
+		}(e)
 	}
+	wg.Wait()
+	return int(evicted.Load())
 }
 
 // warmBufferedGRPC is the real keepalive: one RunCodeStream of the inert cell
@@ -331,8 +390,9 @@ func (b *checkoutBuffer) reconcilePool(ctx context.Context, pool string) {
 	}
 	// Keepalive pass (#903): warm every stale cached entry so a checkout never
 	// hands out a guest whose run_code working set has decayed, and evict any
-	// entry that cannot run the cell.
-	b.warmStale(ctx, pool)
+	// entry that cannot run the cell. Evictions come off the Ready count NOW,
+	// so the refill below reacts on this pass instead of a cycle later.
+	count -= b.warmStale(ctx, pool)
 
 	if count >= b.cfg.Floor || count >= b.cfg.Cap {
 		return

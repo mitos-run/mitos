@@ -142,3 +142,42 @@ func TestCheckoutAdoptedEntriesWarmOnFirstPass(t *testing.T) {
 // noopWarm satisfies the warm seam for tests that exercise the buffer's other
 // behavior and must not dial their fake endpoints.
 func noopWarm(context.Context, bufferedSandbox) error { return nil }
+
+// TestCheckoutKeepaliveEvictionNeverDeletesAClaimedSandbox pins the race the
+// review found: a keepalive is in flight (bounded at 15 s) while a tenant
+// checkout pops and claims the same entry. A failed warm that then evicts by
+// bare name would DELETE the tenant's live sandbox. The eviction must instead
+// notice the claim (the entry left the cache, and the live CR no longer
+// carries the buffered label) and leave the CR alone.
+func TestCheckoutKeepaliveEvictionNeverDeletesAClaimedSandbox(t *testing.T) {
+	cp := checkoutCP(t)
+	b := cp.checkout
+
+	e := seedBuffered(t, cp.c, "sb-raced")
+	e.lastWarm = time.Now().Add(-2 * checkoutKeepAliveInterval)
+	b.add(e)
+
+	// The warm seam simulates the race deterministically: while the keepalive
+	// is "in flight", the tenant checkout wins the entry (pop + the org stamp,
+	// exactly what claim does), then the warm comes back failed.
+	b.warm = func(ctx context.Context, we bufferedSandbox) error {
+		popped, ok := b.pop("python")
+		if !ok || popped.name != "sb-raced" {
+			t.Fatalf("test setup: expected to pop sb-raced, got %v ok=%v", popped.name, ok)
+		}
+		if !b.stampOrg(ctx, "mitos", orgA, popped) {
+			t.Fatalf("test setup: org stamp failed")
+		}
+		return errors.New("keepalive lost the race and failed")
+	}
+
+	b.reconcilePool(context.Background(), "python")
+
+	var cur v1.Sandbox
+	if err := cp.c.Get(context.Background(), client.ObjectKey{Namespace: "mitos", Name: "sb-raced"}, &cur); err != nil {
+		t.Fatalf("the claimed sandbox was DELETED by the losing keepalive: %v", err)
+	}
+	if _, buffered := cur.Labels[BufferedLabelKey]; buffered {
+		t.Fatalf("test setup: the CR should be claimed (no buffered label), labels=%v", cur.Labels)
+	}
+}
