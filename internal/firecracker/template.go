@@ -192,7 +192,7 @@ func (tm *TemplateManager) startWorkloadGRPC(vsockPath string, w *WorkloadSpec) 
 	return nil
 }
 
-// warmKernelCode is the trivial cell the pre-snapshot warmup runs to force the
+// WarmKernelCode is the trivial cell the pre-snapshot warmup runs to force the
 // code-interpreter kernel (ipykernel behind /opt/mitos/kernel_driver.py) to
 // start, so every fork wakes with a warm kernel instead of paying the ~5s lazy
 // start on its first run_code.
@@ -213,12 +213,16 @@ func (tm *TemplateManager) startWorkloadGRPC(vsockPath string, w *WorkloadSpec) 
 // agent has credibly reseeded the CRNG (docs/fork-correctness.md, run_code kernel).
 // Keeping this cell inert still matters: it keeps the snapshot free of any randomness
 // the driver does not know how to reseed. Pinned by TestWarmKernelCode_NeverDrawsRandomness.
-const warmKernelCode = "pass"
+//
+// EXPORTED because the husk prepare-time kernel prefault (internal/husk/prefault.go,
+// slice 3 of the prepare-time-restore plan) runs the SAME cell against a dormant
+// pre-restored guest; one definition, so the inert-cell hygiene can never drift.
+const WarmKernelCode = "pass"
 
-// warmKernelTimeoutSecs bounds the warmup cell. The ipykernel boot is ~5s on a
+// WarmKernelTimeoutSecs bounds the warmup cell. The ipykernel boot is ~5s on a
 // production node, but CI and first-boot bytecode compilation can be far
 // slower, so this is generous; the cell itself is a no-op.
-const warmKernelTimeoutSecs = 120
+const WarmKernelTimeoutSecs = 120
 
 // warmKernelGRPC runs the trivial warmup cell through Sandbox.RunCodeStream so
 // the kernel is live when the caller snapshots. Modeled on startWorkloadGRPC:
@@ -242,12 +246,12 @@ func (tm *TemplateManager) warmKernelGRPC(vsockPath string) error {
 	// Client margin over the guest-requested timeout, like startWorkloadGRPC:
 	// the guest must get the chance to report its own timeout cleanly instead
 	// of the client racing it into an ambiguous context error.
-	wctx, cancel := context.WithTimeout(ctx, (warmKernelTimeoutSecs+30)*time.Second)
+	wctx, cancel := context.WithTimeout(ctx, (WarmKernelTimeoutSecs+30)*time.Second)
 	defer cancel()
 	stream, err := client.Sandbox.RunCodeStream(wctx, &sandboxv1.RunCodeStreamRequest{
-		Code:           warmKernelCode,
+		Code:           WarmKernelCode,
 		Language:       "python",
-		TimeoutSeconds: warmKernelTimeoutSecs,
+		TimeoutSeconds: WarmKernelTimeoutSecs,
 	})
 	if err != nil {
 		return fmt.Errorf("kernel warmup RunCodeStream open: %w", err)

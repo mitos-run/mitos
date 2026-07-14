@@ -643,6 +643,15 @@ type Options struct {
 	// serves no tenant and is reseeded fail-closed at the claim's NotifyForked, exactly
 	// as a restore-at-activate guest is. See docs/superpowers/plans/2026-07-10-prepare-time-restore.md.
 	PrepareRestore bool
+	// PrepareKernelPrefault opts a pre-restored dormant guest into running the
+	// template build's inert warm cell ONCE at Prepare, so the run_code kernel's
+	// working set is resident before the first tenant cell instead of being
+	// demand-faulted in under the lazy UFFD restore (slice 3 of the prepare-time-
+	// restore plan, issue #889; counters the idle working-set decay of #903).
+	// REQUIRES PrepareRestore (there is no running guest to warm otherwise) and
+	// FAILS OPEN: a template without the kernel (a non-python pool) logs and
+	// continues, exactly the pre-slice-3 behavior. Default off.
+	PrepareKernelPrefault bool
 	// PrewarmChild opts into keeping ONE dormant, generic co-located child
 	// Firecracker pre-prepared (booted, and snapshot-verified when a template
 	// snapshot is configured) in a multi-VM pod, so a co-located fork that does
@@ -772,6 +781,11 @@ type Stub struct {
 	prepareRestore    bool
 	inPodGuestIP      string
 	inPodGatewayIP    string
+	// prepareKernelPrefault backs Options.PrepareKernelPrefault; prefaultKernel is
+	// its seam (nil means the real prefaultKernelGRPC), injectable so unit tests
+	// pin WHEN the prefault runs without a live gRPC guest.
+	prepareKernelPrefault bool
+	prefaultKernel        func(ctx context.Context, conn *guestgrpc.Client, vsockPath string) error
 	// prewarmChild keeps ONE dormant, generic co-located child Firecracker
 	// pre-prepared (Options.PrewarmChild) so a co-located fork that needs no
 	// fork-specific launch env activates it instead of paying the process boot on
@@ -854,6 +868,8 @@ func New(cfg firecracker.VMConfig, opts Options) *Stub {
 		inPodGuestIP:       opts.InPodGuestIP,
 		inPodGatewayIP:     opts.InPodGatewayIP,
 		prewarmChild:       opts.PrewarmChild,
+
+		prepareKernelPrefault: opts.PrepareKernelPrefault,
 	}
 	// Multi-VM scaffold (#764), default off: allocate the per-fork instance map
 	// ONLY when a caller opts in. No production caller sets MultiVM in increment

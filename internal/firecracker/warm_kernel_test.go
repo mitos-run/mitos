@@ -139,11 +139,11 @@ func TestWarmKernelGRPC_DrainsToExitZero(t *testing.T) {
 	if req.Language != "python" {
 		t.Errorf("warmup language = %q, want %q", req.Language, "python")
 	}
-	if req.Code != warmKernelCode {
-		t.Errorf("warmup code = %q, want %q", req.Code, warmKernelCode)
+	if req.Code != WarmKernelCode {
+		t.Errorf("warmup code = %q, want %q", req.Code, WarmKernelCode)
 	}
-	if req.TimeoutSeconds != warmKernelTimeoutSecs {
-		t.Errorf("warmup timeout = %d, want %d", req.TimeoutSeconds, warmKernelTimeoutSecs)
+	if req.TimeoutSeconds != WarmKernelTimeoutSecs {
+		t.Errorf("warmup timeout = %d, want %d", req.TimeoutSeconds, WarmKernelTimeoutSecs)
 	}
 }
 
@@ -157,8 +157,8 @@ func TestWarmKernelGRPC_DrainsToExitZero(t *testing.T) {
 // of randomness the driver does not know how to reseed.
 func TestWarmKernelCode_NeverDrawsRandomness(t *testing.T) {
 	for _, banned := range []string{"random", "numpy", "np.", "import", "uuid", "secrets"} {
-		if strings.Contains(warmKernelCode, banned) {
-			t.Errorf("warmKernelCode %q must not contain %q: the warmup cell must draw no randomness, so the snapshot holds no PRNG state the guest-side post-fork reseed does not know how to reseed. It does NOT keep the kernel's PRNGs unseeded: ipykernel's own imports seed random before this cell runs", warmKernelCode, banned)
+		if strings.Contains(WarmKernelCode, banned) {
+			t.Errorf("WarmKernelCode %q must not contain %q: the warmup cell must draw no randomness, so the snapshot holds no PRNG state the guest-side post-fork reseed does not know how to reseed. It does NOT keep the kernel's PRNGs unseeded: ipykernel's own imports seed random before this cell runs", WarmKernelCode, banned)
 		}
 	}
 }

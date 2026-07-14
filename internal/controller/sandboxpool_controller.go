@@ -65,6 +65,10 @@ type SandboxPoolReconciler struct {
 	// PrepareRestore passes --prepare-restore so a dormant pod also loads its snapshot
 	// and resumes its guest before any claim arrives. Requires PrepareEgressLink.
 	PrepareRestore bool
+	// PrepareKernelPrefault passes --prepare-kernel-prefault so a pre-restored dormant
+	// pod also warms the run_code kernel's working set with the inert warm cell.
+	// Requires PrepareRestore. Fails open in the pod.
+	PrepareKernelPrefault bool
 	// MultiVMForkVMs is how many co-located fork VMs a multi-VM warm pod reserves
 	// node memory for up front (beyond the source VM), so the co-location routing
 	// has room before a fork spills to a new pod. Only consulted when MultiVM is set;

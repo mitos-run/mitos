@@ -1585,3 +1585,35 @@ func TestBuildHuskPodThreadsPrepareRestore(t *testing.T) {
 		t.Errorf("husk args must omit --prepare-restore by default: %v", off.Spec.Containers[0].Args)
 	}
 }
+
+// TestBuildHuskPodThreadsPrepareKernelPrefault: --prepare-kernel-prefault is emitted only
+// when the WHOLE chain (prepared link + prepared restore) is on; without the dormant
+// restore there is no running guest to warm.
+func TestBuildHuskPodThreadsPrepareKernelPrefault(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareRestore: true, PrepareKernelPrefault: true,
+	})
+	if !argsContain(on.Spec.Containers[0].Args, "--prepare-kernel-prefault") {
+		t.Errorf("husk args missing --prepare-kernel-prefault when enabled: %v", on.Spec.Containers[0].Args)
+	}
+
+	// Without the dormant restore, the prefault has no running guest; the flag must
+	// not be emitted.
+	noRestore := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareKernelPrefault: true,
+	})
+	if argsContain(noRestore.Spec.Containers[0].Args, "--prepare-kernel-prefault") {
+		t.Errorf("husk args carry --prepare-kernel-prefault without --prepare-restore: %v", noRestore.Spec.Containers[0].Args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareRestore: true,
+	})
+	if argsContain(off.Spec.Containers[0].Args, "--prepare-kernel-prefault") {
+		t.Errorf("husk args must omit --prepare-kernel-prefault by default: %v", off.Spec.Containers[0].Args)
+	}
+}
