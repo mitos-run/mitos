@@ -293,21 +293,34 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// The Forward round trip is the server-side view of the latency the SDK
 	// observes (create readiness wait, runtime proxy); it feeds the duration
-	// histogram labeled by the bounded op and status class.
+	// histogram labeled by the bounded op and status class, and the completion
+	// log line below (issue #901): the histogram answers "how slow is this op
+	// overall", the line attributes ONE slow request to a leg.
 	forwardStarted := time.Now()
 	resp, err := g.cp.Forward(ctx, fwd)
+	forwardDur := time.Since(forwardStarted)
 	if err != nil {
 		e := apierr.Get(apierr.CodeInternal).
 			WithCause("the control plane could not service the request")
-		g.metrics.observeForwardDuration(op, e.Status, time.Since(forwardStarted))
-		g.fail(w, e)
+		g.metrics.observeForwardDuration(op, e.Status, forwardDur)
+		// The error envelope is a client write too: time and count it through a
+		// counting writer, so a client that stalls on failures is as visible as
+		// one that stalls on successes, and emit the done line AFTER it.
+		cw := &countingResponseWriter{ResponseWriter: w}
+		writeStarted := time.Now()
+		g.fail(cw, e)
+		extra := []any{"error", "control plane forward failed"}
+		if cw.err != nil {
+			extra = append(extra, "write_error", cw.err.Error())
+		}
+		g.logForwardDone(res.Key.ID, orgID, op, e.Status, forwardDur, time.Since(writeStarted), cw.n, extra...)
 		return
 	}
 	status := resp.Status
 	if status == 0 {
 		status = http.StatusOK
 	}
-	g.metrics.observeForwardDuration(op, status, time.Since(forwardStarted))
+	g.metrics.observeForwardDuration(op, status, forwardDur)
 
 	// Product telemetry: a successful create emits a sandbox.created event and a
 	// successful live fork (sandbox.fork) emits sandbox.forked, so feature
@@ -342,14 +355,67 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	g.metrics.observeStatus(status)
 	w.WriteHeader(status)
+
+	// The response-write leg is timed and its error RECORDED, not swallowed: a
+	// client that stopped reading (the prod read-timeout signature, issue #901)
+	// or a wedged streamed Connect body surfaces here as write_ms or write_error
+	// on the completion line, the only place a hang past the forward entry is
+	// visible at all.
+	writeStarted := time.Now()
+	var written int64
+	var writeErr error
 	if resp.BodyStream != nil {
 		// Stream the response without buffering (this carries a streamed Connect
 		// response), then close the upstream body.
 		defer func() { _ = resp.BodyStream.Close() }()
-		_, _ = io.Copy(w, resp.BodyStream)
-		return
+		written, writeErr = io.Copy(w, resp.BodyStream)
+	} else {
+		var n int
+		n, writeErr = w.Write(resp.Body)
+		written = int64(n)
 	}
-	_, _ = w.Write(resp.Body)
+	extra := []any{}
+	if writeErr != nil {
+		extra = append(extra, "write_error", writeErr.Error())
+	}
+	g.logForwardDone(res.Key.ID, orgID, op, status, forwardDur, time.Since(writeStarted), written, extra...)
+}
+
+// countingResponseWriter records the bytes and first error of the body writes
+// that pass through it, so the error-envelope leg of a failed forward carries
+// the same write_ms / bytes / write_error observability as a success body.
+type countingResponseWriter struct {
+	http.ResponseWriter
+	n   int64
+	err error
+}
+
+func (w *countingResponseWriter) Write(p []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(p)
+	w.n += int64(n)
+	if err != nil && w.err == nil {
+		w.err = err
+	}
+	return n, err
+}
+
+// logForwardDone emits the per-request completion line (issue #901): the same
+// identity fields as the forward entry line, plus the response status and where
+// the time went, split into the control-plane forward leg and the client
+// response-write leg. Durations, counts, and identifiers only; never the key or
+// a token value.
+func (g *Gateway) logForwardDone(keyID, orgID, op string, status int, forwardDur, writeDur time.Duration, written int64, extra ...any) {
+	fields := []any{
+		"key_id", keyID,
+		"org", orgID,
+		"op", op,
+		"status", status,
+		"forward_ms", float64(forwardDur.Microseconds()) / 1000.0,
+		"write_ms", float64(writeDur.Microseconds()) / 1000.0,
+		"bytes", written,
+	}
+	fields = append(fields, extra...)
+	g.log.Info("gateway forward done", fields...)
 }
 
 // curatedRuntimeHeaders copies only the headers the runtime proxy needs across
