@@ -30,6 +30,16 @@ environment-tunable.
 
 - Gateway logs: the `gateway forward` lines carry op and org; the failure
   lines name which seam failed (control plane vs body vs verify).
+- Per-request latency: every forwarded request also emits ONE
+  `gateway forward done` line with `status`, `forward_ms` (the control-plane
+  round trip: for a create that includes the CR write and the readiness wait),
+  `write_ms` and `bytes` (writing the response to the client, including a
+  streamed runtime body; on a failed forward these cover the error envelope
+  write), and `write_error` when the client write failed. A
+  client-observed hang attributes to a leg from this line alone: a huge
+  `forward_ms` is the control plane, a huge `write_ms` is the response path or
+  the client, and a REQUEST with an entry line but no done line is still stuck
+  between the two.
 - Is `CanaryDown` also firing? Then the full user path is broken, not one op.
 - Split by op in the logs: create-only failures point at capacity or the
   controller; runtime-only failures point at forkd/vsock.
