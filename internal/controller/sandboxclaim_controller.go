@@ -162,6 +162,10 @@ type SandboxReconciler struct {
 	// PrepareRestore passes --prepare-restore so a dormant pod also loads its snapshot
 	// and resumes its guest before any claim arrives. Requires PrepareEgressLink.
 	PrepareRestore bool
+	// PrepareKernelPrefault passes --prepare-kernel-prefault so a pre-restored dormant
+	// pod also warms the run_code kernel's working set with the inert warm cell.
+	// Requires PrepareRestore. Fails open in the pod.
+	PrepareKernelPrefault bool
 
 	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
 	// Nil defaults to SpawnVMOnHusk; tests inject a fake.
