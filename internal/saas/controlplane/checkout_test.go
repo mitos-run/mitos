@@ -240,6 +240,9 @@ func TestRefillFillsToFloorAndStopsAtIt(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		stop := flipToReadyWhenCreatedInNs(t, c, "mitos", "10.0.0.5:9091", "tok-refill")
+		// The keepalive is exercised by the checkout_keepalive tests; here it
+		// must not dial the fake endpoints, so warming is a no-op.
+		cp.checkout.warm = noopWarm
 		cp.checkout.reconcilePool(context.Background(), "python")
 		stop()
 	}
@@ -293,6 +296,9 @@ func TestRefillBacksOffAfterFailure(t *testing.T) {
 		WithSingleTenantNamespace("mitos"),
 		WithCheckout(CheckoutConfig{Pools: []string{"python"}, Floor: 1, Cap: 2, MaxAge: 10 * time.Minute}))
 
+	// The keepalive is exercised by the checkout_keepalive tests; here it
+	// must not dial the fake endpoints, so warming is a no-op.
+	cp.checkout.warm = noopWarm
 	cp.checkout.reconcilePool(context.Background(), "python")
 	if n := creates.Load(); n != 1 {
 		t.Fatalf("first pass made %d create attempts, want 1", n)
@@ -323,6 +329,9 @@ func TestReconcileAdoptsExistingBufferedSandboxes(t *testing.T) {
 		t.Fatalf("seed secret: %v", err)
 	}
 
+	// The keepalive is exercised by the checkout_keepalive tests; here it
+	// must not dial the fake endpoints, so warming is a no-op.
+	cp.checkout.warm = noopWarm
 	cp.checkout.reconcilePool(context.Background(), "python")
 
 	got, ok := cp.checkout.pop("python")
@@ -357,6 +366,9 @@ func TestReconcilePrunesFailedBufferedSandboxes(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 
+	// The keepalive is exercised by the checkout_keepalive tests; here it
+	// must not dial the fake endpoints, so warming is a no-op.
+	cp.checkout.warm = noopWarm
 	cp.checkout.reconcilePool(context.Background(), "python")
 
 	var gone v1.Sandbox
@@ -384,6 +396,9 @@ func TestReconcileReapsOverAgeBufferedSandboxes(t *testing.T) {
 	// Age is CreationTimestamp-based; step the control plane clock past MaxAge.
 	cp.now = func() time.Time { return time.Now().Add(11 * time.Minute) }
 
+	// The keepalive is exercised by the checkout_keepalive tests; here it
+	// must not dial the fake endpoints, so warming is a no-op.
+	cp.checkout.warm = noopWarm
 	cp.checkout.reconcilePool(context.Background(), "python")
 
 	var gone v1.Sandbox

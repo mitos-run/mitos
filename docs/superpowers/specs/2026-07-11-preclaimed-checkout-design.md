@@ -73,6 +73,19 @@ attribution patch.
    while buffered is dropped from the buffer at the next 15 s pass; a pop that
    races a just-died sandbox surfaces to the tenant like any post-create death
    does today. No per-pop health probe (it would re-serialize a round trip).
+9. **Keepalive: the reconcile warms stale entries with the inert run_code cell
+   and evicts any that fail it.** (Added for #903.) Measured on prod
+   (2026-07-14 discriminator on the issue): an idle guest's first run_code
+   decays to 231-350 ms within minutes, a cheap exec touch does NOT restore it,
+   and a 60 s run_code keepalive holds it at 76-110 ms. Each reconcile pass runs
+   `pass` (language python) via RunCodeStream in every cached entry whose last
+   warm is older than 60 s, authenticated with the entry's own token, bounded
+   at 15 s per call. Success refreshes the entry's warmth; failure EVICTS the
+   entry and recycles the CR, so a wedged buffered sandbox is caught at
+   keepalive time rather than at a customer's first exec (the finding-2
+   de-amplifier). The cell is never snapshotted and the guest serves no tenant
+   until checkout, so there is no snapshot-hygiene hazard; the keepalive runs
+   pre-checkout on an org-less sandbox and bills nobody.
 
 ## Data flow
 
