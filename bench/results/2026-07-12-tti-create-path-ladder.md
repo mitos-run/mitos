@@ -16,6 +16,7 @@ dies with its session.
 | B | v1.40.0 | gateway round-trip cuts (#895) | 20 | 349.0 | 191.4 | 166.4 | 20/20 |
 | B' | v1.40.0 | same, higher power | 100 | 349.9 | 190.9 | 163.1 | 96/100 |
 | C | v1.41.0 + checkout | pre-claimed checkout (#896) | 20 | 254.9 | **32.9** | 210.0 | **16/20** |
+| D | v1.42.1 prepare on | prepare-time restore + prefault (#892/#906/#911) | 100 | 329.9 | **140.2** | 188.6 | 99/100 |
 
 Full per-iteration outputs for each rung are reproducible with the harness
 invocation from the method doc
@@ -85,6 +86,40 @@ principle outranks the leaderboard. The burst-shaped fallback measurement is
 deferred to the re-enable. Net honest position after rung C: the architecture
 hits its latency target and the remaining work is an exec-leg bug plus
 instrumentation, both filed and owned.
+
+## Rung D: prepare-time restore cuts create, warm-pool decay eats the exec leg
+
+Rung D is the CLASSIC (non-checkout) path with the whole prepare-time chain on:
+the dormant husk pod restores and resumes its guest AND runs the inert warm cell
+at Prepare (#892 slice 2, #906 slice 3), so a claim pays only the fork
+handshake. Measured 2026-07-14, v1.42.1, N=100, the same 13 s paced harness as
+rungs A to C, from mitos-bench1. The bench org was granted the pro tier for the
+run (no rate-limit retries; the pacing is unchanged for comparability).
+
+**Create dropped 190.9 to 140.2 ms median**, a real ~50 ms cut, and the
+server-side stage log explains all of it: on a matched claim the husk activate
+total fell from 112.8 ms (the 2026-07-10 baseline) to 23.80 ms, with
+`vmstate_restore` 22.9 to 0.00, `guest_ready` 40.6 to 1.24, and `resume` 2.4 to
+0.00; the controller `activate_rpc` stage fell from 98 to 129 ms to 38.5 ms.
+That is the prepare-time restore doing exactly what it was built to do: the
+microVM restore and the demand fault-in are no longer on the claim.
+
+**First exec REGRESSED 163 to 188.6 ms median**, and TTI is therefore flat
+(327.2 to 329.9). The cause is #903 working-set decay, now hitting the WARM POOL
+rather than only the buffer. The prefault warms the run_code kernel ONCE at
+Prepare, but a warm husk pod sits dormant for minutes before a claim, and its
+prefaulted pages are reclaimed in that window (the 1.24 ms `guest_ready` above
+was a pod claimed seconds after a fleet recycle; a long-dormant pod's first exec
+pays the decay). The checkout buffer got a 60 s keepalive for exactly this
+(#908); the warm pool did not, so a warm-pool prefault-keepalive is the missing
+piece and is issue #913. Prepare-time restore is a genuine create-leg
+win that a decayed exec leg currently cancels on the classic path.
+
+The lever that still targets Daytona is the checkout (rung E, next): it skips the
+control-plane create cost entirely (rung C proved 32.9 ms create) AND its
+buffered pods ARE keepalive-warmed now, so both legs should land. Rung D is the
+honest record that prepare-time restore alone, without a warm-pool keepalive,
+moves cost from the create leg to the exec leg rather than off TTI.
 
 ## Peer context
 
