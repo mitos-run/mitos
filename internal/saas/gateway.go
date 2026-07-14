@@ -303,9 +303,17 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		e := apierr.Get(apierr.CodeInternal).
 			WithCause("the control plane could not service the request")
 		g.metrics.observeForwardDuration(op, e.Status, forwardDur)
-		g.logForwardDone(res.Key.ID, orgID, op, e.Status, forwardDur, 0, 0,
-			"error", "control plane forward failed")
-		g.fail(w, e)
+		// The error envelope is a client write too: time and count it through a
+		// counting writer, so a client that stalls on failures is as visible as
+		// one that stalls on successes, and emit the done line AFTER it.
+		cw := &countingResponseWriter{ResponseWriter: w}
+		writeStarted := time.Now()
+		g.fail(cw, e)
+		extra := []any{"error", "control plane forward failed"}
+		if cw.err != nil {
+			extra = append(extra, "write_error", cw.err.Error())
+		}
+		g.logForwardDone(res.Key.ID, orgID, op, e.Status, forwardDur, time.Since(writeStarted), cw.n, extra...)
 		return
 	}
 	status := resp.Status
@@ -371,6 +379,24 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		extra = append(extra, "write_error", writeErr.Error())
 	}
 	g.logForwardDone(res.Key.ID, orgID, op, status, forwardDur, time.Since(writeStarted), written, extra...)
+}
+
+// countingResponseWriter records the bytes and first error of the body writes
+// that pass through it, so the error-envelope leg of a failed forward carries
+// the same write_ms / bytes / write_error observability as a success body.
+type countingResponseWriter struct {
+	http.ResponseWriter
+	n   int64
+	err error
+}
+
+func (w *countingResponseWriter) Write(p []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(p)
+	w.n += int64(n)
+	if err != nil && w.err == nil {
+		w.err = err
+	}
+	return n, err
 }
 
 // logForwardDone emits the per-request completion line (issue #901): the same

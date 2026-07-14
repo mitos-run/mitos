@@ -119,6 +119,12 @@ func TestForwardDoneLineOnControlPlaneError(t *testing.T) {
 	if line["error"] == nil {
 		t.Errorf("a failed forward must say so on the done line: %v", line)
 	}
+	// The error envelope is a client write too: the done line must fire AFTER it
+	// and count its bytes, so a stalled client is visible on failures as well.
+	if got := requireNumber(t, line, "bytes"); got != float64(rec.Body.Len()) {
+		t.Errorf("bytes = %v, want the error envelope length %d", got, rec.Body.Len())
+	}
+	requireNumber(t, line, "write_ms")
 }
 
 // TestForwardDoneLineOnStreamedResponse pins the streamed (runtime proxy)

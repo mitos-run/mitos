@@ -34,7 +34,8 @@ environment-tunable.
   `gateway forward done` line with `status`, `forward_ms` (the control-plane
   round trip: for a create that includes the CR write and the readiness wait),
   `write_ms` and `bytes` (writing the response to the client, including a
-  streamed runtime body), and `write_error` when the client write failed. A
+  streamed runtime body; on a failed forward these cover the error envelope
+  write), and `write_error` when the client write failed. A
   client-observed hang attributes to a leg from this line alone: a huge
   `forward_ms` is the control plane, a huge `write_ms` is the response path or
   the client, and a REQUEST with an entry line but no done line is still stuck
