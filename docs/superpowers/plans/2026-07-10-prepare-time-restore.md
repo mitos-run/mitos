@@ -121,8 +121,11 @@ Expected activate: roughly `nft` + `handshake` + `serve_api`, i.e. ~30 ms agains
    (`TestAFailedClaimPolicyRebuildsTheLinkOnRetry`). Worth roughly 20 ms, and a
    prerequisite for slice 2 because Firecracker requires the tap to exist at restore time.
    Requires `--multi-vm-fork`; the controller refuses the combination at startup and the pod
-   builder refuses it again. Still to do: measure it on prod behind a one-pod canary, then a
-   KVM gate. Until both, the threat model does NOT call this path verified.
+   builder refuses it again. The slice-2 KVM gate exercises this link bring-up end to end
+   on a real Firecracker (the restore binds the baked NIC to the tap Prepare created), so
+   the dormant-tap half is KVM-covered; the default-deny policy CONTENT on real nftables
+   is still pinned only by the unit-level command tests. Still to do: measure it on prod
+   behind a one-pod canary. Until then, the threat model does NOT call this path verified.
 2. **Restore at Prepare.** DONE, default off. Behind `--husk-prepare-restore` (which
    requires `--husk-prepare-egress-link`), `prepareRestoreDefaultVM` runs
    `setLiveCowMemSource` / `LoadSnapshotWithOverrides` / `PatchDrive` / `Resume` /
@@ -133,8 +136,14 @@ Expected activate: roughly `nft` + `handshake` + `serve_api`, i.e. ~30 ms agains
    resumed guest cannot be reloaded). Co-located fork children and the pre-warm child are
    never pre-restored. Pinned by `TestPrepareRestoresAndResumesTheGuestWhileDormant`,
    `TestPrepareRestoreIsOptIn`, `TestActivateFailsClosedOnASnapshotMismatchAfterPrepareRestore`,
-   `TestBuildHuskPodThreadsPrepareRestore`. Still to do: a KVM gate and a one-pod prod
-   canary before it is called verified.
+   `TestBuildHuskPodThreadsPrepareRestore`. KVM gate: the firecracker-test step
+   "Prepare-time restore, dormant resume then fast-path activate and fail-closed
+   mismatch" proves, against a real Firecracker and the engine-built networked
+   template, that the dormant restore happens at Prepare (stderr marker), that
+   activate skips the load (vmstate_restore ~0) and a real exec works through the
+   pre-restored guest, and that a mismatched snapshot dir is refused with no side
+   effects (the same stub then activates the right snapshot fine). Still to do: a
+   one-pod prod canary before it is called verified.
 3. **Prefault the kernel.** Run the inert warm cell at Prepare so the first tenant
    `run_code` does not fault the ipykernel's pages in.
 
