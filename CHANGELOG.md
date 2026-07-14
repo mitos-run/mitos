@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.42.0](https://github.com/mitos-run/mitos/compare/v1.41.0...v1.42.0) (2026-07-14)
+
+
+### Features
+
+* **chart:** first-class values for the husk prepare-time flags ([#907](https://github.com/mitos-run/mitos/issues/907)) ([a6f1e38](https://github.com/mitos-run/mitos/commit/a6f1e38d9f8551b3f56353f84419ad8708535505))
+* **chart:** gateway.orgTiers renders the operator tier grants ([#910](https://github.com/mitos-run/mitos/issues/910)) ([6bd72d0](https://github.com/mitos-run/mitos/commit/6bd72d04334594f0f9bf8d37a829526105f4b17b))
+* **husk:** prefault the run_code kernel at Prepare so the first tenant cell arrives warm ([#906](https://github.com/mitos-run/mitos/issues/906)) ([81fa8f3](https://github.com/mitos-run/mitos/commit/81fa8f3edb4305267ee47b03b3cd8ef2dda6ab64))
+
+
+### Bug Fixes
+
+* **saas:** gateway forward completion line carries status, per-leg durations, and write errors ([#905](https://github.com/mitos-run/mitos/issues/905)) ([e389322](https://github.com/mitos-run/mitos/commit/e3893228192716e315a10749df6ddca828340432))
+* **saas:** keepalive the checkout buffer with the inert cell; evict entries that fail it ([#908](https://github.com/mitos-run/mitos/issues/908)) ([c5a74b7](https://github.com/mitos-run/mitos/commit/c5a74b73080ba7f73474b423f4c25f0a1ec5e631))
+
 ## [1.41.0](https://github.com/mitos-run/mitos/compare/v1.40.0...v1.41.0) (2026-07-12)
 
 
