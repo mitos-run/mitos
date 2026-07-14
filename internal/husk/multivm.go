@@ -453,9 +453,28 @@ func (s *Stub) prepareRestoreDefaultVM(ctx context.Context, id vmID, inst *vmIns
 	if err := inst.vm.Resume(); err != nil {
 		return fmt.Errorf("husk: prepare-restore resume vm %q: %w", id, err)
 	}
-	conn, err := s.ready(ctx, inst.vm.VsockHostPath(firecracker.VsockRelPath), s.readyTimeout)
+	vsockPath := inst.vm.VsockHostPath(firecracker.VsockRelPath)
+	conn, err := s.ready(ctx, vsockPath, s.readyTimeout)
 	if err != nil {
 		return fmt.Errorf("husk: prepare-restore guest not ready for vm %q: %w", id, err)
+	}
+	// Kernel prefault (slice 3, opt-in): run the template build's inert warm cell
+	// against the dormant guest, reusing the readiness conn, so the run_code
+	// kernel's working set is resident before the first tenant cell. FAIL OPEN: a
+	// template without the kernel (a non-python pool) is normal; the pod still
+	// goes dormant and the first run_code just faults lazily as before.
+	if s.prepareKernelPrefault {
+		prefault := s.prefaultKernel
+		if prefault == nil {
+			prefault = prefaultKernelGRPC
+		}
+		pfStart := time.Now()
+		if perr := prefault(ctx, conn, vsockPath); perr != nil {
+			fmt.Fprintf(os.Stderr, "husk: prepare-prefault vm %q failed (%v); continuing without a warm kernel, the first run_code starts it lazily\n", id, perr)
+		} else {
+			fmt.Fprintf(os.Stderr, "husk: prepare-prefault vm %q warmed the run_code kernel in %.2fms\n",
+				id, float64(time.Since(pfStart).Microseconds())/1000.0)
+		}
 	}
 	if conn != nil {
 		_ = conn.Close() //nolint:errcheck // do not hold a vsock conn across dormancy

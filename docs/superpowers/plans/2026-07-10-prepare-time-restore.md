@@ -144,8 +144,20 @@ Expected activate: roughly `nft` + `handshake` + `serve_api`, i.e. ~30 ms agains
    pre-restored guest, and that a mismatched snapshot dir is refused with no side
    effects (the same stub then activates the right snapshot fine). Still to do: a
    one-pod prod canary before it is called verified.
-3. **Prefault the kernel.** Run the inert warm cell at Prepare so the first tenant
-   `run_code` does not fault the ipykernel's pages in.
+3. **Prefault the kernel.** DONE, default off. Behind `--husk-prepare-kernel-prefault`
+   (which requires `--husk-prepare-restore`), `prepareRestoreDefaultVM` runs the template
+   build's inert warm cell (`firecracker.WarmKernelCode`, exported so the one definition
+   is shared and the inert-cell hygiene cannot drift) against the dormant pre-restored
+   guest, reusing the readiness connection, so the first tenant `run_code` does not fault
+   the ipykernel's pages in. FAILS OPEN: a template without the kernel (a non-python
+   pool) logs and continues, so the flag can never crash-loop a pod. Pinned by
+   `TestPrepareRunsTheKernelPrefaultWhileDormant`, `TestPrepareKernelPrefaultIsOptIn`,
+   `TestPrepareKernelPrefaultFailsOpen`, `TestPrepareKernelPrefaultRequiresPrepareRestore`,
+   `TestBuildHuskPodThreadsPrepareKernelPrefault`. Still to do: extend the slice-2 KVM
+   gate with the prefault wiring proof once it lands, and the one-pod prod canary; the
+   prefault's actual first-exec effect is measured there (target: ~70 ms off first exec,
+   and the #903 idle decay countered for buffered sandboxes). A prefaulted dormant VM
+   holds MORE resident memory than the ~72 MiB restore-only figure; re-measure at canary.
 
 Each slice ships with its own KVM gate in `firecracker-test`, because none of this is
 observable without `/dev/kvm` and the mitos-patched Firecracker.

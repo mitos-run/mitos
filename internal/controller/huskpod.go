@@ -209,6 +209,11 @@ type HuskPodOptions struct {
 	// default VM's snapshot and resumes its guest while dormant, leaving only the
 	// handshake on the warm-claim hot path. REQUIRES PrepareEgressLink (and MultiVM).
 	PrepareRestore bool
+	// PrepareKernelPrefault starts the stub with --prepare-kernel-prefault so a
+	// pre-restored dormant pod also runs the inert warm cell once, making the
+	// run_code kernel's working set resident before the first tenant cell.
+	// REQUIRES PrepareRestore (and the whole chain above it). Fails open in the pod.
+	PrepareKernelPrefault bool
 	// MultiVMForkVMs is the number of ADDITIONAL fork-child VMs a multi-VM pod
 	// reserves node memory for up front (beyond the source VM), so the co-location
 	// routing has room to co-locate that many children before a fork spills to a new
@@ -590,6 +595,12 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		// at snapshot load. The stub also refuses that combination.
 		if opts.PrepareRestore {
 			args = append(args, "--prepare-restore")
+			// The kernel prefault warms the guest the dormant restore resumed, so it
+			// is emitted only inside the restore block: without a pre-restored guest
+			// there is nothing to warm.
+			if opts.PrepareKernelPrefault {
+				args = append(args, "--prepare-kernel-prefault")
+			}
 		}
 	}
 
@@ -1421,20 +1432,21 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 			}
 		}
 		opts := HuskPodOptions{
-			MultiVM:            r.MultiVM,
-			LiveCowFork:        r.LiveCowFork,
-			LiveCowChildImport: r.LiveCowChildImport,
-			PrewarmChild:       r.PrewarmChild,
-			PrepareEgressLink:  r.PrepareEgressLink,
-			PrepareRestore:     r.PrepareRestore,
-			MultiVMForkVMs:     r.MultiVMForkVMs,
-			StubImage:          r.HuskStubImage,
-			DNSUpstream:        r.HuskDNSUpstream,
-			KVMResourceName:    r.KVMResourceName,
-			SnapshotID:         poolTemplateID(pool),
-			DataDir:            r.DataDir,
-			TLSSecretName:      r.HuskTLSSecretName,
-			CASecretName:       r.HuskCASecretName,
+			MultiVM:               r.MultiVM,
+			LiveCowFork:           r.LiveCowFork,
+			LiveCowChildImport:    r.LiveCowChildImport,
+			PrewarmChild:          r.PrewarmChild,
+			PrepareEgressLink:     r.PrepareEgressLink,
+			PrepareRestore:        r.PrepareRestore,
+			PrepareKernelPrefault: r.PrepareKernelPrefault,
+			MultiVMForkVMs:        r.MultiVMForkVMs,
+			StubImage:             r.HuskStubImage,
+			DNSUpstream:           r.HuskDNSUpstream,
+			KVMResourceName:       r.KVMResourceName,
+			SnapshotID:            poolTemplateID(pool),
+			DataDir:               r.DataDir,
+			TLSSecretName:         r.HuskTLSSecretName,
+			CASecretName:          r.HuskCASecretName,
 			// dedicatedNodes (#172): pin this pool's husk pods to the tenant's
 			// dedicated node set. Merged onto the KVM nodeSelector + snapshot-node
 			// affinity below.
