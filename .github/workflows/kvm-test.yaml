@@ -2612,6 +2612,28 @@ jobs:
           read -r CNT MIN P50 P99 MAX <<< "$STATS"
           echo "husk-stub activation latency: n=$CNT min=${MIN}ms p50=${P50}ms p99=${P99}ms max=${MAX}ms"
 
+          # GROSS activation-latency regression gate. This step's activate is the
+          # full LoadSnapshot + resume + guest-ready for the 256 MiB bench snapshot,
+          # and it is remarkably stable on this shared runner: P50 ~54 ms, max ~58 ms
+          # across recent main runs. The <=10 ms bare-metal target is NOT asserted
+          # here (shared CI is not bare metal, see below); what IS asserted is a
+          # GENEROUS ceiling so a gross regression fails the build instead of only
+          # showing in the summary. 200 ms is ~3.7x the observed P50 with wide margin
+          # against nested-KVM noise on a cold runner, so it catches the class of
+          # break that matters (the restore silently returning to a slow path, a 2-3x
+          # slowdown) without flaking on ordinary variance. The SUBTLE +20 ms class
+          # (which rode a flag-off path in v1.40.0) is caught by the in-region prod
+          # TTI canary (.github/workflows/tti-canary.yaml), not here; and the
+          # prepare-time restore fast path is asserted tightly (vmstate_restore < 10 ms)
+          # by the "Prepare-time restore" step above. Together: mechanism gate +
+          # gross-CI gate + subtle prod gate.
+          ACTIVATE_CEILING_MS=200
+          if awk "BEGIN{exit !(${P50} > ${ACTIVATE_CEILING_MS})}"; then
+            echo "HUSK-STUB-FAILED: activation P50 ${P50}ms exceeds the ${ACTIVATE_CEILING_MS}ms gross-regression ceiling; the warm-claim activate has regressed materially (restore back on the hot path, or a 2-3x slowdown). Investigate before merge; do NOT raise the ceiling to make this green."
+            exit 1
+          fi
+          echo "activation P50 ${P50}ms within the ${ACTIVATE_CEILING_MS}ms gross-regression ceiling"
+
           {
             echo ""
             echo "## Husk-stub in-place activation latency (shared-CI-class, NOT bare metal)"

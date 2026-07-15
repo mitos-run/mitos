@@ -1,0 +1,6 @@
+{
+  "_comment": "Regression thresholds for the nightly hosted TTI canary (.github/workflows/tti-canary.yaml). The canary runs bench/tti-latency.py against api.mitos.run from the in-region self-hosted bench runner (mitos-bench1) and fails, opening a tracking issue, when a threshold is breached. Raise a threshold ONLY with a fresh ladder measurement that justifies it (bench/results/), never to make a red canary green.",
+  "tti_p50_ceiling_ms": 125,
+  "min_success_rate_pct": 95,
+  "provenance": "Baseline: rung E measured TTI P50 96.8 ms, 100/100 success (bench/results/2026-07-12-tti-create-path-ladder.md, v1.42.1, 2026-07-14). The 125 ms ceiling catches a ~29 percent regression (still under Daytona 136.2) with margin for the harness's observed ~6 percent run-to-run drift; it is deliberately tighter than a shared-CI gate because this runs on stable in-region bare metal. The success gate guards the read-timeout stall class that #903/#908 fixed."
+}
