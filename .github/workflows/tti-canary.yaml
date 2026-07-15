@@ -11,6 +11,12 @@ name: TTI canary
 #
 # It exercises PROD (creates and terminates real sandboxes on the benchmark org,
 # which holds a headroom tier), so it is scheduled off-peak and paced.
+#
+# The measurement job is READ-ONLY (no issues token, checkout credentials not
+# persisted): it runs the benchmark harness, which is the untrusted-input
+# surface on the self-hosted runner. A SEPARATE dependent job holds the
+# issues:write token and runs only github-script (no harness), so the write
+# token is never present while the benchmark executes.
 
 on:
   schedule:
@@ -18,13 +24,12 @@ on:
   workflow_dispatch:
     inputs:
       iterations:
-        description: iterations to run
+        description: iterations to run (integer)
         default: "40"
         required: false
 
 permissions:
   contents: read
-  issues: write
 
 concurrency:
   group: tti-canary
@@ -34,44 +39,83 @@ jobs:
   canary:
     runs-on: [self-hosted, bench, kvm]
     timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      regressed: ${{ steps.gate.outputs.regressed }}
+      verdict: ${{ steps.gate.outputs.verdict }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
-      - name: Run the hosted TTI harness against api.mitos.run
-        id: run
+      - name: Run the harness and compute the verdict
+        id: gate
         env:
           MITOS_API_KEY: ${{ secrets.MITOS_BENCH_API_KEY }}
+          # Passed through env, NOT interpolated into the script body, so a
+          # crafted dispatch input cannot break out of the shell on the runner.
+          ITERATIONS: ${{ github.event.inputs.iterations || '40' }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           if [ -z "${MITOS_API_KEY:-}" ]; then
             echo "MITOS_BENCH_API_KEY secret is not set; cannot run the canary" >&2
             exit 2
           fi
-          N="${{ github.event.inputs.iterations || '40' }}"
+          # Reject a non-integer iteration count before it reaches the harness.
+          case "$ITERATIONS" in
+            ''|*[!0-9]*)
+              echo "iterations must be a positive integer, got '$ITERATIONS'" >&2
+              exit 2
+              ;;
+          esac
+
           python3 -m venv /tmp/tti-canary-venv
           /tmp/tti-canary-venv/bin/pip install --quiet --upgrade pip
           # The harness imports `mitos`; install the SDK from this checkout so
           # the client is pinned to the repo, not to whatever is on the box.
           /tmp/tti-canary-venv/bin/pip install --quiet ./sdk/python
-          # Paced identically to the ladder (13 s) for comparability with
-          # bench/results; the benchmark org's tier removes rate-limit retries.
-          /tmp/tti-canary-venv/bin/python3 -u bench/tti-latency.py "$N" --interval 13 | tee /tmp/tti-canary.out
 
-      - name: Verdict against the baseline
-        id: verdict
-        run: |
+          # Capture the harness status instead of letting it abort the step, so
+          # the verdict still runs (and the tracking issue still opens) on a
+          # harness or parse failure. Paced identically to the ladder (13 s).
           set +e
+          /tmp/tti-canary-venv/bin/python3 -u bench/tti-latency.py "$ITERATIONS" --interval 13 | tee /tmp/tti-canary.out
+          HARNESS_RC=${PIPESTATUS[0]}
           python3 bench/canary-check.py /tmp/tti-canary.out --baseline bench/canary-baseline.json | tee /tmp/tti-verdict.txt
-          echo "code=$?" >> "$GITHUB_OUTPUT"
+          VERDICT_RC=$?
+          set -e
+
+          if [ "$HARNESS_RC" -ne 0 ]; then
+            echo "harness exited $HARNESS_RC; treating as a regression signal" | tee -a /tmp/tti-verdict.txt
+          fi
+
           {
-            echo "verdict<<EOF"
+            if [ "$HARNESS_RC" -ne 0 ] || [ "$VERDICT_RC" -ne 0 ]; then
+              echo "regressed=true"
+            else
+              echo "regressed=false"
+            fi
+            echo "verdict<<VERDICT_EOF"
             cat /tmp/tti-verdict.txt
-            echo "EOF"
+            echo "VERDICT_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Open or update the regression issue
-        if: steps.verdict.outputs.code != '0'
+  # Separate job: holds the issues:write token and runs ONLY github-script (no
+  # benchmark, no checkout of untrusted content), so the write token is never in
+  # scope while the harness executes on the self-hosted runner.
+  report:
+    needs: canary
+    if: always() && needs.canary.outputs.regressed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update the regression issue and fail the run
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
+        env:
+          VERDICT: ${{ needs.canary.outputs.verdict }}
         with:
           script: |
             const verdict = process.env.VERDICT || 'canary verdict unavailable';
@@ -79,25 +123,21 @@ jobs:
             const marker = '<!-- tti-canary-tracking -->';
             const title = 'TTI canary regression: hosted P50 or success rate breached the baseline';
             const body = [
-              marker,
-              '',
-              `The nightly hosted TTI canary breached its baseline (bench/canary-baseline.json).`,
-              '',
-              '```',
-              verdict,
-              '```',
-              '',
-              `Run: ${runUrl}`,
-              '',
+              marker, '',
+              'The nightly hosted TTI canary breached its baseline (bench/canary-baseline.json).',
+              '', '```', verdict, '```', '',
+              `Run: ${runUrl}`, '',
               'This is the in-region measurement from mitos-bench1 (the ladder harness).',
               'Investigate the regression; do NOT raise the baseline to silence this without a',
               'fresh ladder measurement in bench/results/ that justifies it.',
             ].join('\n');
-            const existing = await github.rest.issues.listForRepo({
+            // Paginate all labeled issues and skip pull requests (listForRepo
+            // returns both), so an older tracker is never missed and duplicated.
+            const items = await github.paginate(github.rest.issues.listForRepo, {
               owner: context.repo.owner, repo: context.repo.repo,
-              state: 'open', labels: 'tti-canary', per_page: 20,
+              state: 'open', labels: 'tti-canary', per_page: 100,
             });
-            const hit = existing.data.find(i => (i.body || '').includes(marker));
+            const hit = items.find(i => !i.pull_request && (i.body || '').includes(marker));
             if (hit) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner, repo: context.repo.repo,
@@ -109,11 +149,4 @@ jobs:
                 title, body, labels: ['tti-canary', 'performance'],
               });
             }
-        env:
-          VERDICT: ${{ steps.verdict.outputs.verdict }}
-
-      - name: Fail the run on regression
-        if: steps.verdict.outputs.code != '0'
-        run: |
-          echo "canary regression, see the tracking issue" >&2
-          exit 1
+            core.setFailed('TTI canary regression, see the tracking issue');
