@@ -24,6 +24,7 @@ pub mod kill;
 pub mod netlink;
 pub mod pty;
 pub mod mount;
+pub mod rlimit;
 pub mod signal;
 pub mod vsock;
 
