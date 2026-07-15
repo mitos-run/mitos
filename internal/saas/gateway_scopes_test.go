@@ -128,26 +128,29 @@ func TestGatewayReadScopeIsDeniedEveryMutation(t *testing.T) {
 	}
 }
 
-// TestGatewayLegacyScopelessKeyRetainsFullAccess is the gateway-level
-// backward-compatibility proof: a key persisted with NO scopes (a pre-scopes
-// record) still reaches every op through the gateway exactly as before.
-func TestGatewayLegacyScopelessKeyRetainsFullAccess(t *testing.T) {
+// TestGatewayScopelessKeyIsDeniedEverywhere is the gateway-level fail-closed
+// proof: a key persisted with NO scopes reaches NOTHING through the gateway. An
+// empty scope set is an inert key, not a legacy full-access one (the scopes
+// column is NOT NULL DEFAULT '{}' from the first migration), so promoting it to
+// full access would be a silent privilege escalation. The gateway already denies
+// such a key today; this pins that it stays denied.
+func TestGatewayScopelessKeyIsDeniedEverywhere(t *testing.T) {
 	store := NewMemStore()
 	newTestOrg(t, store, "org-a")
 	keys := NewKeyService(store)
 	// Mint a normal key, then rewrite the stored record to carry NO scopes,
-	// simulating a legacy key persisted before the scope model existed.
+	// simulating an inert empty-scope key.
 	created, err := keys.CreateKey(context.Background(), CreateKeyRequest{OrgID: "org-a", Scopes: []string{ScopeReadOnly}})
 	if err != nil {
 		t.Fatalf("CreateKey: %v", err)
 	}
-	legacy := created.Record
-	legacy.Scopes = nil
-	store.keys[legacy.ID] = legacy // in-package test can reach the map directly.
+	scopeless := created.Record
+	scopeless.Scopes = nil
+	store.keys[scopeless.ID] = scopeless // in-package test can reach the map directly.
 
 	cp := &fakeControlPlane{respBody: []byte(`{"ok":true}`)}
 	gw := NewGateway(keys, nil, cp, nil)
-	// Every op class must succeed for the scopeless legacy key.
+	// Every op class must be FORBIDDEN for the scopeless key.
 	ops := []struct{ method, path, body string }{
 		{http.MethodGet, "/v1/sandboxes", ""},
 		{http.MethodPost, "/v1/sandboxes", `{"pool":"default"}`},
@@ -157,8 +160,8 @@ func TestGatewayLegacyScopelessKeyRetainsFullAccess(t *testing.T) {
 	}
 	for _, o := range ops {
 		rec := doRequest(gw, o.method, o.path, created.RawKey, o.body)
-		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
-			t.Errorf("legacy scopeless key %s %s: status = %d, body = %s", o.method, o.path, rec.Code, rec.Body.String())
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("scopeless key %s %s: status = %d (want 403), body = %s", o.method, o.path, rec.Code, rec.Body.String())
 		}
 	}
 }

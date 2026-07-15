@@ -160,13 +160,15 @@ func (s *KeyService) CreateKey(ctx context.Context, req CreateKeyRequest) (Creat
 		return CreatedKey{}, fmt.Errorf("create key: resolve org: %w", err)
 	}
 
-	// Resolve the scope set: an empty request defaults to FULL scopes (a new key
-	// is full-access unless scopes are named, matching the backward-compatible
-	// posture); a named set is validated against the known vocabulary so a typo
-	// cannot silently mint a key that grants nothing.
+	// Resolve the scope set: an empty request defaults to the non-admin resource
+	// set (read, execute, lifecycle), NOT full scopes. Minting is a routine action
+	// any org member may perform, so the default must never include admin: an
+	// operator who wants a management key asks for `admin` by name. A named set is
+	// validated against the known vocabulary so a typo cannot silently mint a key
+	// that grants nothing.
 	scopes := req.Scopes
 	if len(scopes) == 0 {
-		scopes = FullScopes()
+		scopes = DefaultScopes()
 	} else {
 		for _, sc := range scopes {
 			if !knownScopes[sc] {

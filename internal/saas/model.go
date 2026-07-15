@@ -183,16 +183,18 @@ func (k ApiKey) IsRevoked() bool {
 }
 
 // HasScope reports whether the key satisfies the named required scope, applying
-// the scope-implication graph (scopeSatisfies). A key with NO scopes recorded is
-// a legacy full-access key and satisfies EVERY scope (the #784 backward-compat
-// rule): this preserves the pre-scopes behavior for records minted before scopes
-// existed. Otherwise the key satisfies the requirement if any scope it holds
-// satisfies it. The reverse of the implication never holds: a read-only key
-// never satisfies a mutating requirement.
+// the scope-implication graph (scopeSatisfies). A key with NO scopes recorded
+// FAILS CLOSED: it satisfies nothing. There are no genuine pre-scopes records to
+// preserve (the api_keys.scopes column is NOT NULL DEFAULT '{}' from the first
+// migration, and scope enforcement shipped in the same commit that introduced
+// api keys), so an empty scope set is not a legacy full-access key; it is a key
+// that grants nothing, exactly as the gateway already treats it. Defaulting an
+// empty set to full access would silently turn every inert empty-scope key
+// (which the console form can mint) into an admin credential. A key satisfies a
+// requirement only when a scope it explicitly holds satisfies it; the reverse of
+// the implication never holds (a read-only key never satisfies a mutating
+// requirement).
 func (k ApiKey) HasScope(required string) bool {
-	if len(k.Scopes) == 0 {
-		return true
-	}
 	for _, held := range k.Scopes {
 		if scopeSatisfies(held, required) {
 			return true
@@ -268,10 +270,21 @@ var knownScopes = map[string]bool{
 	ScopeSandboxes: true,
 }
 
-// FullScopes returns the full scope set a key defaults to when none is named at
-// mint. It is the explicit union of the resource scopes plus admin, so a default
-// key is full-access and its listing shows the concrete scopes. The legacy
-// ScopeSandboxes is deliberately omitted: new keys carry the finer scopes.
+// FullScopes returns the full scope set, the union of the resource scopes plus
+// admin. It is the closed vocabulary a named scope is validated against and the
+// admin-inclusive set an operator must ASK for explicitly; it is NOT the mint
+// default (see DefaultScopes). The legacy ScopeSandboxes is deliberately
+// omitted: new keys carry the finer scopes.
 func FullScopes() []string {
 	return []string{ScopeReadOnly, ScopeExecute, ScopeLifecycle, ScopeAdmin}
+}
+
+// DefaultScopes returns the scope set a key is minted with when the request
+// names none. It is the resource set (read, execute, lifecycle) and DELIBERATELY
+// EXCLUDES admin: minting is a routine action any org member may perform, so the
+// default must not hand out a management credential. It matches the CLI's own
+// `--scopes` default; admin is granted only when explicitly requested. A caller
+// who wants a management key asks for `admin` by name.
+func DefaultScopes() []string {
+	return []string{ScopeReadOnly, ScopeExecute, ScopeLifecycle}
 }

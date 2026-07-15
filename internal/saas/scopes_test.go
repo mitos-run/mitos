@@ -6,23 +6,25 @@ import (
 	"testing"
 )
 
-// TestLegacyScopelessKeyHasFullAccess is the MANDATORY backward-compatibility
-// property: a key stored with NO scopes recorded (a key minted before scopes
-// existed, or persisted with an empty scope set) behaves exactly as it did
-// before scoped keys: full access, every scope satisfied. Nothing about the
-// scoped-key work may lock an existing caller out of the surface it can reach
-// today.
-func TestLegacyScopelessKeyHasFullAccess(t *testing.T) {
-	legacy := ApiKey{ID: "k1", OrgID: "org-a"} // Scopes is nil: a legacy record.
+// TestScopelessKeyFailsClosed is the MANDATORY security property: a key stored
+// with NO scopes recorded satisfies NOTHING. There are no genuine pre-scopes
+// records to preserve (api_keys.scopes is NOT NULL DEFAULT '{}' from the first
+// migration and enforcement shipped with the api-key feature), so an empty scope
+// set is an inert key, not a legacy full-access one. Defaulting it to full access
+// would silently promote every empty-scope key (which the console can mint) to an
+// admin credential. Failing closed matches how the gateway already treats such a
+// key today.
+func TestScopelessKeyFailsClosed(t *testing.T) {
+	scopeless := ApiKey{ID: "k1", OrgID: "org-a"} // Scopes is nil.
 	for _, required := range []string{ScopeReadOnly, ScopeExecute, ScopeLifecycle, ScopeAdmin, ScopeSandboxes} {
-		if !legacy.HasScope(required) {
-			t.Errorf("a scopeless (legacy) key must satisfy every scope; missing %q", required)
+		if scopeless.HasScope(required) {
+			t.Errorf("a scopeless key must satisfy NOTHING; it satisfied %q (fail-open)", required)
 		}
 	}
 	// An empty (non-nil) slice is the same case.
-	legacyEmpty := ApiKey{ID: "k2", OrgID: "org-a", Scopes: []string{}}
-	if !legacyEmpty.HasScope(ScopeLifecycle) {
-		t.Error("a key with an empty scope slice must also be full-access")
+	empty := ApiKey{ID: "k2", OrgID: "org-a", Scopes: []string{}}
+	if empty.HasScope(ScopeLifecycle) || empty.HasScope(ScopeAdmin) {
+		t.Error("a key with an empty scope slice must also fail closed")
 	}
 }
 
@@ -82,11 +84,12 @@ func TestScopeImplications(t *testing.T) {
 	}
 }
 
-// TestCreateKeyDefaultsToFullScopes: a key minted with NO scopes at mint time
-// defaults to the full scope set, matching the requirement that new keys are
-// full-access unless scopes are specified. The persisted record carries the
-// explicit full scopes (so listings show them), and it verifies for every scope.
-func TestCreateKeyDefaultsToFullScopes(t *testing.T) {
+// TestCreateKeyDefaultsToNonAdminScopes: a key minted with NO scopes at mint
+// time defaults to the resource set (read, execute, lifecycle) and MUST NOT carry
+// admin. Minting is routine, so the default must never hand out a management
+// credential; admin is granted only when explicitly requested. The persisted
+// record carries the explicit default scopes so listings show them.
+func TestCreateKeyDefaultsToNonAdminScopes(t *testing.T) {
 	store := NewMemStore()
 	newTestOrg(t, store, "org-a")
 	svc := NewKeyService(store)
@@ -94,13 +97,29 @@ func TestCreateKeyDefaultsToFullScopes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateKey: %v", err)
 	}
-	if len(created.Record.Scopes) == 0 {
-		t.Fatal("a key minted without scopes must persist the explicit full scope set")
-	}
-	for _, s := range []string{ScopeReadOnly, ScopeExecute, ScopeLifecycle, ScopeAdmin} {
+	for _, s := range []string{ScopeReadOnly, ScopeExecute, ScopeLifecycle} {
 		if _, err := svc.Verify(context.Background(), created.RawKey, s); err != nil {
-			t.Errorf("a default (full) key must satisfy %q, got %v", s, err)
+			t.Errorf("a default key must satisfy the resource scope %q, got %v", s, err)
 		}
+	}
+	// The load-bearing assertion: the default is NOT an admin credential.
+	if _, err := svc.Verify(context.Background(), created.RawKey, ScopeAdmin); err == nil {
+		t.Error("a key minted with no scopes must NOT satisfy admin; the default must exclude the management scope")
+	}
+}
+
+// TestCreateKeyAdminRequiresExplicitRequest: admin is reachable, but only when
+// asked for by name, so an operator can still mint a management key deliberately.
+func TestCreateKeyAdminRequiresExplicitRequest(t *testing.T) {
+	store := NewMemStore()
+	newTestOrg(t, store, "org-a")
+	svc := NewKeyService(store)
+	created, err := svc.CreateKey(context.Background(), CreateKeyRequest{OrgID: "org-a", Name: "mgmt", Scopes: []string{ScopeAdmin}})
+	if err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+	if _, err := svc.Verify(context.Background(), created.RawKey, ScopeAdmin); err != nil {
+		t.Errorf("an explicitly admin-scoped key must satisfy admin, got %v", err)
 	}
 }
 

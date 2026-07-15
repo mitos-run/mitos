@@ -75,10 +75,10 @@ organization B's resources. This is enforced at three layers, each unit-tested:
   and a key without the required scope (`TestVerifyRejectsWrongScope`).
 - A key for org A resolves to org A and only org A
   (`TestOrgAKeyCannotResolveOrgB`).
-- Scopes are enforced with an implication graph and are backward compatible: a
-  read-only key is refused every mutation, an execute key is refused create, a
-  lifecycle key is refused in-sandbox exec, and a legacy scopeless key keeps full
-  access (`internal/saas/scopes_test.go`, `internal/saas/gateway_scopes_test.go`).
+- Scopes are enforced with an implication graph and fail closed: a read-only key
+  is refused every mutation, an execute key is refused create, a lifecycle key is
+  refused in-sandbox exec, and a scopeless key is denied everything
+  (`internal/saas/scopes_test.go`, `internal/saas/gateway_scopes_test.go`).
 - The pepper participates in the hash, so a store dump from one deployment cannot
   be replayed against another (`TestSaltChangesHash`).
 
@@ -130,14 +130,19 @@ Operation to required-scope map enforced at the gateway:
 | `sandbox.create`, `sandbox.fork`, `sandbox.terminate`, `sandbox.pause`, `sandbox.resume`, `template.ensure` | `lifecycle` |
 | any unmapped op | `lifecycle` (fail closed) |
 
-Backward compatibility (mandatory):
+Fail-closed posture (mandatory):
 
-- A key stored with NO scopes recorded is a legacy full-access key and satisfies
-  EVERY scope, so an existing caller is never locked out
-  (`TestLegacyScopelessKeyHasFullAccess`, `TestGatewayLegacyScopelessKeyRetainsFullAccess`).
-- A newly minted key defaults to the full scope set when none is named at mint
-  (`CreateKey` calls `FullScopes()`; `TestCreateKeyDefaultsToFullScopes`), so
-  existing tooling that mints without scopes still gets a full key.
+- A key stored with NO scopes recorded satisfies NOTHING and is denied everywhere
+  (`TestScopelessKeyFailsClosed`, `TestGatewayScopelessKeyIsDeniedEverywhere`).
+  There are no genuine pre-scopes records to preserve (the `scopes` column is
+  `NOT NULL DEFAULT '{}'` from the first migration), so an empty scope set is an
+  inert key, not a full-access one; defaulting it to full access would silently
+  escalate every empty-scope key the console can mint to admin.
+- A newly minted key defaults to the NON-ADMIN resource set (read, execute,
+  lifecycle) when none is named at mint (`CreateKey` calls `DefaultScopes()`,
+  matching the CLI default; `TestCreateKeyDefaultsToNonAdminScopes`). Minting is a
+  routine member action, so the default never includes admin; `admin` is granted
+  only when requested by name (`TestCreateKeyAdminRequiresExplicitRequest`).
 - A scope outside the known vocabulary is refused at mint (`ErrUnknownScope`,
   `TestCreateKeyRejectsUnknownScope`) rather than silently minting a key that
   grants nothing.
