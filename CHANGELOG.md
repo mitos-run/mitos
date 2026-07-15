@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.43.0](https://github.com/mitos-run/mitos/compare/v1.42.1...v1.43.0) (2026-07-15)
+
+
+### Features
+
+* **guest:** raise spawned-process RLIMIT_NOFILE with a sane default and env override ([#826](https://github.com/mitos-run/mitos/issues/826)) ([66f70ee](https://github.com/mitos-run/mitos/commit/66f70ee64a18da48c38006e1a1562f4900e56eec))
+* **husk:** keepalive the prefaulted warm-pool guest so its run_code kernel stays resident ([#913](https://github.com/mitos-run/mitos/issues/913)) ([#916](https://github.com/mitos-run/mitos/issues/916)) ([53c20a0](https://github.com/mitos-run/mitos/commit/53c20a01c7593be322a6edfec831492101c291ca)), closes [#903](https://github.com/mitos-run/mitos/issues/903)
+* **saas:** scoped API keys with read, execute, lifecycle, and admin grants ([#824](https://github.com/mitos-run/mitos/issues/824)) ([9fb56d3](https://github.com/mitos-run/mitos/commit/9fb56d39b98ade76a8855b48f303d8bd21708ce1))
+
 ## [1.42.1](https://github.com/mitos-run/mitos/compare/v1.42.0...v1.42.1) (2026-07-14)
 
 
