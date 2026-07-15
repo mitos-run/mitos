@@ -1,0 +1,119 @@
+name: TTI canary
+
+# Nightly hosted TTI regression guard. Runs bench/tti-latency.py against the
+# live hosted API from the IN-REGION self-hosted bench runner (mitos-bench1,
+# same region as prod), so the number is the reproducible ladder number, not an
+# internet-skewed one. If TTI P50 regresses past bench/canary-baseline.json or
+# the success rate drops, the run fails and a single tracking issue is opened or
+# updated. This catches the subtle-drift class (the v1.40.0 +20 ms activate
+# regression that rode a flag-off path and nothing caught) that the CI KVM gate,
+# on a shared runner, cannot resolve.
+#
+# It exercises PROD (creates and terminates real sandboxes on the benchmark org,
+# which holds a headroom tier), so it is scheduled off-peak and paced.
+
+on:
+  schedule:
+    - cron: "0 4 * * *"  # 04:00 UTC nightly
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: iterations to run
+        default: "40"
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: tti-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: [self-hosted, bench, kvm]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Run the hosted TTI harness against api.mitos.run
+        id: run
+        env:
+          MITOS_API_KEY: ${{ secrets.MITOS_BENCH_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MITOS_API_KEY:-}" ]; then
+            echo "MITOS_BENCH_API_KEY secret is not set; cannot run the canary" >&2
+            exit 2
+          fi
+          N="${{ github.event.inputs.iterations || '40' }}"
+          python3 -m venv /tmp/tti-canary-venv
+          /tmp/tti-canary-venv/bin/pip install --quiet --upgrade pip
+          # The harness imports `mitos`; install the SDK from this checkout so
+          # the client is pinned to the repo, not to whatever is on the box.
+          /tmp/tti-canary-venv/bin/pip install --quiet ./sdk/python
+          # Paced identically to the ladder (13 s) for comparability with
+          # bench/results; the benchmark org's tier removes rate-limit retries.
+          /tmp/tti-canary-venv/bin/python3 -u bench/tti-latency.py "$N" --interval 13 | tee /tmp/tti-canary.out
+
+      - name: Verdict against the baseline
+        id: verdict
+        run: |
+          set +e
+          python3 bench/canary-check.py /tmp/tti-canary.out --baseline bench/canary-baseline.json | tee /tmp/tti-verdict.txt
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+          {
+            echo "verdict<<EOF"
+            cat /tmp/tti-verdict.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update the regression issue
+        if: steps.verdict.outputs.code != '0'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7
+        with:
+          script: |
+            const verdict = process.env.VERDICT || 'canary verdict unavailable';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const marker = '<!-- tti-canary-tracking -->';
+            const title = 'TTI canary regression: hosted P50 or success rate breached the baseline';
+            const body = [
+              marker,
+              '',
+              `The nightly hosted TTI canary breached its baseline (bench/canary-baseline.json).`,
+              '',
+              '```',
+              verdict,
+              '```',
+              '',
+              `Run: ${runUrl}`,
+              '',
+              'This is the in-region measurement from mitos-bench1 (the ladder harness).',
+              'Investigate the regression; do NOT raise the baseline to silence this without a',
+              'fresh ladder measurement in bench/results/ that justifies it.',
+            ].join('\n');
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'tti-canary', per_page: 20,
+            });
+            const hit = existing.data.find(i => (i.body || '').includes(marker));
+            if (hit) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: hit.number, body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['tti-canary', 'performance'],
+              });
+            }
+        env:
+          VERDICT: ${{ steps.verdict.outputs.verdict }}
+
+      - name: Fail the run on regression
+        if: steps.verdict.outputs.code != '0'
+        run: |
+          echo "canary regression, see the tracking issue" >&2
+          exit 1
