@@ -29,10 +29,12 @@ func TestOpFromPathPerSandboxForkMapsToSandboxFork(t *testing.T) {
 	if got := opFromPath(http.MethodPost, "/v1/fork"); got != "sandbox.create" {
 		t.Fatalf("POST /v1/fork op = %q, want sandbox.create (template claim, unchanged)", got)
 	}
-	// A fork is a mutating lifecycle verb: it must require the sandboxes scope,
-	// never be satisfied by a read-only key.
-	if got := requiredScopeFor("sandbox.fork"); got != ScopeSandboxes {
-		t.Fatalf("requiredScopeFor(sandbox.fork) = %q, want %q", got, ScopeSandboxes)
+	// A fork is a mutating lifecycle verb: it must require the lifecycle scope,
+	// never be satisfied by a read-only or execute-only key. The legacy
+	// full-lifecycle "sandboxes" scope still satisfies it (it implies lifecycle),
+	// so an existing key keeps forking.
+	if got := requiredScopeFor("sandbox.fork"); got != ScopeLifecycle {
+		t.Fatalf("requiredScopeFor(sandbox.fork) = %q, want %q", got, ScopeLifecycle)
 	}
 }
 

@@ -247,7 +247,7 @@ func cmdAuthKeysCreate(ctx context.Context, args []string, svc AuthService, cred
 	fs := newFlagSet("auth keys create", errw)
 	name := fs.String("name", "", "human-readable name for the key")
 	org := fs.String("org", creds.DefaultOrg, "organization id (defaults to the logged-in default org)")
-	scopes := fs.String("scopes", "sandboxes", "comma-separated scopes")
+	scopes := fs.String("scopes", "read,execute,lifecycle", "comma-separated scopes: read (list/get/status), execute (exec/files inside a sandbox), lifecycle (create/fork/terminate), admin (keys/billing)")
 	ttl := fs.Duration("ttl", 0, "lifetime (0 = never expires)")
 	if err := fs.Parse(args); err != nil {
 		return 2

@@ -301,7 +301,7 @@ Conventions: typed conditions with `observedGeneration` and a published reason-c
 
 ## 7. Cross-cutting
 
-- **Auth**: declarative = K8s RBAC. Runtime = sandbox-scoped attenuated tokens (one sandbox per token; forks get strictly narrower tokens). Workspace grants are explicit, auditable objects.
+- **Auth**: declarative = K8s RBAC. Runtime = sandbox-scoped attenuated tokens (one sandbox per token; forks get strictly narrower tokens). Workspace grants are explicit, auditable objects. Hosted API keys carry mint-time SCOPES (`read`, `execute`, `lifecycle`, `admin`) enforced in the gateway authz path (issue #784), the first step toward this capability-budget model: a key can be issued with a blast radius smaller than the org (a browser-safe read key, a CI-safe execute or lifecycle key). Scopes narrowed to a named sandbox or pool (the per-resource qualifier) are the next step, tracked as a follow-up.
 - **Versioning**: CRDs follow the hermes-operator-grade written versioning + deprecation policy at v1; the Connect proto versions independently with a one-major-version compatibility window; SDKs pin proto versions; shims track their upstream's surface.
 - **Docs**: every README/SDK example executed in CI; `llms.txt` + schemas published for agent consumption; the conditions/error-code catalogues are normative documents, not wiki pages.
 - **Every number in this spec** (startup latency, budget accounting, feed lag) is benchmark-backed before it appears anywhere public.

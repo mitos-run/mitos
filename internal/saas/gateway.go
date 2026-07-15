@@ -57,15 +57,23 @@ func runtimeMethod(path string) (string, bool) {
 	}
 }
 
-// requiredScopeFor maps a public operation to the scope a key must carry. A
-// read-only op is satisfied by either scope; a mutating op requires the sandbox
-// scope. An unknown op requires the sandbox scope (fail closed).
+// requiredScopeFor maps a public operation to the scope a key must carry
+// (issue #784). Read ops need ScopeReadOnly; a runtime call (exec, files,
+// run_code inside an existing sandbox) needs ScopeExecute; every mutating
+// lifecycle verb (create, fork, terminate, pause, resume, and template.ensure)
+// needs ScopeLifecycle. An unmapped op fails CLOSED to ScopeLifecycle, the most
+// privileged resource scope, so a newly added route cannot slip through on a
+// read-only or execute-only key. The legacy full-lifecycle "sandboxes" scope
+// satisfies read, execute, and lifecycle through the implication graph, so an
+// existing key keeps reaching every op it could before.
 func requiredScopeFor(op string) string {
 	switch op {
 	case "sandbox.list", "sandbox.status", "template.list":
 		return ScopeReadOnly
+	case opRuntime:
+		return ScopeExecute
 	default:
-		return ScopeSandboxes
+		return ScopeLifecycle
 	}
 }
 
@@ -229,7 +237,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	res, err := g.keys.Verify(r.Context(), raw, scope)
 	if err != nil {
-		g.failVerify(w, err)
+		g.failVerify(w, err, op, scope)
 		return
 	}
 	orgID := res.Key.OrgID
@@ -435,10 +443,20 @@ func curatedRuntimeHeaders(in http.Header) http.Header {
 // failVerify maps a key-verification error to the public envelope. A missing,
 // malformed, or unknown key is unauthorized (a probe cannot distinguish them); an
 // expired or revoked key is unauthorized; a scope or wrong-org failure is
-// forbidden (the credential is valid but the action is not allowed for it).
-func (g *Gateway) failVerify(w http.ResponseWriter, err error) {
+// forbidden (the credential is valid but the action is not allowed for it). A
+// scope denial is LLM-legible (issue #784): its remediation names the exact
+// scope the operation needs and how to obtain a key that carries it, and its
+// context reports the op and the required scope so an agent can self-correct
+// without probing. The scope name is not a secret.
+func (g *Gateway) failVerify(w http.ResponseWriter, err error, op, requiredScope string) {
 	switch {
-	case errors.Is(err, ErrKeyScope), errors.Is(err, ErrKeyWrongOrg):
+	case errors.Is(err, ErrKeyScope):
+		g.metrics.observeAuthDenial(denialForbidden)
+		g.fail(w, apierr.Get(apierr.CodeForbidden).
+			WithCause("the api key is valid but lacks the scope required for this operation").
+			WithRemediation("Mint or use an api key that carries the "+requiredScope+" scope (create keys in the console or with mitos auth keys create; a read-only key cannot perform lifecycle or execute operations).").
+			WithContext(map[string]any{"op": op, "required_scope": requiredScope}))
+	case errors.Is(err, ErrKeyWrongOrg):
 		g.metrics.observeAuthDenial(denialForbidden)
 		g.fail(w, apierr.Get(apierr.CodeForbidden).
 			WithCause("the key is valid but not permitted for this action"))
