@@ -219,7 +219,7 @@ func main() {
 	if mockMode {
 		fmt.Println("forkd: running in mock mode")
 		mock := fork.NewMockEngine()
-		if err := mock.CreateTemplate("default", "python:3.12-slim", nil, nil, nil, nil, false, false); err != nil {
+		if err := mock.CreateTemplate("default", "python:3.12-slim", nil, nil, nil, nil, fork.CreateTemplateOpts{}); err != nil {
 			fmt.Fprintf(os.Stderr, "forkd: mock template: %v\n", err)
 			os.Exit(1)
 		}

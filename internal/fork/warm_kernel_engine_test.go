@@ -20,10 +20,10 @@ func TestCreateTemplate_ThreadsWarmKernelToBuild(t *testing.T) {
 		return nil
 	}
 
-	if err := e.CreateTemplate("warm", "/fake/rootfs.ext4", nil, nil, nil, nil, false, true); err != nil {
+	if err := e.CreateTemplate("warm", "/fake/rootfs.ext4", nil, nil, nil, nil, CreateTemplateOpts{WarmKernel: true}); err != nil {
 		t.Fatalf("CreateTemplate(warm): %v", err)
 	}
-	if err := e.CreateTemplate("cold", "/fake/rootfs.ext4", nil, nil, nil, nil, false, false); err != nil {
+	if err := e.CreateTemplate("cold", "/fake/rootfs.ext4", nil, nil, nil, nil, CreateTemplateOpts{}); err != nil {
 		t.Fatalf("CreateTemplate(cold): %v", err)
 	}
 

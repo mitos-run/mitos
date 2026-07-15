@@ -2238,7 +2238,24 @@ func logBuildPlan(image string, initCommands []string, cache templatebuild.Cache
 		image, len(plan), cached, len(plan)-cached)
 }
 
-func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources, forceRebuild bool, warmKernel bool) (retErr error) {
+// CreateTemplateOpts carries the optional booleans CreateTemplate accepts.
+// They live in a struct rather than as trailing positional parameters so a
+// caller cannot silently transpose them: CreateTemplate already takes a long
+// argument list, and two adjacent bare bools compile fine when swapped (the
+// concern CodeRabbit raised on #736). The zero value is the common case: reuse
+// an on-disk template if it verifies, and build a cold snapshot.
+type CreateTemplateOpts struct {
+	// ForceRebuild skips the reuse-or-rebuild gate (#584) and always deletes and
+	// rebuilds. The controller sets it when the template CONTENT changed (#475),
+	// because digest verification proves integrity, not content identity.
+	ForceRebuild bool
+	// WarmKernel runs one trivial run_code cell before the snapshot so forks wake
+	// with a warm code-interpreter kernel. Warmup failures fail open (the build
+	// continues cold).
+	WarmKernel bool
+}
+
+func (e *Engine) CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources, opts CreateTemplateOpts) (retErr error) {
 	// Path-traversal guard (CodeQL go/path-injection): id becomes a host path
 	// component (templates/<id>/...) through recordTemplateDigest and verify. The
 	// gRPC boundary validates it, but the sandbox-server REST handler does not, so
@@ -2277,7 +2294,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 	// forceRebuild skips reuse entirely: the controller sets it when the
 	// template CONTENT changed (issue #475), because digest verification proves
 	// integrity, not content identity.
-	if !forceRebuild {
+	if !opts.ForceRebuild {
 		reuse, verr := shouldReuseTemplate(e.dataDir, id, func(string) error {
 			if err := e.VerifyTemplate(id); err != nil {
 				return err
@@ -2437,7 +2454,7 @@ func (e *Engine) CreateTemplate(id string, image string, initCommands []string, 
 		cfg.VolumeDrives = drives
 	}
 
-	if err := e.runTemplateBuild(id, cfg, initCommands, workload, warmKernel); err != nil {
+	if err := e.runTemplateBuild(id, cfg, initCommands, workload, opts.WarmKernel); err != nil {
 		return err
 	}
 	d, err := recordTemplateDigest(e.casStore, e.dataDir, id, e.manifestMetadata(cfg))

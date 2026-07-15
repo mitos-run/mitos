@@ -69,7 +69,7 @@ func TestCreateTemplateEngineReusesHealthyTemplate(t *testing.T) {
 		return nil
 	}
 
-	if err := e.CreateTemplate(id, "/fake/reuse-rootfs.ext4", nil, nil, nil, nil, false, false); err != nil {
+	if err := e.CreateTemplate(id, "/fake/reuse-rootfs.ext4", nil, nil, nil, nil, CreateTemplateOpts{}); err != nil {
 		t.Fatalf("CreateTemplate: unexpected error %v", err)
 	}
 	if built {
@@ -105,7 +105,7 @@ func TestCreateTemplateEngineRebuildsCorruptedTemplate(t *testing.T) {
 		return nil
 	}
 
-	if err := e.CreateTemplate(id, "/fake/rebuild-rootfs.ext4", nil, nil, nil, nil, false, false); err != nil {
+	if err := e.CreateTemplate(id, "/fake/rebuild-rootfs.ext4", nil, nil, nil, nil, CreateTemplateOpts{}); err != nil {
 		t.Fatalf("CreateTemplate: unexpected error %v", err)
 	}
 	if !built {
@@ -142,7 +142,7 @@ func TestCreateTemplateEngineForceRebuildAlwaysRebuilds(t *testing.T) {
 		return nil
 	}
 
-	if err := e.CreateTemplate(id, "/fake/force-rebuild-rootfs.ext4", nil, nil, nil, nil, true, false); err != nil {
+	if err := e.CreateTemplate(id, "/fake/force-rebuild-rootfs.ext4", nil, nil, nil, nil, CreateTemplateOpts{ForceRebuild: true}); err != nil {
 		t.Fatalf("CreateTemplate: unexpected error %v", err)
 	}
 	if !built {

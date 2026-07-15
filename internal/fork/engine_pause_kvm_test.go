@@ -61,7 +61,7 @@ func TestEnginePauseResumePreservesStateKVM(t *testing.T) {
 	}
 
 	const templateID = "pause-tmpl"
-	if err := engine.CreateTemplate(templateID, image, nil, nil, nil, nil, false, false); err != nil {
+	if err := engine.CreateTemplate(templateID, image, nil, nil, nil, nil, CreateTemplateOpts{}); err != nil {
 		t.Fatalf("create template: %v", err)
 	}
 
