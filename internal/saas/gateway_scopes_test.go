@@ -164,4 +164,10 @@ func TestGatewayScopelessKeyIsDeniedEverywhere(t *testing.T) {
 			t.Errorf("scopeless key %s %s: status = %d (want 403), body = %s", o.method, o.path, rec.Code, rec.Body.String())
 		}
 	}
+	// The denial must short-circuit BEFORE the control plane: a scopeless key
+	// that reached forwarding (and got a 403 downstream) would pass the status
+	// checks above while still leaking the request past the authz gate.
+	if len(cp.got) != 0 {
+		t.Errorf("a scopeless key reached the control plane %d times; denial must short-circuit at the gateway", len(cp.got))
+	}
 }

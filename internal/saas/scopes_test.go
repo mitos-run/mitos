@@ -3,6 +3,7 @@ package saas
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 )
 
@@ -96,6 +97,12 @@ func TestCreateKeyDefaultsToNonAdminScopes(t *testing.T) {
 	created, err := svc.CreateKey(context.Background(), CreateKeyRequest{OrgID: "org-a", Name: "default"})
 	if err != nil {
 		t.Fatalf("CreateKey: %v", err)
+	}
+	// Lock the minting contract: the persisted scope set is EXACTLY DefaultScopes(),
+	// so a regression to the legacy sandboxes alias or an extra scope is caught.
+	want := DefaultScopes()
+	if !slices.Equal(created.Record.Scopes, want) {
+		t.Fatalf("persisted default scopes = %v, want exactly %v", created.Record.Scopes, want)
 	}
 	for _, s := range []string{ScopeReadOnly, ScopeExecute, ScopeLifecycle} {
 		if _, err := svc.Verify(context.Background(), created.RawKey, s); err != nil {
