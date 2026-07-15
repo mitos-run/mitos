@@ -113,6 +113,15 @@ type vmInstance struct {
 	preRestoredSnapshotDir string
 	dnsProxy               *dnsproxy.Server
 
+	// keepaliveCancel stops this instance's warm-pool self-keepalive loop and
+	// keepaliveDone is closed when that loop's goroutine has exited. They are set
+	// by startKeepalive when a pre-restored + prefaulted default VM goes dormant
+	// (#913) and cleared by stopKeepalive, which activate and Close both call so
+	// the loop never runs while a tenant is served or after teardown. Both are
+	// guarded by inst.mu; nil means no loop is running.
+	keepaliveCancel context.CancelFunc
+	keepaliveDone   chan struct{}
+
 	// childUFFDPlan carries a co-located live-cow fork child's LAZY UFFD import
 	// intent from SpawnVM to activateInstance: the ChildMemfdImport coordinates (the
 	// source memfd + FROZEN overlay + live bitmap) and the backend socket path.
@@ -786,6 +795,13 @@ type Stub struct {
 	// pin WHEN the prefault runs without a live gRPC guest.
 	prepareKernelPrefault bool
 	prefaultKernel        func(ctx context.Context, conn *guestgrpc.Client, vsockPath string) error
+	// keepaliveInterval paces the warm-pool self-keepalive loop (#913); zero
+	// selects huskKeepAliveInterval. keepaliveWarm runs one keepalive round
+	// against the dormant guest at vsockPath; nil selects the production seam
+	// (prefaultKernelGRPC with a self-dialed conn). Both are injectable so unit
+	// tests exercise the loop's cadence in milliseconds with no live gRPC guest.
+	keepaliveInterval time.Duration
+	keepaliveWarm     func(ctx context.Context, vsockPath string) error
 	// prewarmChild keeps ONE dormant, generic co-located child Firecracker
 	// pre-prepared (Options.PrewarmChild) so a co-located fork that needs no
 	// fork-specific launch env activates it instead of paying the process boot on

@@ -159,6 +159,27 @@ Expected activate: roughly `nft` + `handshake` + `serve_api`, i.e. ~30 ms agains
    and the #903 idle decay countered for buffered sandboxes). A prefaulted dormant VM
    holds MORE resident memory than the ~72 MiB restore-only figure; re-measure at canary.
 
+   Warm-pool self-keepalive (#913): the one-shot prefault runs ONCE at Prepare, but a
+   warm husk pod can sit dormant for minutes before a claim, and its prefaulted working
+   set is reclaimed in that window (#903 decay: rung D measured first exec REGRESSING
+   163 ms -> 188.6 ms for a long-dormant pod even as warm-claim activate dropped to
+   23.8 ms). The pre-claimed CHECKOUT buffer already fixed this with a 60 s keepalive
+   (PR #908); the WARM POOL had no equivalent. Now, whenever `--husk-prepare-kernel-prefault`
+   is on and the default VM was pre-restored, the husk stub runs its OWN periodic
+   keepalive: every `huskKeepAliveInterval` (60 s) it re-runs the inert warm cell
+   (`firecracker.WarmKernelCode`, the same constant the template build and the Prepare
+   prefault use) against its OWN running dormant guest over its local vsock, reusing
+   `prefaultKernelGRPC`. It engages on NO new flag (prefault already implies "keep the
+   kernel warm"), runs while DORMANT only (activate and Close both stop it, so it never
+   contends with a tenant), never touches a pod that did not pre-restore or did not opt
+   into the prefault, and FAILS SOFT (a round that errors logs and the next round retries;
+   a genuinely wedged pod is the liveness monitor's job, not the keepalive's). Pinned by
+   `TestWarmPoolKeepaliveWarmsThePreRestoredGuestWhileDormant`,
+   `TestWarmPoolKeepaliveRequiresPreRestore`, `TestWarmPoolKeepaliveRequiresPrefault`,
+   `TestWarmPoolKeepaliveStopsAtActivate`, `TestWarmPoolKeepaliveFailureDoesNotBreakActivate`,
+   and `TestWarmPoolKeepaliveStopsAtClose`. Still to do: the one-pod prod canary confirming
+   a long-dormant warm-pool pod's first exec no longer regresses.
+
 Each slice ships with its own KVM gate in `firecracker-test`, because none of this is
 observable without `/dev/kvm` and the mitos-patched Firecracker.
 

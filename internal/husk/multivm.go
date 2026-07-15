@@ -481,6 +481,15 @@ func (s *Stub) prepareRestoreDefaultVM(ctx context.Context, id vmID, inst *vmIns
 	}
 	inst.preRestored = true
 	inst.preRestoredSnapshotDir = s.prepareSnapshotDir
+	// Warm-pool self-keepalive (#913): a dormant pod's one-shot prefault above
+	// decays within minutes (#903), so keep the run_code kernel resident by
+	// re-running the inert cell against this same running guest on an interval
+	// until a claim (activate) or Close stops it. Engaged only WITH the prefault
+	// opt-in (no new flag: prefault already means "keep the kernel warm"); a
+	// non-prefault pre-restore keeps no kernel to preserve. Under inst.mu here.
+	if s.prepareKernelPrefault {
+		s.startKeepalive(inst, id, vsockPath)
+	}
 	// The one observable marker that the dormant restore happened and what it cost;
 	// the KVM CI gate and the prod canary both key on this line. Paths and durations
 	// only, never secrets.
@@ -610,6 +619,15 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		werr := fmt.Errorf("husk: activate vm %q wants snapshot %q but this pod pre-restored %q; refusing to serve the wrong image", id, req.SnapshotDir, inst.preRestoredSnapshotDir)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
+
+	// Stop the warm-pool self-keepalive (#913) now that a genuine claim is being
+	// served: from here the VM leaves the dormant window, so the keepalive must
+	// never run again against this guest (the tenant's own execs keep it warm and
+	// a keepalive round must never contend with tenant run_code). Placed AFTER the
+	// fail-closed mismatch gate so a refused wrong-image claim leaves the dormant
+	// pod exactly as it was, still warm for a correct retry. It waits for any
+	// in-flight round to finish; no-op when no loop was running.
+	inst.stopKeepalive()
 
 	memFile := filepath.Join(req.SnapshotDir, "mem")
 	vmStateFile := filepath.Join(req.SnapshotDir, "vmstate")
@@ -1114,6 +1132,11 @@ func (s *Stub) closeInstance(id vmID) error {
 // s.mu across the blocking VMM Close). It reaps the per-activation artifacts and
 // closes the VMM, returning the instance to StateNew.
 func (s *Stub) closeInstanceBody(id vmID, inst *vmInstance) error {
+	// Stop the warm-pool self-keepalive loop (#913) FIRST, before the VMM is
+	// closed, so no keepalive round is dialing the guest as it goes away. No-op
+	// when no loop was running (never pre-restored, or a claim already stopped it).
+	inst.stopKeepalive()
+
 	// Best effort: reap this instance's rootfs CoW clone so it does not outlive the
 	// VM. Path only is logged on failure; the clone carries no secrets.
 	if inst.rootfsClonePath != "" {
