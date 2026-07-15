@@ -69,6 +69,10 @@ jobs:
               exit 2
               ;;
           esac
+          if [ "$ITERATIONS" -le 0 ]; then
+            echo "iterations must be greater than zero, got '$ITERATIONS'" >&2
+            exit 2
+          fi
 
           python3 -m venv /tmp/tti-canary-venv
           /tmp/tti-canary-venv/bin/pip install --quiet --upgrade pip
@@ -121,10 +125,12 @@ jobs:
             const verdict = process.env.VERDICT || 'canary verdict unavailable';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const marker = '<!-- tti-canary-tracking -->';
-            const title = 'TTI canary regression: hosted P50 or success rate breached the baseline';
+            const title = 'TTI canary: hosted regression or measurement failure';
             const body = [
               marker, '',
-              'The nightly hosted TTI canary breached its baseline (bench/canary-baseline.json).',
+              'The nightly hosted TTI canary did not pass. The verdict below identifies the',
+              'cause: a measured P50 or success-rate breach of bench/canary-baseline.json, OR',
+              'a harness/parse failure (the measurement itself did not complete).',
               '', '```', verdict, '```', '',
               `Run: ${runUrl}`, '',
               'This is the in-region measurement from mitos-bench1 (the ladder harness).',
@@ -149,4 +155,4 @@ jobs:
                 title, body, labels: ['tti-canary', 'performance'],
               });
             }
-            core.setFailed('TTI canary regression, see the tracking issue');
+            core.setFailed('TTI canary regression or measurement failure, see the tracking issue');

@@ -2575,6 +2575,15 @@ jobs:
                 fail_active "activate $n returned a non-numeric latency_ms='$lat'; the measurement is broken, not fast"
                 ;;
             esac
+            # A lone "." (or any value with no digit) passes the pattern above
+            # but is not a number, so require at least one digit.
+            case "$lat" in
+              *[0-9]*) : ;;
+              *)
+                kill $stub_pid 2>/dev/null || true
+                fail_active "activate $n returned a digitless latency_ms='$lat'; the measurement is broken, not fast"
+                ;;
+            esac
             echo "activate $n: OK latency_ms=$lat vsock=$vsock"
 
             # First run: exec a real command through the guest agent over the
