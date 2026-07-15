@@ -2576,6 +2576,25 @@ jobs:
               kill $stub_pid 2>/dev/null || true
               fail_active "activate $n result ok=$ok"
             fi
+            # Reject a non-numeric latency BEFORE it reaches the percentile awk,
+            # which would fold null/empty into 0.000 and could sneak a broken
+            # measurement past the gross-regression ceiling below (a P50 gate is
+            # only as trustworthy as its samples).
+            case "$lat" in
+              ''|null|*[!0-9.]*|*.*.*)
+                kill $stub_pid 2>/dev/null || true
+                fail_active "activate $n returned a non-numeric latency_ms='$lat'; the measurement is broken, not fast"
+                ;;
+            esac
+            # A lone "." (or any value with no digit) passes the pattern above
+            # but is not a number, so require at least one digit.
+            case "$lat" in
+              *[0-9]*) : ;;
+              *)
+                kill $stub_pid 2>/dev/null || true
+                fail_active "activate $n returned a digitless latency_ms='$lat'; the measurement is broken, not fast"
+                ;;
+            esac
             echo "activate $n: OK latency_ms=$lat vsock=$vsock"
 
             # First run: exec a real command through the guest agent over the
