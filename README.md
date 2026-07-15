@@ -155,7 +155,7 @@ Homebrew, deb/rpm, scoop/winget, checksums) is in
 kubectl apply -k deploy/
 ```
 
-The self-contained kustomize base installs the CRDs, the controller (husk mode), the forkd DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. Nodes need `/dev/kvm` and the label `mitos.run/kvm=true`. The Helm chart is published to the OCI registry on GHCR: `helm install mitos oci://ghcr.io/mitos-run/charts/mitos --version 1.25.0`; see [deploy/charts/mitos](deploy/charts/mitos/README.md). Then declare a warm pool, and fork from it with a `Sandbox` whose `source.fromSandbox` points at a live session ([templates](docs/templates.md)):
+The self-contained kustomize base installs the CRDs, the controller (husk mode), the forkd DaemonSet, the `/dev/kvm` device plugin, and the PKI bootstrap, and applies on a real KVM node with no manual patches. The Helm chart is published to the OCI registry on GHCR: `helm install mitos oci://ghcr.io/mitos-run/charts/mitos --version 1.42.1`; see [deploy/charts/mitos](deploy/charts/mitos/README.md). Then declare a warm pool, and fork from it with a `Sandbox` whose `source.fromSandbox` points at a live session ([templates](docs/templates.md)):
 
 ```yaml
 apiVersion: mitos.run/v1
@@ -171,6 +171,17 @@ spec:
       - { name: workspace, size: 5Gi, forkPolicy: Snapshot }
   warm: { min: 10 }
 ```
+
+**Where it runs.** The only node requirement is `/dev/kvm` plus the label `mitos.run/kvm=true`, so mitos installs on any Kubernetes cluster with bare-metal or nested-virtualization KVM nodes:
+
+| platform | KVM node | guide |
+|---|---|---|
+| Bare metal (Talos, Hetzner) | native `/dev/kvm` | [docs/platforms/talos-hetzner.md](docs/platforms/talos-hetzner.md) (first-class reference) |
+| AWS / EKS | `*.metal` or nested-virt node groups | generic chart today; per-cloud guide is issue [#919](https://github.com/mitos-run/mitos/issues/919) |
+| GKE | nested-virtualization node pools | generic chart today; per-cloud guide is [#919](https://github.com/mitos-run/mitos/issues/919) |
+| Azure / AKS | nested-virt-capable VM sizes | generic chart today; per-cloud guide is [#919](https://github.com/mitos-run/mitos/issues/919) |
+
+The chart and CRDs are identical across all of them; only the node pool that supplies `/dev/kvm` differs.
 
 ## Why Mitos
 
@@ -188,6 +199,53 @@ Two ways to run it:
 > Two engine paths exist. The **husk pod-native path is the default**: each VM runs in its own unprivileged pod, and the source husk pod snapshots its running VM so N child pods restore it via CoW. The **raw-forkd path** runs forks in forkd's in-process engine. Everything here runs on the husk default unless explicitly marked `engine path`.
 
 Sandboxes are not pods. Pod-scoped Kubernetes mechanisms (NetworkPolicy, ResourceQuota, PSA) govern the husk pod, not the workload inside the microVM; the sandbox is the VM, not the husk pod, and where we provide an equivalent it is documented as ours. The full claim and exec data paths and the component diagram are at [mitos.run/docs/architecture](https://mitos.run/docs/architecture).
+
+## Benchmarks
+
+Every number here is reproducible from [`bench/`](bench/) on real KVM hardware; nothing is published that a reader cannot regenerate (the project's no-unverified-claims rule). Each row names what it measures and the exact command that reproduces it. Full per-run data and hardware context live in [`bench/results/`](bench/results/).
+
+### Hosted time-to-interactive, against the ComputeSDK peer set
+
+Time to interactive (TTI) is the only figure that is apples-to-apples with the public [ComputeSDK benchmark](https://github.com/computesdk/benchmarks) every hosted sandbox vendor is measured against: the clock starts at `create()` and stops when a command has actually RUN inside the sandbox and returned.
+
+| provider | TTI P50 | measures |
+|---|---|---|
+| northflank | 95.9 ms | ComputeSDK published |
+| **mitos** | **96.8 ms** | our harness, `api.mitos.run` |
+| daytona | 136.2 ms | ComputeSDK published |
+| e2b | 365.6 ms | ComputeSDK published |
+
+Reproduce our number and the peer table (peer numbers are read from the immutable commit ComputeSDK published, not re-run by us):
+
+```sh
+MITOS_API_KEY=... python3 bench/tti-latency.py 100        # our TTI, N=100
+python3 bench/peer-tti.py --date 2026-07-09 \
+  --ref 3eddee1a972bd49aea56fd6c16d238ca0a45dece            # the peer table
+```
+
+Read it with the caveats the [full record](bench/results/2026-07-12-tti-create-path-ladder.md) states and does not hide: this is **our harness beside their published numbers, not a measured position in their leaderboard**; it is the sequential run (a concurrent burst would drain today's single-node warm pool, issue #586); and claiming an actual leaderboard rank requires shipping the `computesdk/computesdk` adapter (issue #891). Within those bounds, hosted mitos sits below Daytona and level with Northflank, 100/100 successful iterations.
+
+### Forking inside your cluster (one agent spawning subagents)
+
+When an agent runs in your cluster and branches itself into parallel attempts, the cost that matters is fork-to-first-exec: the wall clock from a live-VM fork to a command returning in the child. Measured with the same in-process engine `forkd` drives:
+
+| metric | number | measures |
+|---|---|---|
+| fork -> first exec | P50 ~104 ms (reference node), ~67 ms on reflink + NVMe | one live fork to a ready, exec-serving child |
+| fork(n) fan-out | ~56 ms P50 per child at n=4 and n=16 | one warm base fanned into N independent siblings |
+| CoW memory density | 8 forks cost ~35 MiB resident, not ~209 MiB | unique pages paid for, shared pages counted once |
+
+```sh
+go build -o /tmp/bench ./cmd/bench/
+/tmp/bench --mode fork-exec   --template <id> --data-dir <dir> --iterations 100   # fork -> first exec
+/tmp/bench --mode fork-fanout --template <id> --data-dir <dir> --fanout-n 1,4,16   # 1-to-N fan-out
+```
+
+Full method and hardware in [bench/README.md](bench/README.md); results in [2026-06-19-bare-metal-fork-exec.md](bench/results/2026-06-19-bare-metal-fork-exec.md) and [2026-06-21-kvm-perf-correctness.md](bench/results/2026-06-21-kvm-perf-correctness.md).
+
+### Warm-claim activate (the engine, not the round trip)
+
+The engine's own warm-sandbox activate (snapshot load + fork-correctness handshake + guest-ready) is P50 ~27 ms on the bare-metal reference node, reproducible from [`bench/husk-activate-latency.sh`](bench/husk-activate-latency.sh). This is a smaller, different number than the end-to-end hosted TTI above; quoting the engine figure against a competitor's create-API number would be a category error, so we keep them separate.
 
 ## Features
 
