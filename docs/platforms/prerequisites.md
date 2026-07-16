@@ -130,3 +130,7 @@ an in-cluster Job; it exits non-zero if any check fails. See
 
 Once the install is healthy, `lifecycle.md` is the day-2 guide: upgrading, CRD
 schema changes, rolling back, backing up state, and uninstalling.
+
+See also: `supported-hosts.md` for the host-support matrix (which machines can be
+KVM workers versus control-plane only), and `air-gapped.md` for the offline
+install runbook.
