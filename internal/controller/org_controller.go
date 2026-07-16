@@ -196,6 +196,16 @@ func (r *OrgReconciler) ensureOrgPool(ctx context.Context, org *v1.Org, ns strin
 		return fmt.Errorf("get org pool template %s/%s: %w", tns, r.PoolTemplateName, err)
 	}
 
+	// A reference pool that itself uses spec.templateRef cannot be cloned
+	// verbatim. templateRef is a bare name resolved in the pool's OWN namespace
+	// (ADR 0007), so copying it into each org namespace clones a dangling
+	// reference: the shared template lives in the control namespace, not per org.
+	// Reject with actionable text rather than create pools that never build. The
+	// reference pool should carry an inline spec.template instead.
+	if tmpl.Spec.TemplateRef != nil {
+		return fmt.Errorf("org pool template %s/%s uses spec.templateRef %q, which cannot be cloned into org namespaces: a bare templateRef resolves in the pool's own namespace and would dangle in every org namespace. Give the reference pool %s an inline spec.template, or unset --enable-org-tenancy", tns, r.PoolTemplateName, tmpl.Spec.TemplateRef.Name, r.PoolTemplateName)
+	}
+
 	desired := buildOrgPoolFromTemplate(org, ns, name, &tmpl, r.OrgPoolWarmMin)
 	if err := r.setOwner(org, desired); err != nil {
 		return err
@@ -553,5 +563,10 @@ func (r *OrgReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ResourceQuota{}).
 		Owns(&networkingv1.NetworkPolicy{}).
 		Owns(&rbacv1.RoleBinding{}).
+		// Own the cloned per-org SandboxPool too, so a manual delete of it
+		// enqueues the Org and the create-once ensureOrgPool recreates it
+		// promptly, rather than waiting for the next Org event or resync. The
+		// other stack objects above already self-heal this way.
+		Owns(&v1.SandboxPool{}).
 		Complete(r)
 }
