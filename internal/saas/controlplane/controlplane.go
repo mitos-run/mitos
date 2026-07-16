@@ -22,6 +22,7 @@ package controlplane
 
 import (
 	"net/http"
+	"sync"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,6 +57,21 @@ type K8sControlPlane struct {
 	// checks still apply.
 	singleTenantNamespace string
 	now                   func() time.Time
+
+	// poolSeen caches POSITIVE pool-existence pre-check results per
+	// namespace/name until the stored expiry, so a repeat create of a stable
+	// hosted pool skips the serialized apiserver Get (see poolCheckTTL in
+	// forward.go). Absence is never stored.
+	poolSeenMu sync.Mutex
+	poolSeen   map[string]time.Time
+
+	// checkout serves eligible creates from a buffer of pre-activated
+	// sandboxes (nil = feature off). Constructed by New only when BOTH
+	// WithCheckout and single-tenant mode are set; the design leans on the
+	// shared namespace, see the spec's per-org-namespace migration note
+	// (docs/superpowers/specs/2026-07-11-preclaimed-checkout-design.md).
+	checkoutCfg *CheckoutConfig
+	checkout    *checkoutBuffer
 }
 
 // Option configures a K8sControlPlane.
@@ -149,5 +165,30 @@ func New(c client.Client, opts ...Option) *K8sControlPlane {
 	for _, o := range opts {
 		o(k)
 	}
+	if k.checkoutCfg != nil && k.singleTenantNamespace != "" {
+		k.checkout = newCheckoutBuffer(k, *k.checkoutCfg)
+	}
 	return k
+}
+
+// WithCheckout enables the pre-claimed checkout buffer for the named pools.
+// Ignored (feature off) when Pools is empty or the control plane is not in
+// single-tenant namespace mode. Zero Floor, Cap, or MaxAge take the defaults
+// 2, twice the floor, and 10m.
+func WithCheckout(cfg CheckoutConfig) Option {
+	return func(k *K8sControlPlane) {
+		if len(cfg.Pools) == 0 {
+			return
+		}
+		if cfg.Floor <= 0 {
+			cfg.Floor = 2
+		}
+		if cfg.Cap < cfg.Floor {
+			cfg.Cap = cfg.Floor * 2
+		}
+		if cfg.MaxAge <= 0 {
+			cfg.MaxAge = 10 * time.Minute
+		}
+		k.checkoutCfg = &cfg
+	}
 }

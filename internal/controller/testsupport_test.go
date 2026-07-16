@@ -154,6 +154,20 @@ func (r *SandboxReconciler) OnlyLabels(labels ...string) {
 	r.controllerName = "sandbox-husk"
 }
 
+// EnsureSandboxTokenSecretForTest exposes the REAL token Secret writer to the external
+// controller_test package, so the suite's stable seam closure can fall back to it when
+// no test installed a fake.
+func EnsureSandboxTokenSecretForTest(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error {
+	return ensureSandboxTokenSecret(ctx, c, owner, name, token, endpoint)
+}
+
+// SetEnsureTokenSecretForTest injects a fake per-sandbox token Secret writer, so a
+// test can control exactly when that concurrent write completes. Nil restores the
+// real ensureSandboxTokenSecret.
+func (r *SandboxReconciler) SetEnsureTokenSecretForTest(fn func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error) {
+	r.ensureTokenSecret = fn
+}
+
 // SetActivateForTest injects a fake husk activator (the test seam).
 func (r *SandboxReconciler) SetActivateForTest(fn func(ctx context.Context, addr string, tlsConf *tls.Config, req husk.ActivateRequest) (husk.ActivateResult, error)) {
 	r.Activate = fn
@@ -320,6 +334,14 @@ func (r *SandboxPoolReconciler) DriveForceRebuildForTest(ctx context.Context, po
 // Reconcile.
 func TemplateBuiltConditionForTest(buildErr error, now metav1.Time) metav1.Condition {
 	return templateBuiltCondition(buildErr, now)
+}
+
+// TemplateBuiltConditionUpdateForTest exposes templateBuiltConditionUpdate so
+// the external controller_test package can assert that a build-in-progress
+// signal (gRPC Unavailable, #888) is not surfaced as a BuildFailed condition
+// transition but leaves the prior TemplateBuilt condition untouched.
+func TemplateBuiltConditionUpdateForTest(buildErr error, now metav1.Time) (metav1.Condition, bool) {
+	return templateBuiltConditionUpdate(buildErr, now)
 }
 
 // ForceRebuildAnnotationForTest exposes the forceRebuildAnnotation key to the
@@ -490,7 +512,7 @@ func startFakeForkdNodeFull(registry *NodeRegistry, nodeName string, serverTLS, 
 	engine = fork.NewMockEngine()
 	engine.ForkDelay = 0
 	for _, tmpl := range templates {
-		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, false, false); err != nil {
+		if err := engine.CreateTemplate(tmpl, tmpl, nil, nil, nil, nil, fork.CreateTemplateOpts{}); err != nil {
 			return nil, nil, nil, nil, err
 		}
 	}

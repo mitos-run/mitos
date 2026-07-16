@@ -223,6 +223,34 @@ def _iter_frames(resp: httpx.Response) -> Iterator[tuple[int, bytes]]:
         yield from decoder.feed(chunk)
 
 
+def _drain(frames: Iterator[tuple[int, bytes]]) -> None:
+    """Read the response body to EOF after the terminal frame.
+
+    HTTP/1.1 cannot reuse a connection whose body stopped short of EOF, so stopping
+    at the end-stream frame made httpx close the socket and every subsequent RPC pay
+    a fresh TCP and TLS handshake. A well-formed Connect stream has nothing after
+    the terminal frame, so this reads the final zero-length chunk and returns.
+
+    A server that never closes the body would otherwise hang here; the per-read
+    timeout on the stream bounds that, and any failure while draining only costs us
+    the pooled connection, never the result of the RPC that already completed.
+    """
+    try:
+        for _ in frames:
+            pass
+    except Exception:  # noqa: BLE001,S110 - connection reuse is best effort
+        pass
+
+
+async def _adrain(stream: AsyncIterator[bytes]) -> None:
+    """Async counterpart of _drain. Same contract, same best-effort semantics."""
+    try:
+        async for _ in stream:
+            pass
+    except Exception:  # noqa: BLE001,S110 - connection reuse is best effort
+        pass
+
+
 class ConnectClient:
     """Speaks the Connect ``sandbox.v1.Sandbox`` protocol over an httpx.Client.
 
@@ -325,13 +353,15 @@ class ConnectClient:
                 # end-stream frame. Read it and raise the typed error.
                 resp.read()
                 _raise_unary_error(resp, self._token)
-            for flag, payload in _iter_frames(resp):
+            frames = _iter_frames(resp)
+            for flag, payload in frames:
                 if flag & _FLAG_COMPRESSED:
                     raise _compressed_frame_error()
                 if flag & _FLAG_END_STREAM:
                     err = _end_stream_error(payload, self._token)
                     if err is not None:
                         raise err
+                    _drain(frames)
                     return
                 if not payload:
                     continue
@@ -439,7 +469,8 @@ class AsyncConnectClient:
                 await resp.aread()
                 _raise_unary_error(resp, self._token)
             decoder = _FrameDecoder()
-            async for chunk in resp.aiter_bytes():
+            stream = resp.aiter_bytes()
+            async for chunk in stream:
                 for flag, payload in decoder.feed(chunk):
                     if flag & _FLAG_COMPRESSED:
                         raise _compressed_frame_error()
@@ -447,6 +478,7 @@ class AsyncConnectClient:
                         err = _end_stream_error(payload, self._token)
                         if err is not None:
                             raise err
+                        await _adrain(stream)
                         return
                     if not payload:
                         continue

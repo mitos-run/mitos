@@ -200,6 +200,20 @@ type HuskPodOptions struct {
 	// one dormant generic co-located child Firecracker pre-prepared and a fork adopts
 	// it (fc_boot off the hot path). DEFAULT OFF; requires MultiVM.
 	PrewarmChild bool
+	// PrepareEgressLink starts the husk stub with --prepare-egress-link (plus the
+	// in-pod link addresses it needs before an activate request arrives), so a warm
+	// pod brings its tap up while dormant and a claim pays only the nft transaction
+	// that installs the tenant's policy. Requires MultiVM. Default off.
+	PrepareEgressLink bool
+	// PrepareRestore starts the stub with --prepare-restore so a warm pod loads its
+	// default VM's snapshot and resumes its guest while dormant, leaving only the
+	// handshake on the warm-claim hot path. REQUIRES PrepareEgressLink (and MultiVM).
+	PrepareRestore bool
+	// PrepareKernelPrefault starts the stub with --prepare-kernel-prefault so a
+	// pre-restored dormant pod also runs the inert warm cell once, making the
+	// run_code kernel's working set resident before the first tenant cell.
+	// REQUIRES PrepareRestore (and the whole chain above it). Fails open in the pod.
+	PrepareKernelPrefault bool
 	// MultiVMForkVMs is the number of ADDITIONAL fork-child VMs a multi-VM pod
 	// reserves node memory for up front (beyond the source VM), so the co-location
 	// routing has room to co-locate that many children before a fork spills to a new
@@ -563,6 +577,32 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 	if opts.PrewarmChild {
 		args = append(args, "--prewarm-child")
 	}
+	// Gated on MultiVM as documented: the stub only brings the tap up on the multi-VM
+	// Prepare path, so emitting these to a single-VM stub would produce an unsupported
+	// pod shape whose flags do nothing. main rejects the flag combination outright; this
+	// is the second gate, at the boundary that actually builds the pod.
+	if opts.PrepareEgressLink && opts.MultiVM {
+		// The stub needs the in-pod link BEFORE a claim arrives, because the tap name
+		// derives from the guest IP. These are the same fixed values huskNotifyNetwork
+		// sends in the activate request; they are config, not secrets.
+		args = append(args,
+			"--prepare-egress-link",
+			"--in-pod-guest-ip", huskGuestIP,
+			"--in-pod-gateway-ip", huskGatewayIP,
+		)
+		// Prepare-time restore builds ON the prepared tap, so it is emitted only inside
+		// this block: --prepare-restore without --prepare-egress-link would have no tap
+		// at snapshot load. The stub also refuses that combination.
+		if opts.PrepareRestore {
+			args = append(args, "--prepare-restore")
+			// The kernel prefault warms the guest the dormant restore resumed, so it
+			// is emitted only inside the restore block: without a pre-restored guest
+			// there is nothing to warm.
+			if opts.PrepareKernelPrefault {
+				args = append(args, "--prepare-kernel-prefault")
+			}
+		}
+	}
 
 	// Live-cow write-protect needs a KERNEL-MODE userfaultfd over the guest RAM: the
 	// source Firecracker registers UFFD_WP so the KVM guest's own writes fault to the
@@ -611,6 +651,16 @@ func (r *SandboxPoolReconciler) buildHuskPod(pool *v1.SandboxPool, template *v1.
 		args = append(args, "--snapshot-dir", huskSnapshotMountPath, "--expected-digest", opts.ExpectedDigest)
 	} else {
 		args = append(args, "--allow-unverified-snapshots")
+		// Prepare-time restore needs the snapshot dir at STARTUP, digest or no
+		// digest: without it the dormant restore silently no-ops and every claim
+		// keeps paying the full restore while the flags claim otherwise (found
+		// live at the first prod canary). The verify posture is unchanged; this
+		// branch stays --allow-unverified-snapshots, only the dir is threaded.
+		// A fork child restores its own node-local fork snapshot at spawn and is
+		// never pre-restored, so it keeps no --snapshot-dir.
+		if opts.PrepareRestore && opts.ForkSnapshotID == "" {
+			args = append(args, "--snapshot-dir", huskSnapshotMountPath)
+		}
 	}
 
 	// Volumes + mounts: the mTLS Secret, the node's template snapshot subdir
@@ -1392,18 +1442,21 @@ func (r *SandboxPoolReconciler) reconcileHuskPods(ctx context.Context, pool *v1.
 			}
 		}
 		opts := HuskPodOptions{
-			MultiVM:            r.MultiVM,
-			LiveCowFork:        r.LiveCowFork,
-			LiveCowChildImport: r.LiveCowChildImport,
-			PrewarmChild:       r.PrewarmChild,
-			MultiVMForkVMs:     r.MultiVMForkVMs,
-			StubImage:          r.HuskStubImage,
-			DNSUpstream:        r.HuskDNSUpstream,
-			KVMResourceName:    r.KVMResourceName,
-			SnapshotID:         poolTemplateID(pool),
-			DataDir:            r.DataDir,
-			TLSSecretName:      r.HuskTLSSecretName,
-			CASecretName:       r.HuskCASecretName,
+			MultiVM:               r.MultiVM,
+			LiveCowFork:           r.LiveCowFork,
+			LiveCowChildImport:    r.LiveCowChildImport,
+			PrewarmChild:          r.PrewarmChild,
+			PrepareEgressLink:     r.PrepareEgressLink,
+			PrepareRestore:        r.PrepareRestore,
+			PrepareKernelPrefault: r.PrepareKernelPrefault,
+			MultiVMForkVMs:        r.MultiVMForkVMs,
+			StubImage:             r.HuskStubImage,
+			DNSUpstream:           r.HuskDNSUpstream,
+			KVMResourceName:       r.KVMResourceName,
+			SnapshotID:            poolTemplateID(pool),
+			DataDir:               r.DataDir,
+			TLSSecretName:         r.HuskTLSSecretName,
+			CASecretName:          r.HuskCASecretName,
 			// dedicatedNodes (#172): pin this pool's husk pods to the tenant's
 			// dedicated node set. Merged onto the KVM nodeSelector + snapshot-node
 			// affinity below.
@@ -1695,6 +1748,31 @@ func huskPodOwnedByPool(pod *corev1.Pod, pool *v1.SandboxPool) bool {
 // huskPodReady reports whether a husk pod is a usable dormant slot: Running,
 // with a Ready condition True, and a non-empty PodIP (so the controller can
 // dial its control channel and set a reachable endpoint).
+// huskPodNotReadyReason renders, in one short phrase, why a husk pod is not usable
+// yet. The fan-out and claim paths skip such a pod and retry; without a reason a
+// permanently stuck pod is indistinguishable from one that is still coming up.
+// Returns "" for a pod that IS ready.
+func huskPodNotReadyReason(p *corev1.Pod) string {
+	if p.Status.Phase != corev1.PodRunning {
+		return fmt.Sprintf("pod phase %s", p.Status.Phase)
+	}
+	if p.Status.PodIP == "" {
+		return "pod has no IP yet"
+	}
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			if c.Status == corev1.ConditionTrue {
+				return ""
+			}
+			if c.Reason != "" {
+				return "pod not ready: " + c.Reason
+			}
+			return "pod not ready"
+		}
+	}
+	return "pod has no Ready condition"
+}
+
 func huskPodReady(p *corev1.Pod) bool {
 	if p.Status.Phase != corev1.PodRunning || p.Status.PodIP == "" {
 		return false

@@ -157,8 +157,42 @@ E2B-style fast-cached-build behavior. The key computation and the skip decision
 are pure and unit-tested on any host; the actual layer reuse on a live boot is
 KVM gated and asserted in the Firecracker suite.
 
+## Guest process resource limits
+
+The guest agent is PID 1 inside the microVM. A bare Linux init inherits a low
+soft `RLIMIT_NOFILE` (commonly 1024 open files), and every process the agent
+spawns for `exec`, PTY sessions, `run_code`, and serving workloads would inherit
+that same low limit. Data libraries that open many files at import time (pandas,
+openpyxl, scikit) hit `EMFILE` ("too many open files") under 1024, so a plain
+`import pandas` could die inside a sandbox even when the host-side caps (husk pod
+cgroup, per-sandbox stream caps) are nowhere near saturated. Those host caps do
+not govern in-guest per-process rlimits; only `setrlimit` inside the guest does.
+
+The agent therefore raises the soft `RLIMIT_NOFILE` of every process it spawns to
+a sane default of 65536, clamped to the inherited hard limit and never lowered
+below what the process already has. The raise is installed via a `pre_exec` hook
+that runs in the forked child before `execve`, so it applies to the whole child
+tree.
+
+To override the default, set the `MITOS_RLIMIT_NOFILE` environment variable in
+the guest agent's environment to a decimal file count of at least 64. It is read
+once per spawn from the agent's own environment, so it applies uniformly to every
+spawned process. A value below 64, or an unparseable value, is ignored with a
+warning and the default applies; the floor stops a `0` or tiny typo from silently
+crippling every spawned child. An operator may set a value below the default (but
+at or above the floor) deliberately; the agent never raises the hard limit (that
+needs `CAP_SYS_RESOURCE` and is out of scope).
+
+The default and the override resolution are unit-tested on any host; the
+end-to-end proof (a spawned guest process observing the raised limit and opening
+more than 1024 files) is KVM gated and runs in the Firecracker suite.
+
 ## Open follow-ups
 
+- A first-class `template.spec` field (for example `resources.rlimits.nofile`)
+  plumbed through CreateTemplate and Fork into the guest agent's
+  `MITOS_RLIMIT_NOFILE` boot environment, validated at the boundary, so operators
+  set the limit declaratively instead of via the raw environment variable.
 - `go:embed` the guest agent into the forkd binary so no external `--agent-bin`
   path is needed.
 - OCI layer caching tied to the CAS store so repeated pool builds do not

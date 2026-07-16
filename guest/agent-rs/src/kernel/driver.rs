@@ -414,19 +414,30 @@ impl KernelManager {
             ));
         }
 
-        let mut cmd = tokio::process::Command::new(&self.cfg.python);
-        cmd.arg(driver_path);
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
+        // Built as a std::process::Command so the RLIMIT_NOFILE pre_exec hook can
+        // be registered (all unsafe stays in sys/), then converted to a tokio
+        // Command for kill_on_drop and async spawn.
+        let mut std_cmd = std::process::Command::new(&self.cfg.python);
+        std_cmd.arg(driver_path);
+        std_cmd.stdin(Stdio::piped());
+        std_cmd.stdout(Stdio::piped());
         // Route driver stderr to this process's stderr (ipykernel debug noise).
-        cmd.stderr(Stdio::inherit());
-        // Kill the driver when its Child handle is dropped (agent shutdown).
-        cmd.kill_on_drop(true);
+        std_cmd.stderr(Stdio::inherit());
 
         // Set working directory to /workspace when it exists (mirrors Go).
         if std::path::Path::new("/workspace").is_dir() {
-            cmd.current_dir("/workspace");
+            std_cmd.current_dir("/workspace");
         }
+
+        // Raise the kernel's soft RLIMIT_NOFILE to a sane default (issue #786) so
+        // `import pandas` / openpyxl / scikit do not die with EMFILE under the
+        // 1024-fd limit a bare init inherits. See sys/rlimit.rs for the SAFETY
+        // contract of the pre_exec hook.
+        crate::sys::rlimit::apply_nofile_limit(&mut std_cmd);
+
+        let mut cmd = tokio::process::Command::from(std_cmd);
+        // Kill the driver when its Child handle is dropped (agent shutdown).
+        cmd.kill_on_drop(true);
 
         let mut child = cmd.spawn().map_err(|e| {
             format!(

@@ -31,6 +31,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
+
+	"github.com/go-logr/logr"
 )
 
 // tracer is the controller component tracer; no-op unless tracing is configured.
@@ -61,6 +63,35 @@ const capacityPendingRequeue = 5 * time.Second
 // the claim pends for a grace period before failing terminally (issue #630).
 // Cleared once the pool exists, so a later pool deletion starts a fresh clock.
 const poolMissingSinceAnnotation = "mitos.run/pool-missing-since"
+
+// activateFailingSinceAnnotation stamps, in RFC3339, the instant a claim first
+// failed to activate its selected husk pod. Like poolMissingSinceAnnotation it
+// is the durable anchor for a bounded-wait deadline: an activation may fail
+// transiently (a husk still coming up) and recover, so the claim retries with
+// backoff for a grace period before failing terminally (issue #894). Cleared on
+// a successful activation so a later re-activation starts a fresh clock.
+const activateFailingSinceAnnotation = "mitos.run/activate-failing-since"
+
+// activateFailingMaxBackoff caps the requeue delay for a persistently failing
+// activation, so a claim that cannot activate stops retrying at full cadence
+// (issue #894) without stalling recovery once a transient fault clears.
+const activateFailingMaxBackoff = 30 * time.Second
+
+// activateRetryBackoff returns the requeue delay for a claim that has been
+// failing to activate for waited: capacityPendingRequeue while the failure is
+// fresh, doubling as it persists, capped at activateFailingMaxBackoff. It is
+// derived from elapsed time rather than a stored attempt count, so it is
+// stateless and monotonic across controller restarts (issue #894).
+func activateRetryBackoff(waited time.Duration) time.Duration {
+	b := capacityPendingRequeue
+	for waited >= 2*b && b < activateFailingMaxBackoff {
+		b *= 2
+	}
+	if b > activateFailingMaxBackoff {
+		b = activateFailingMaxBackoff
+	}
+	return b
+}
 
 // huskHealthRequeue is how often a Ready husk claim re-checks its backing pod's
 // readiness so its Ready condition reflects a node/pod outage (the endpoint is
@@ -118,6 +149,12 @@ type SandboxReconciler struct {
 	forkSnapshot       huskForkSnapshotter
 	removeForkSnapshot huskForkSnapshotRemover
 
+	// ensureTokenSecret writes the per-sandbox token Secret. Nil defaults to
+	// ensureSandboxTokenSecret. Tests inject a fake to control when the concurrent
+	// write completes, which is the only way to assert that the warm-claim path
+	// JOINS that write before it returns.
+	ensureTokenSecret func(ctx context.Context, c client.Client, owner client.Object, name, token, endpoint string) error
+
 	// MultiVMFork routes a husk fork child into an ADDITIONAL VM spawned INSIDE the
 	// SOURCE pod (SpawnVMOnHusk) instead of a brand-new child pod, when the source
 	// pod is multi-VM capable. EXPERIMENTAL, DEFAULT OFF: off is byte-for-byte the
@@ -147,6 +184,17 @@ type SandboxReconciler struct {
 	// PrewarmChild passes --prewarm-child to warm husk pods so a fork adopts a
 	// pre-warmed dormant child. DEFAULT OFF; requires MultiVMFork.
 	PrewarmChild bool
+	// PrepareEgressLink passes --prepare-egress-link to warm husk pods so a dormant
+	// pod brings its default VM's tap up before any claim arrives, leaving only the
+	// atomic nft policy transaction on the warm-claim hot path. Requires MultiVMFork.
+	PrepareEgressLink bool
+	// PrepareRestore passes --prepare-restore so a dormant pod also loads its snapshot
+	// and resumes its guest before any claim arrives. Requires PrepareEgressLink.
+	PrepareRestore bool
+	// PrepareKernelPrefault passes --prepare-kernel-prefault so a pre-restored dormant
+	// pod also warms the run_code kernel's working set with the inert warm cell.
+	// Requires PrepareRestore. Fails open in the pod.
+	PrepareKernelPrefault bool
 
 	// spawnVM is the controller->husk spawn-vm seam used by the MultiVMFork routing.
 	// Nil defaults to SpawnVMOnHusk; tests inject a fake.
@@ -427,6 +475,20 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 			if reflectHuskBackingReadiness(claim, lostPod, r.now()) {
 				if err := r.Status().Update(ctx, claim); err != nil {
 					return ctrl.Result{}, err
+				}
+			}
+			// Claim-time org attribution (pre-claimed checkout): the gateway
+			// stamps the org on a formerly buffered sandbox's CR labels, and
+			// the reconcile that very patch triggers propagates the org to the
+			// backing husk pod, whose TRUSTED label is what the usage scraper
+			// bills. Idempotent, and a no-op for classic claims whose pod was
+			// labeled at claim time.
+			if lostPod != nil {
+				beforeOrg := lostPod.DeepCopy()
+				if propagateOrgToHuskPod(claim, lostPod) {
+					if err := r.Patch(ctx, lostPod, client.MergeFrom(beforeOrg)); err != nil {
+						return ctrl.Result{}, err
+					}
 				}
 			}
 		}
@@ -750,6 +812,20 @@ func (r *SandboxReconciler) reconcilePoolRef(ctx context.Context, claim *v1.Sand
 // it pends with backpressure and an actionable message so a transient husk
 // (snapshot not yet materialized, stub still starting) can recover. Secret
 // VALUES are never logged or put in status/conditions.
+// logClaimStage records one stage of the warm-claim activate, the claim-path analog of
+// logForkOrchStage. Without it the only visible number was the husk-reported engine
+// activate, so the Kubernetes round-trips around it (the Restoring status write, the
+// pod-claim label patch, the token Secret, the Ready status write) were invisible.
+// Measured end to end they cost about as much as the microVM restore itself.
+func logClaimStage(logger logr.Logger, claim string, stage string, d time.Duration) {
+	observeClaimStage(stage, d.Seconds())
+	logger.Info("claim stage timing",
+		"claim", claim,
+		"stage", stage,
+		"durMs", float64(d.Microseconds())/1000.0,
+	)
+}
+
 func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sandbox, pool *v1.SandboxPool, template *v1.PoolTemplateSpec) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -764,7 +840,10 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 	// by selectDormantHuskPod, so an evicted claim whose old pod is gone or dying
 	// always moves on to a new dormant pod rather than re-activating the dead one.
 	// Leader election (one active reconciler) is what bounds concurrent claiming.
+	claimStart := time.Now()
+	mark := time.Now()
 	pod, err := r.selectDormantHuskPod(ctx, pool)
+	logClaimStage(logger, claim.Name, "select_pod", time.Since(mark))
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -803,16 +882,22 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 	// A dormant pod is available: mark the claim Restoring before activating it.
 	// This is stamped here (not before pod selection) so a claim that cannot place
 	// stays Pending and settles, never cycling Pending -> Restoring -> Pending.
-	if claim.Status.Phase != v1.SandboxRestoring {
-		claim.Status.Phase = v1.SandboxRestoring
-		if err := r.Status().Update(ctx, claim); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
+	// Stamp Restoring IN MEMORY only. This used to be its own Status().Update, a full
+	// API round-trip (measured 10.4 ms mean) on the warm-claim critical path, and it
+	// bought nothing: control only reaches here once a dormant pod has been SELECTED,
+	// so the phase is Restoring for exactly as long as the activate takes (~100 ms)
+	// and then becomes Ready. A claim that cannot place returns Pending well above
+	// this line and never reaches it, so no observer ever saw a durable Restoring.
+	// The quota live-counter (internal/saas/controlplane/livecounter.go) counts
+	// Pending and Restoring alike, so concurrency accounting is unchanged, and every
+	// failure path below writes its own terminal phase.
+	claim.Status.Phase = v1.SandboxRestoring
 
 	// Resolve env + secrets (same path as the forkd fork). Secret VALUES live
 	// only in memory here and ride the mTLS control channel; never logged.
+	mark = time.Now()
 	env, secretVals, err := r.resolveSecrets(ctx, claim.Namespace, claim.Labels[tenant.OrgLabelKey], claim.Spec.Env, claim.Spec.Secrets)
+	logClaimStage(logger, claim.Name, "resolve_secrets", time.Since(mark))
 	if err != nil {
 		logger.Error(err, "secret resolution failed")
 		recordClaimError(claim.Spec.Source.PoolRef.Name, "secret")
@@ -860,7 +945,10 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 	// Winning the label patch is the gate to Activate, so a pod is activated by
 	// exactly one claim. On conflict we requeue so the next reconcile picks a
 	// different dormant pod.
-	if err := r.markHuskPodClaimed(ctx, pod, claim); err != nil {
+	mark = time.Now()
+	markErr := r.markHuskPodClaimed(ctx, pod, claim)
+	logClaimStage(logger, claim.Name, "mark_pod_claimed", time.Since(mark))
+	if err := markErr; err != nil {
 		if apierrors.IsConflict(err) {
 			logger.Info("husk pod claimed concurrently, requeueing to pick another", "pod", pod.Name)
 			beforeStatus := claim.Status.DeepCopy()
@@ -898,6 +986,9 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 	}
 
 	addr := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(controlPort))
+	// Derived from the pod IP alone, not from the activate result, so it is known
+	// before the RPC and the token Secret write can overlap it.
+	endpoint := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(sandboxPort))
 	netCfg := huskEgressConfig(template)
 	req := husk.ActivateRequest{
 		SnapshotDir:    HuskSnapshotDir,
@@ -913,11 +1004,51 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 		InboundCIDRs:   netCfg.InboundCIDRs,
 		Token:          apiToken,
 	}
+	// Write the per-sandbox token Secret CONCURRENTLY with the activate RPC. Both
+	// inputs are already known (the token was minted above; the endpoint is derived
+	// from the pod IP, not from the activate result), so the Secret write is a pure
+	// API round-trip (measured 7.4 ms) that used to sit in series after a ~100 ms
+	// activate for no reason.
+	//
+	// Ordering contract is preserved: the Secret is durable BEFORE the claim goes
+	// Ready, because we join the goroutine before the Ready status write. An activate
+	// that then fails leaves a Secret for a not-Ready claim; that is harmless (it is
+	// owner-ref'd to the claim, so it is garbage-collected with it, and the next pass
+	// re-mints and overwrites it before the claim can ever be served).
+	//
+	// The goroutine gets its OWN copy of the claim and a precomputed Secret name. The
+	// activate-failure path below mutates claim.Status and returns WITHOUT joining, so
+	// handing the live object to a still-running writer would share mutable state
+	// across goroutines with no synchronization.
+	//
+	// The write runs under a CANCELLABLE context and every path out of this function
+	// JOINS it. A reconcile that returned while the write was still in flight would
+	// leave a writer holding an OLD token: the retry mints a NEW one and rewrites the
+	// SAME Secret, and whichever write lands last wins. The stale one landing last
+	// leaves a Ready claim whose Secret holds a token the husk never received.
+	writeTokenSecret := r.ensureTokenSecret
+	if writeTokenSecret == nil {
+		writeTokenSecret = ensureSandboxTokenSecret
+	}
+	tokenCtx, cancelTokenWrite := context.WithCancel(ctx)
+	defer cancelTokenWrite()
+	tokenErrCh := make(chan error, 1)
+	tokenStart := time.Now()
+	tokenOwner := claim.DeepCopy()
+	tokenSecretName := claim.Name + tokenSecretSuffix
+	go func() {
+		tokenErrCh <- writeTokenSecret(tokenCtx, r.Client, tokenOwner, tokenSecretName, apiToken, endpoint)
+	}()
+
+	mark = time.Now()
 	tlsConf, err := r.huskDialTLS(ctx, pod.Namespace)
+	logClaimStage(logger, claim.Name, "dial_tls", time.Since(mark))
 	var res husk.ActivateResult
+	mark = time.Now()
 	if err == nil {
 		res, err = activate(ctx, addr, tlsConf, req)
 	}
+	logClaimStage(logger, claim.Name, "activate_rpc", time.Since(mark))
 	if err != nil || !res.OK {
 		// FAIL CLOSED: do not go Ready. Pend so a transient husk can recover.
 		msg := "husk activation did not complete"
@@ -928,6 +1059,23 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 		}
 		logger.Info("husk activation failed, pending", "pod", pod.Name, "node", pod.Spec.NodeName, "detail", msg)
 		recordClaimError(claim.Spec.Source.PoolRef.Name, "activate")
+		// Join the in-flight token Secret write BEFORE returning. The next pass mints a
+		// new token and rewrites the same Secret; a writer still holding this pass's
+		// token could otherwise land after it and leave the Ready claim with a token the
+		// husk never received. Cancelling first makes the join prompt.
+		cancelTokenWrite()
+		joinStart := time.Now()
+		tokErr := <-tokenErrCh
+		// This join can block on the same write the success path times, so it is timed
+		// too: a failing claim that is slow BECAUSE it waited on the Secret write would
+		// otherwise be invisible.
+		logClaimStage(logger, claim.Name, "token_secret_wait", time.Since(joinStart))
+		logClaimStage(logger, claim.Name, "token_secret_span", time.Since(tokenStart))
+		if tokErr != nil && !errors.Is(tokErr, context.Canceled) {
+			// The claim is pending anyway; the next pass re-mints and overwrites. Never
+			// log the token VALUE.
+			logger.Error(tokErr, "token secret write failed while pending the claim", "secret", tokenSecretName)
+		}
 		// Release the claim label stamped before activation so this pod returns to
 		// the dormant pool and can be retried (by this claim or another). Without
 		// this a stamped-but-not-activated pod is orphaned forever, leaking warm
@@ -935,26 +1083,92 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 		if uerr := r.unmarkHuskPodClaimed(ctx, pod); uerr != nil {
 			logger.Error(uerr, "release husk pod claim label after activation failure", "pod", pod.Name)
 		}
+		// Bounded retry with backoff, then terminal (#894). An activation that can
+		// NEVER succeed (a missing snapshot artifact, a digest that will never
+		// match) previously re-pended at the flat capacityPendingRequeue cadence
+		// forever, with no backoff and no terminal state, burning forkd RPCs and
+		// apiserver writes (a stuck pair produced ~1750 futile RPCs and ~3500
+		// writes in an hour). Anchor the first-failure instant on a durable
+		// annotation, mirroring poolMissingSinceAnnotation: back off as the
+		// failure persists, and after the same bounded grace as the capacity wait
+		// fail the claim terminally with the engine's own error so the cause is
+		// actionable (#28).
+		now := r.now()
+		failingSince := now
+		if stamp := claim.Annotations[activateFailingSinceAnnotation]; stamp != "" {
+			if parsed, perr := time.Parse(time.RFC3339, stamp); perr == nil {
+				failingSince = parsed
+			}
+		} else {
+			if claim.Annotations == nil {
+				claim.Annotations = map[string]string{}
+			}
+			claim.Annotations[activateFailingSinceAnnotation] = now.Format(time.RFC3339)
+			if uerr := r.Update(ctx, claim); uerr != nil {
+				return ctrl.Result{}, uerr
+			}
+		}
+		waited := now.Sub(failingSince)
+		maxWait := r.maxPendingDuration()
+
+		// Bounded fail: activation never succeeded within the grace period.
+		if waited >= maxWait {
+			finished := metav1.NewTime(now)
+			claim.Status.Phase = v1.SandboxFailed
+			claim.Status.FinishedAt = &finished
+			setCondition(&claim.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: finished,
+				Reason:             "ActivateFailed",
+				Message: fmt.Sprintf(
+					"%s; still failing after %s, past the %s grace period. The husk snapshot on node %q may be missing or corrupt; check the pool's TemplateBuilt condition and forkd's logs on that node, then recreate the sandbox",
+					msg, waited.Round(time.Second), maxWait, pod.Spec.NodeName,
+				),
+			})
+			_ = r.Status().Update(ctx, claim)
+			logger.Info("claim failed: husk activation did not succeed past bounded wait", "claim", claim.Name, "node", pod.Spec.NodeName, "waited", waited.Round(time.Second), "maxWait", maxWait)
+			return ctrl.Result{}, nil
+		}
+
 		beforeStatus := claim.Status.DeepCopy()
 		claim.Status.Phase = v1.SandboxPending
 		setCondition(&claim.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.NewTime(r.now()),
+			LastTransitionTime: metav1.NewTime(now),
 			Reason:             "ActivateFailed",
-			Message:            msg + "; the claim will retry",
+			Message:            msg + "; the claim will retry with backoff",
 		})
 		_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
-		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+		return ctrl.Result{RequeueAfter: activateRetryBackoff(waited)}, nil
 	}
 
-	endpoint := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(sandboxPort))
+	// A previously failing activation just succeeded: clear the grace stamp so a
+	// later re-activation (failover, #177) starts a fresh clock. The guard makes
+	// the common first-try success pay only a map lookup, never a write.
+	if claim.Annotations[activateFailingSinceAnnotation] != "" {
+		delete(claim.Annotations, activateFailingSinceAnnotation)
+		if uerr := r.Update(ctx, claim); uerr != nil {
+			return ctrl.Result{}, uerr
+		}
+	}
 
 	// The pod was already claimed (optimistic-lock label patch) BEFORE activation,
 	// so this VM belongs to exactly this claim. Hand the token to the claim's
 	// consumer via an owned Secret BEFORE the Ready
 	// write (same ordering as the forkd path).
-	if err := ensureSandboxTokenSecret(ctx, r.Client, claim, claim.Name+tokenSecretSuffix, apiToken, endpoint); err != nil {
+	// Join the concurrent token Secret write. Two numbers, because one alone lies:
+	// token_secret_wait is what the critical path actually PAYS (the time still
+	// blocked here after the activate returned, normally ~0 because the activate
+	// outlasts the write), while token_secret_span is the wall time of the write
+	// itself, overlapped. Reporting only the span would look like a 150 ms
+	// regression when the write in fact left the critical path entirely.
+	joinStart := time.Now()
+	tokErr := <-tokenErrCh
+	logClaimStage(logger, claim.Name, "token_secret_wait", time.Since(joinStart))
+	logClaimStage(logger, claim.Name, "token_secret_span", time.Since(tokenStart))
+	if err := tokErr; err != nil {
 		logger.Error(err, "token secret write failed")
 		recordClaimError(claim.Spec.Source.PoolRef.Name, "token")
 		now := metav1.Now()
@@ -992,9 +1206,13 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 		Reason:             "HuskActivated",
 		Message:            fmt.Sprintf("activated husk pod %s on node %s in %.2fms", pod.Name, pod.Spec.NodeName, res.LatencyMs),
 	})
-	if err := r.Status().Update(ctx, claim); err != nil {
-		return ctrl.Result{}, err
+	mark = time.Now()
+	readyErr := r.Status().Update(ctx, claim)
+	logClaimStage(logger, claim.Name, "status_write_ready", time.Since(mark))
+	if readyErr != nil {
+		return ctrl.Result{}, readyErr
 	}
+	logClaimStage(logger, claim.Name, "total", time.Since(claimStart))
 
 	logger.Info("sandbox claimed via husk activation", "sandbox", claim.Name, "pod", pod.Name, "node", pod.Spec.NodeName)
 	return ctrl.Result{}, nil

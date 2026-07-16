@@ -192,6 +192,18 @@
           "description": "EXPERIMENTAL, default off. With liveCowFork on, render --live-cow-child-import so an armed live-cow fork takes the vmstate-only capture (skip the ~364ms disk mem write) and the co-located child boots its guest RAM from the source shared memfd. Requires a child-side-import patched Firecracker; off keeps the armed source writing the disk mem.",
           "type": "boolean"
         },
+        "huskPrepareEgressLink": {
+          "description": "EXPERIMENTAL, default off. With multiVMFork on, render --husk-prepare-egress-link so warm husk pods bring their default VM's tap up while dormant under a default-deny policy; a claim pays only the atomic nft transaction that installs the tenant policy.",
+          "type": "boolean"
+        },
+        "huskPrepareRestore": {
+          "description": "EXPERIMENTAL, default off. With huskPrepareEgressLink on, render --husk-prepare-restore so warm husk pods load their default VM's snapshot and resume its guest while dormant; a claim pays only the fork-correctness handshake.",
+          "type": "boolean"
+        },
+        "huskPrepareKernelPrefault": {
+          "description": "EXPERIMENTAL, default off. With huskPrepareRestore on, render --husk-prepare-kernel-prefault so a pre-restored dormant pod runs the inert warm cell once, making the run_code kernel's working set resident before the first tenant cell. Fails open on a kernel-less template.",
+          "type": "boolean"
+        },
         "prewarmChild": {
           "description": "EXPERIMENTAL, default off. With multiVMFork on, render --prewarm-child so each multi-vm husk pod keeps one dormant generic co-located child Firecracker pre-prepared and a fork adopts it (fc_boot off the hot path) instead of booting one at fork time. A miss falls back to on-demand prepare.",
           "type": "boolean"
@@ -925,6 +937,14 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "orgTiers": {
+          "description": "Operator tier grants (issue #881): map of orgID to tier name. Each entry renders one --org-tier=<org>=<tier> gateway flag; unlisted orgs stay on the fail-closed free default. The pro tier also opens the sandbox egress posture.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["free", "starter", "pro"]
+          }
+        },
         "enabled": {
           "description": "Render the gateway Deployment, Service, and RBAC.",
           "type": "boolean"
@@ -960,6 +980,34 @@
         "singleTenantNamespace": {
           "description": "When non-empty, pins all sandbox operations to this fixed namespace instead of per-org namespaces.",
           "type": "string"
+        },
+        "checkout": {
+          "description": "Pre-claimed checkout: a buffer of already-activated sandboxes served to eligible creates with one attribution patch. Requires singleTenantNamespace; empty pools disables it.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "pools": {
+              "description": "Pool names served by the checkout buffer; empty disables the feature.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "floor": {
+              "description": "Buffered sandboxes to keep ready per checkout pool.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "cap": {
+              "description": "Hard ceiling of buffered sandboxes per checkout pool.",
+              "type": "integer",
+              "minimum": 1
+            },
+            "maxAge": {
+              "description": "Buffered sandboxes older than this are recycled (Go duration).",
+              "type": "string"
+            }
+          }
         },
         "ingress": {
           "$ref": "#/definitions/ingress"

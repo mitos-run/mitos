@@ -57,15 +57,23 @@ func runtimeMethod(path string) (string, bool) {
 	}
 }
 
-// requiredScopeFor maps a public operation to the scope a key must carry. A
-// read-only op is satisfied by either scope; a mutating op requires the sandbox
-// scope. An unknown op requires the sandbox scope (fail closed).
+// requiredScopeFor maps a public operation to the scope a key must carry
+// (issue #784). Read ops need ScopeReadOnly; a runtime call (exec, files,
+// run_code inside an existing sandbox) needs ScopeExecute; every mutating
+// lifecycle verb (create, fork, terminate, pause, resume, and template.ensure)
+// needs ScopeLifecycle. An unmapped op fails CLOSED to ScopeLifecycle, the most
+// privileged resource scope, so a newly added route cannot slip through on a
+// read-only or execute-only key. The legacy full-lifecycle "sandboxes" scope
+// satisfies read, execute, and lifecycle through the implication graph, so an
+// existing key keeps reaching every op it could before.
 func requiredScopeFor(op string) string {
 	switch op {
 	case "sandbox.list", "sandbox.status", "template.list":
 		return ScopeReadOnly
+	case opRuntime:
+		return ScopeExecute
 	default:
-		return ScopeSandboxes
+		return ScopeLifecycle
 	}
 }
 
@@ -229,7 +237,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	res, err := g.keys.Verify(r.Context(), raw, scope)
 	if err != nil {
-		g.failVerify(w, err)
+		g.failVerify(w, err, op, scope)
 		return
 	}
 	orgID := res.Key.OrgID
@@ -293,21 +301,34 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// The Forward round trip is the server-side view of the latency the SDK
 	// observes (create readiness wait, runtime proxy); it feeds the duration
-	// histogram labeled by the bounded op and status class.
+	// histogram labeled by the bounded op and status class, and the completion
+	// log line below (issue #901): the histogram answers "how slow is this op
+	// overall", the line attributes ONE slow request to a leg.
 	forwardStarted := time.Now()
 	resp, err := g.cp.Forward(ctx, fwd)
+	forwardDur := time.Since(forwardStarted)
 	if err != nil {
 		e := apierr.Get(apierr.CodeInternal).
 			WithCause("the control plane could not service the request")
-		g.metrics.observeForwardDuration(op, e.Status, time.Since(forwardStarted))
-		g.fail(w, e)
+		g.metrics.observeForwardDuration(op, e.Status, forwardDur)
+		// The error envelope is a client write too: time and count it through a
+		// counting writer, so a client that stalls on failures is as visible as
+		// one that stalls on successes, and emit the done line AFTER it.
+		cw := &countingResponseWriter{ResponseWriter: w}
+		writeStarted := time.Now()
+		g.fail(cw, e)
+		extra := []any{"error", "control plane forward failed"}
+		if cw.err != nil {
+			extra = append(extra, "write_error", cw.err.Error())
+		}
+		g.logForwardDone(res.Key.ID, orgID, op, e.Status, forwardDur, time.Since(writeStarted), cw.n, extra...)
 		return
 	}
 	status := resp.Status
 	if status == 0 {
 		status = http.StatusOK
 	}
-	g.metrics.observeForwardDuration(op, status, time.Since(forwardStarted))
+	g.metrics.observeForwardDuration(op, status, forwardDur)
 
 	// Product telemetry: a successful create emits a sandbox.created event and a
 	// successful live fork (sandbox.fork) emits sandbox.forked, so feature
@@ -342,14 +363,67 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	g.metrics.observeStatus(status)
 	w.WriteHeader(status)
+
+	// The response-write leg is timed and its error RECORDED, not swallowed: a
+	// client that stopped reading (the prod read-timeout signature, issue #901)
+	// or a wedged streamed Connect body surfaces here as write_ms or write_error
+	// on the completion line, the only place a hang past the forward entry is
+	// visible at all.
+	writeStarted := time.Now()
+	var written int64
+	var writeErr error
 	if resp.BodyStream != nil {
 		// Stream the response without buffering (this carries a streamed Connect
 		// response), then close the upstream body.
 		defer func() { _ = resp.BodyStream.Close() }()
-		_, _ = io.Copy(w, resp.BodyStream)
-		return
+		written, writeErr = io.Copy(w, resp.BodyStream)
+	} else {
+		var n int
+		n, writeErr = w.Write(resp.Body)
+		written = int64(n)
 	}
-	_, _ = w.Write(resp.Body)
+	extra := []any{}
+	if writeErr != nil {
+		extra = append(extra, "write_error", writeErr.Error())
+	}
+	g.logForwardDone(res.Key.ID, orgID, op, status, forwardDur, time.Since(writeStarted), written, extra...)
+}
+
+// countingResponseWriter records the bytes and first error of the body writes
+// that pass through it, so the error-envelope leg of a failed forward carries
+// the same write_ms / bytes / write_error observability as a success body.
+type countingResponseWriter struct {
+	http.ResponseWriter
+	n   int64
+	err error
+}
+
+func (w *countingResponseWriter) Write(p []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(p)
+	w.n += int64(n)
+	if err != nil && w.err == nil {
+		w.err = err
+	}
+	return n, err
+}
+
+// logForwardDone emits the per-request completion line (issue #901): the same
+// identity fields as the forward entry line, plus the response status and where
+// the time went, split into the control-plane forward leg and the client
+// response-write leg. Durations, counts, and identifiers only; never the key or
+// a token value.
+func (g *Gateway) logForwardDone(keyID, orgID, op string, status int, forwardDur, writeDur time.Duration, written int64, extra ...any) {
+	fields := []any{
+		"key_id", keyID,
+		"org", orgID,
+		"op", op,
+		"status", status,
+		"forward_ms", float64(forwardDur.Microseconds()) / 1000.0,
+		"write_ms", float64(writeDur.Microseconds()) / 1000.0,
+		"bytes", written,
+	}
+	fields = append(fields, extra...)
+	g.log.Info("gateway forward done", fields...)
 }
 
 // curatedRuntimeHeaders copies only the headers the runtime proxy needs across
@@ -369,10 +443,20 @@ func curatedRuntimeHeaders(in http.Header) http.Header {
 // failVerify maps a key-verification error to the public envelope. A missing,
 // malformed, or unknown key is unauthorized (a probe cannot distinguish them); an
 // expired or revoked key is unauthorized; a scope or wrong-org failure is
-// forbidden (the credential is valid but the action is not allowed for it).
-func (g *Gateway) failVerify(w http.ResponseWriter, err error) {
+// forbidden (the credential is valid but the action is not allowed for it). A
+// scope denial is LLM-legible (issue #784): its remediation names the exact
+// scope the operation needs and how to obtain a key that carries it, and its
+// context reports the op and the required scope so an agent can self-correct
+// without probing. The scope name is not a secret.
+func (g *Gateway) failVerify(w http.ResponseWriter, err error, op, requiredScope string) {
 	switch {
-	case errors.Is(err, ErrKeyScope), errors.Is(err, ErrKeyWrongOrg):
+	case errors.Is(err, ErrKeyScope):
+		g.metrics.observeAuthDenial(denialForbidden)
+		g.fail(w, apierr.Get(apierr.CodeForbidden).
+			WithCause("the api key is valid but lacks the scope required for this operation").
+			WithRemediation("Mint or use an api key that carries the "+requiredScope+" scope (create keys in the console or with mitos auth keys create; a read-only key cannot perform lifecycle or execute operations).").
+			WithContext(map[string]any{"op": op, "required_scope": requiredScope}))
+	case errors.Is(err, ErrKeyWrongOrg):
 		g.metrics.observeAuthDenial(denialForbidden)
 		g.fail(w, apierr.Get(apierr.CodeForbidden).
 			WithCause("the key is valid but not permitted for this action"))

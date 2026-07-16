@@ -332,6 +332,22 @@ type ForkSnapshotRequest struct {
 	ForkID      string `json:"fork_id"`
 	SnapshotDir string `json:"snapshot_dir"`
 	PauseSource bool   `json:"pause_source,omitempty"`
+	// RequireMemFile forces the Full CreateSnapshot(mem, vmstate) capture even on an
+	// armed live-cow source with child import enabled, which would otherwise take the
+	// vmstate-only path and write NO `mem` file.
+	//
+	// The vmstate-only capture is only restorable by a child that can reach the
+	// SOURCE's shared memfd, which means a child CO-LOCATED in the source pod. When a
+	// fork's replica count exceeds the pod's co-location budget the remaining children
+	// spill into their OWN husk pods, and a child in a different pod has no path to
+	// that memfd: it must restore from the disk fork snapshot. Without a `mem` file it
+	// has nothing to restore, never activates, and the fork hangs at
+	// "<budget>/<replicas> husk forks ready" forever.
+	//
+	// The controller knows the co-location budget before it takes the one-time fork
+	// snapshot, so it sets this whenever ANY child will land in its own pod. Empty
+	// (false) keeps the fast vmstate-only path for a fully co-located fork.
+	RequireMemFile bool `json:"require_mem_file,omitempty"`
 }
 
 // ForkSnapshotResult is the control reply for a ForkSnapshot op. OK is true only

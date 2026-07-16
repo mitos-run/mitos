@@ -12,11 +12,22 @@
 #     byte-for-byte unchanged, so the image behaves like stock until those gates are
 #     used. Installing it everywhere is safe.
 #   - Provenance: built reproducibly in mitos-run/firecracker on branch
-#     mitos/child-memfd-import-v1.15.0 via .github/workflows/build-patched-fc.yml
-#     (green run https://github.com/mitos-run/firecracker/actions/runs/28915829813)
+#     mitos/lazy-restore-v1.15.0 via .github/workflows/build-patched-fc.yml
+#     (green run https://github.com/mitos-run/firecracker/actions/runs/29022392083)
 #     and published as a GitHub release asset, pinned by sha256 below. A compromised
-#     CDN or a network substitution cannot install a different binary. This binary
-#     adds the m5 child-side memfd import (issue #832): a co-located fork child that
+#     CDN or a network substitution cannot install a different binary.
+#
+#     This binary ALSO carries m7, the LAZY live-cow restore: guest_memory_from_file
+#     no longer COPIES the mem file into the shared memfd inside PUT /snapshot/load
+#     (which cost ~195ms of a ~218ms warm-claim activate on a 512 MiB guest, and gave
+#     every VM its own private 512 MiB of shmem). The memfd is created EMPTY and the
+#     husk's WP handler serves userfaultfd MISSING faults out of the mem file. The
+#     lazy path needs FIRECRACKER_MITOS_LAZY_RESTORE (which the husk sets only once it
+#     has opened a mem source) alongside FIRECRACKER_MITOS_WP_UDS, so an OLDER husk
+#     paired with this binary keeps the eager copy, and a failed arm aborts the restore
+#     rather than resuming vCPUs on all-zero guest RAM.
+#
+#     It also adds the m5 child-side memfd import (issue #832): a co-located fork child that
 #     is launched with FIRECRACKER_MITOS_CHILD_MEMFD boots its guest RAM by copying
 #     the source guest memfd's fork-time image into ANONYMOUS private RAM (divorced
 #     from the live memfd) plus the frozen overlay, and loads NO disk mem file, so the
@@ -38,8 +49,8 @@ set -euo pipefail
 
 # --- single pinned provenance constants (audit + bump only here) -------------
 PATCHED_FC_VERSION="v1.15.0"
-PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-child-memfd-import-v1.15.0-2/firecracker-v1.15.0-x86_64-mitos-child-memfd-import"
-PATCHED_FC_SHA256="7d02b374a5a60a59c39842733305ce719f6fa42c64f3f180a13a5d70dc515272"
+PATCHED_FC_URL="https://github.com/mitos-run/firecracker/releases/download/mitos-fc-lazy-restore-v1.15.0/firecracker-v1.15.0-x86_64-mitos-lazy-restore"
+PATCHED_FC_SHA256="d341a8f3be0e0390e4080767946f2180f86eae267e6110c102cda537f60cad2f"
 # -----------------------------------------------------------------------------
 
 arch="$(uname -m)"

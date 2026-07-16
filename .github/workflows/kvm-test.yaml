@@ -58,6 +58,21 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
+      # This job writes a guest rootfs, a kernel, and several 512 MiB memory snapshots
+      # under /tmp, which lives on the runner's small root filesystem. It ran out of
+      # space on three unrelated pull requests, failing in whichever step happened to
+      # need the last block (a 512 MiB dd, then the Go linker: "mapping output file
+      # failed: no space left on device"). Reclaim the preinstalled toolchains this job
+      # never uses, and print the result so a future exhaustion is diagnosable.
+      - name: Free disk space on the root filesystem
+        run: |
+          echo "Before:"
+          df -h / | sed "s/^/  /"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc             /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          echo "After:"
+          df -h / | sed "s/^/  /"
+
       - name: Check KVM availability
         run: |
           ls -la /dev/kvm
@@ -387,6 +402,17 @@ jobs:
           cargo build --release --target x86_64-unknown-linux-musl --features vsock
           cp target/x86_64-unknown-linux-musl/release/sandbox-agent /tmp/mitos-test/agent
           ls -lh /tmp/mitos-test/agent
+
+      - name: Guest agent RLIMIT_NOFILE tests (issue #786)
+        run: |
+          # Run the sys::rlimit suite on this Linux host: the pure parse/resolve
+          # unit tests plus the Linux-gated integration test that spawns a child
+          # and asserts its soft RLIMIT_NOFILE is actually raised. Scoped to the
+          # module so it stays deterministic and does not require the booted-VM
+          # or Python-kernel fixtures the other guest tests need.
+          source "$HOME/.cargo/env" 2>/dev/null || true
+          cd guest/agent-rs
+          cargo test --lib sys::rlimit
 
       # OCI image -> rootfs pipeline proof (issue #10). This is the gate that
       # proves Engine.CreateTemplate builds a bootable template FROM A REAL OCI
@@ -1788,8 +1814,17 @@ jobs:
           set -e
           sudo apt-get install -y btrfs-progs
           REFLINK_ROOT=/mnt/reflink-btrfs
-          REFLINK_IMG=/tmp/mitos-test/reflink-btrfs.img
-          dd if=/dev/zero of=$REFLINK_IMG bs=1M count=512 status=none
+          # The backing image lives on /mnt, the runner's LARGE ephemeral disk, not on
+          # /tmp. /tmp is on the small root filesystem that the Firecracker steps above
+          # have already loaded with a rootfs, a kernel, and 512 MiB memory snapshots,
+          # so a 512 MiB dd there intermittently died with
+          # "dd: error writing ...: No space left on device" and failed this job on
+          # three unrelated pull requests.
+          REFLINK_IMG=/mnt/reflink-btrfs.img
+          echo "Disk before creating the btrfs image:"
+          df -h / /mnt | sed "s/^/  /"
+          sudo dd if=/dev/zero of=$REFLINK_IMG bs=1M count=512 status=none
+          sudo chmod 666 $REFLINK_IMG
           mkfs.btrfs -q $REFLINK_IMG
           sudo mkdir -p $REFLINK_ROOT
           sudo mount -o loop $REFLINK_IMG $REFLINK_ROOT
@@ -1801,6 +1836,7 @@ jobs:
           TMPDIR=$REFLINK_ROOT go test -tags reflink_integration \
             ./internal/volume/ -run TestReflinkCopyRealFilesystem -v
           sudo umount $REFLINK_ROOT || true
+          sudo rm -f $REFLINK_IMG
           echo "================================"
           echo "  Per-activation rootfs CoW reflink proven (byte-identical clone on btrfs)"
           echo "================================"
@@ -2540,6 +2576,25 @@ jobs:
               kill $stub_pid 2>/dev/null || true
               fail_active "activate $n result ok=$ok"
             fi
+            # Reject a non-numeric latency BEFORE it reaches the percentile awk,
+            # which would fold null/empty into 0.000 and could sneak a broken
+            # measurement past the gross-regression ceiling below (a P50 gate is
+            # only as trustworthy as its samples).
+            case "$lat" in
+              ''|null|*[!0-9.]*|*.*.*)
+                kill $stub_pid 2>/dev/null || true
+                fail_active "activate $n returned a non-numeric latency_ms='$lat'; the measurement is broken, not fast"
+                ;;
+            esac
+            # A lone "." (or any value with no digit) passes the pattern above
+            # but is not a number, so require at least one digit.
+            case "$lat" in
+              *[0-9]*) : ;;
+              *)
+                kill $stub_pid 2>/dev/null || true
+                fail_active "activate $n returned a digitless latency_ms='$lat'; the measurement is broken, not fast"
+                ;;
+            esac
             echo "activate $n: OK latency_ms=$lat vsock=$vsock"
 
             # First run: exec a real command through the guest agent over the
@@ -2587,6 +2642,28 @@ jobs:
           read -r CNT MIN P50 P99 MAX <<< "$STATS"
           echo "husk-stub activation latency: n=$CNT min=${MIN}ms p50=${P50}ms p99=${P99}ms max=${MAX}ms"
 
+          # GROSS activation-latency regression gate. This step's activate is the
+          # full LoadSnapshot + resume + guest-ready for the 256 MiB bench snapshot,
+          # and it is remarkably stable on this shared runner: P50 ~54 ms, max ~58 ms
+          # across recent main runs. The <=10 ms bare-metal target is NOT asserted
+          # here (shared CI is not bare metal, see below); what IS asserted is a
+          # GENEROUS ceiling so a gross regression fails the build instead of only
+          # showing in the summary. 200 ms is ~3.7x the observed P50 with wide margin
+          # against nested-KVM noise on a cold runner, so it catches the class of
+          # break that matters (the restore silently returning to a slow path, a 2-3x
+          # slowdown) without flaking on ordinary variance. The SUBTLE +20 ms class
+          # (which rode a flag-off path in v1.40.0) is caught by the in-region prod
+          # TTI canary (.github/workflows/tti-canary.yaml), not here; and the
+          # prepare-time restore fast path is asserted tightly (vmstate_restore < 10 ms)
+          # by the "Prepare-time restore" step above. Together: mechanism gate +
+          # gross-CI gate + subtle prod gate.
+          ACTIVATE_CEILING_MS=200
+          if awk "BEGIN{exit !(${P50} > ${ACTIVATE_CEILING_MS})}"; then
+            echo "HUSK-STUB-FAILED: activation P50 ${P50}ms exceeds the ${ACTIVATE_CEILING_MS}ms gross-regression ceiling; the warm-claim activate has regressed materially (restore back on the hot path, or a 2-3x slowdown). Investigate before merge; do NOT raise the ceiling to make this green."
+            exit 1
+          fi
+          echo "activation P50 ${P50}ms within the ${ACTIVATE_CEILING_MS}ms gross-regression ceiling"
+
           {
             echo ""
             echo "## Husk-stub in-place activation latency (shared-CI-class, NOT bare metal)"
@@ -2617,6 +2694,163 @@ jobs:
           path: |
             /tmp/mitos-test/husk-stub/result*.json
             /tmp/mitos-test/husk-stub/latencies.txt
+          if-no-files-found: warn
+
+      # Prepare-time restore KVM gate (slices 1+2 of
+      # docs/superpowers/plans/2026-07-10-prepare-time-restore.md). With
+      # --prepare-egress-link and --prepare-restore ON, a husk stub must:
+      #   (a) bring the default VM's tap up and RESTORE + RESUME its guest while
+      #       DORMANT (proven by the "prepare-restore ... resumed dormant guest"
+      #       stderr marker appearing BEFORE any activate request);
+      #   (b) serve the claim from the pre-restored guest: the activate result's
+      #       vmstate_restore stage must be ~0 (the fast path skips the load; the
+      #       stage is two clock reads apart, so <10ms is generous even on shared
+      #       CI) and a real exec must work through the activated guest agent;
+      #   (c) FAIL CLOSED on a snapshot-dir mismatch (a resumed guest cannot be
+      #       reloaded) with no side effects: the SAME stub must then activate
+      #       fine when asked for the snapshot it actually pre-restored.
+      # This needs a snapshot with the BAKED placeholder NIC (Firecracker binds
+      # it to the prepared tap at restore), which is exactly what the net-fork
+      # phase's engine-built template is; the bench template is built without
+      # networking and has no NIC, so it plays the MISMATCH role only. Tap and
+      # nftables mutations need root, so the stub runs under sudo, mirroring the
+      # networked live-fork phase. A missing snapshot or a control socket that
+      # never appears is a SETUP flake (PREP-RESTORE-SETUP), distinct from a real
+      # gate failure (PREP-RESTORE-FAILED).
+      - name: Prepare-time restore, dormant resume then fast-path activate and fail-closed mismatch
+        timeout-minutes: 10
+        run: |
+          set -e
+          sudo chmod 666 /dev/kvm
+          command -v nft >/dev/null || sudo apt-get install -y nftables
+
+          NET_SNAP=/tmp/mitos-test/net-fork-data/templates/nf-tmpl/snapshot
+          BENCH_SNAP=/tmp/mitos-test/bench-data/templates/bench/snapshot
+          WORKBASE=/tmp/mitos-test/prep-restore
+          mkdir -p $WORKBASE
+
+          fail_setup() { echo "PREP-RESTORE-SETUP: $1"; exit 1; }
+          fail_gate()  { echo "PREP-RESTORE-FAILED: $1"; exit 1; }
+
+          [ -f "$NET_SNAP/mem" ] && [ -f "$NET_SNAP/vmstate" ] || \
+            fail_setup "networked template snapshot not present at $NET_SNAP (net-fork phase did not complete)"
+          [ -f "$BENCH_SNAP/mem" ] || \
+            fail_setup "bench snapshot not present at $BENCH_SNAP (needed as the mismatch snapshot)"
+
+          go build -o /tmp/husk-stub ./cmd/husk-stub/
+          go build -o /tmp/test-agent ./cmd/test-agent/
+
+          # start_stub <n>: fresh dormant stub in its own workdir with BOTH
+          # prepare flags on. Prepare now includes the snapshot load, resume,
+          # and guest-ready wait, so the control socket appears only after the
+          # dormant restore finished; the wait is sized for that.
+          start_stub() {
+            local n=$1
+            local workdir=$WORKBASE/vm$n
+            mkdir -p $workdir
+            rm -f $WORKBASE/control$n.sock
+            sudo /tmp/husk-stub \
+              --firecracker /usr/local/bin/firecracker \
+              --workdir $workdir \
+              --control-socket $WORKBASE/control$n.sock \
+              --sandbox-listen 127.0.0.1:$((19290 + n)) \
+              --mem-mib 256 \
+              --multi-vm \
+              --prepare-egress-link \
+              --prepare-restore \
+              --in-pod-guest-ip 10.200.0.2 \
+              --in-pod-gateway-ip 10.200.0.1 \
+              --snapshot-dir $NET_SNAP \
+              --allow-unverified-snapshots \
+              > $WORKBASE/stub$n.log 2>&1 &
+            STUB_PID=$!
+            local ready=0
+            for i in $(seq 1 120); do
+              if [ -S "$WORKBASE/control$n.sock" ]; then ready=1; break; fi
+              if ! sudo kill -0 $STUB_PID 2>/dev/null; then break; fi
+              sleep 0.5
+            done
+            if [ "$ready" -ne 1 ]; then
+              echo "=== stub$n log ==="; cat $WORKBASE/stub$n.log || true
+              sudo kill $STUB_PID 2>/dev/null || true
+              fail_gate "stub $n never went dormant with --prepare-restore on (restore-at-prepare failed or hung)"
+            fi
+          }
+
+          stop_stub() {
+            sudo kill $STUB_PID 2>/dev/null || true
+            sleep 0.5
+          }
+          trap 'sudo kill $STUB_PID 2>/dev/null || true' EXIT
+
+          echo "================================"
+          echo "  (a) dormant restore happens at Prepare"
+          echo "================================"
+          start_stub 1
+          grep -q 'prepare-restore vm .* resumed dormant guest' $WORKBASE/stub1.log || {
+            echo "=== stub1 log ==="; cat $WORKBASE/stub1.log
+            fail_gate "stub went dormant but never logged the prepare-restore marker; the restore did not happen at Prepare"
+          }
+
+          echo "================================"
+          echo "  (b) activate takes the fast path and exec works"
+          echo "================================"
+          if ! sudo /tmp/husk-stub --activate --control-socket $WORKBASE/control1.sock --snapshot-dir $NET_SNAP > $WORKBASE/result1.json 2>$WORKBASE/activate1.err; then
+            echo "=== activate1 stderr ==="; cat $WORKBASE/activate1.err || true
+            echo "=== stub1 log ==="; cat $WORKBASE/stub1.log || true
+            fail_gate "activate against the pre-restored snapshot did not return OK"
+          fi
+          cat $WORKBASE/result1.json
+          OK=$(jq -r '.ok' $WORKBASE/result1.json)
+          RESTORE_MS=$(jq -r '.stages.vmstate_restore // empty' $WORKBASE/result1.json)
+          VSOCK=$(jq -r '.vsock_path' $WORKBASE/result1.json)
+          [ "$OK" = "true" ] || fail_gate "activate result ok=$OK"
+          [ -n "$RESTORE_MS" ] || fail_gate "activate result carries no vmstate_restore stage; cannot prove the fast path"
+          awk "BEGIN{exit !($RESTORE_MS < 10)}" || \
+            fail_gate "vmstate_restore=${RESTORE_MS}ms at activate; the fast path did not engage (a pre-restored guest must skip the load)"
+          echo "fast path proven: vmstate_restore=${RESTORE_MS}ms"
+          if ! sudo timeout 60 /tmp/test-agent "$VSOCK"; then
+            echo "=== stub1 log ==="; cat $WORKBASE/stub1.log || true
+            fail_gate "exec through the pre-restored, activated guest FAILED; the VM was reported active but is not usable"
+          fi
+          echo "PASS: exec works through the pre-restored VM"
+          stop_stub
+
+          echo "================================"
+          echo "  (c) mismatched snapshot dir is refused fail-closed, then the right one activates"
+          echo "================================"
+          start_stub 2
+          if sudo /tmp/husk-stub --activate --control-socket $WORKBASE/control2.sock --snapshot-dir $BENCH_SNAP > $WORKBASE/result2a.json 2>/dev/null; then
+            echo "=== result2a ==="; cat $WORKBASE/result2a.json || true
+            fail_gate "activate for a snapshot this pod did NOT pre-restore was accepted; the identity gate is broken"
+          fi
+          grep -q 'pre-restored' $WORKBASE/result2a.json || {
+            echo "=== result2a ==="; cat $WORKBASE/result2a.json || true
+            fail_gate "mismatch was refused but not by the pre-restored identity gate (wrong error)"
+          }
+          echo "PASS: mismatched snapshot refused"
+          if ! sudo /tmp/husk-stub --activate --control-socket $WORKBASE/control2.sock --snapshot-dir $NET_SNAP > $WORKBASE/result2b.json 2>$WORKBASE/activate2b.err; then
+            echo "=== activate2b stderr ==="; cat $WORKBASE/activate2b.err || true
+            echo "=== result2b ==="; cat $WORKBASE/result2b.json || true
+            echo "=== stub2 log ==="; cat $WORKBASE/stub2.log || true
+            fail_gate "activate with the CORRECT snapshot failed AFTER a refused mismatch; the refusal had side effects"
+          fi
+          [ "$(jq -r '.ok' $WORKBASE/result2b.json)" = "true" ] || fail_gate "post-refusal activate returned ok=false"
+          echo "PASS: refusal was side-effect free; the correct snapshot activated"
+          stop_stub
+
+          echo "================================"
+          echo "  Prepare-time restore proven: dormant resume, fast-path activate, fail-closed mismatch"
+          echo "================================"
+
+      - name: Upload prepare-restore gate artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: prepare-restore-gate
+          path: |
+            /tmp/mitos-test/prep-restore/result*.json
+            /tmp/mitos-test/prep-restore/stub*.log
           if-no-files-found: warn
 
       # Multi-VM-per-pod L1.4 proof: with MultiVM ON, ONE husk Stub spawns TWO

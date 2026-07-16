@@ -53,7 +53,7 @@ func TestCreateTemplate_InitFailureAbortsBuild(t *testing.T) {
 		return runInitCommandsForTest(initCommands)
 	}
 
-	err := e.CreateTemplate("py", "/exists/rootfs.ext4", []string{"echo ok", "pip install nope"}, nil, nil, nil, false, false)
+	err := e.CreateTemplate("py", "/exists/rootfs.ext4", []string{"echo ok", "pip install nope"}, nil, nil, nil, CreateTemplateOpts{})
 	if err == nil {
 		t.Fatal("expected CreateTemplate to fail when an init command fails")
 	}
@@ -110,7 +110,7 @@ func TestCreateTemplate_FilePathSkipsImageBuild(t *testing.T) {
 	// recordTemplateDigest will fail (no real snapshot on disk), but the build
 	// seam must have been reached with the file path as the rootfs and the
 	// image build seam must NOT have run (it t.Fatals if it does).
-	_ = e.CreateTemplate("py", rootfs, nil, nil, nil, nil, false, false)
+	_ = e.CreateTemplate("py", rootfs, nil, nil, nil, nil, CreateTemplateOpts{})
 	if gotCfg.RootfsPath != rootfs {
 		t.Errorf("file-path rootfs not passed through: got %q want %q", gotCfg.RootfsPath, rootfs)
 	}

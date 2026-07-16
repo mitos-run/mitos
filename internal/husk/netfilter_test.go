@@ -288,3 +288,171 @@ func TestApplyEgressFilterDoesNotTearDownOnSuccess(t *testing.T) {
 		t.Fatalf("want exactly 1 tap delete (the idempotent pre-create delete), got %d; calls: %+v", got, rr.calls)
 	}
 }
+
+// TestApplyEgressFilterBatchesNftIntoOneTransaction pins that the egress filter
+// installs its whole nftables ruleset in a SINGLE `nft -f -` invocation.
+//
+// Two reasons. Latency: every nft call is a fork/exec, and applyEgressFilter runs on
+// the warm-claim activate critical path (it was ~13 ms of a ~68 ms activate, most of
+// it process startup). Correctness: nft applies one -f payload as ONE transaction, so
+// batching removes the window in which a sandbox's tap exists with only part of its
+// egress policy installed.
+//
+// The rendered ruleset must still be the same rules in the same order, so the test
+// asserts the concatenated payload contains each section and that the shared tables
+// precede the per-sandbox chains that jump into them.
+func TestApplyEgressFilterBatchesNftIntoOneTransaction(t *testing.T) {
+	r := &recordingRunner{}
+	cfg := NetfilterConfig{
+		Tap:     "sbtest0",
+		GuestIP: net.ParseIP("10.200.0.2"),
+		HostIP:  net.ParseIP("10.200.0.1"),
+		Egress:  v1.EgressDeny,
+	}
+	if err := applyEgressFilter(context.Background(), r.run, nil, cfg); err != nil {
+		t.Fatalf("applyEgressFilter: %v", err)
+	}
+
+	var nftCalls []recordedCall
+	for _, c := range r.calls {
+		if len(c.argv) > 0 && c.argv[0] == "nft" {
+			nftCalls = append(nftCalls, c)
+		}
+	}
+	if len(nftCalls) != 1 {
+		var argvs []string
+		for _, c := range nftCalls {
+			argvs = append(argvs, strings.Join(c.argv, " ")+" <<"+c.stdin[:min(24, len(c.stdin))])
+		}
+		t.Fatalf("want exactly 1 nft invocation, got %d:\n  %s", len(nftCalls), strings.Join(argvs, "\n  "))
+	}
+
+	payload := nftCalls[0].stdin
+	for _, want := range []string{"table", cfg.Tap} {
+		if !strings.Contains(payload, want) {
+			t.Errorf("batched nft payload missing %q:\n%s", want, payload)
+		}
+	}
+	// The per-sandbox chain jumps into the shared table, so the shared table must be
+	// declared before it within the single transaction.
+	sharedIdx := strings.Index(payload, netconf.RenderSharedTable()[:20])
+	chainIdx := strings.Index(payload, cfg.Tap)
+	if sharedIdx < 0 || chainIdx < 0 || sharedIdx > chainIdx {
+		t.Errorf("shared table must precede the per-sandbox chain in the batched payload (shared=%d chain=%d)", sharedIdx, chainIdx)
+	}
+}
+
+// --- prepare-time link, claim-time policy -----------------------------------------
+
+// isNftApply reports whether argv invokes nft.
+func isNftApply(argv []string) bool {
+	return len(argv) > 0 && strings.Contains(argv[0], "nft")
+}
+
+// isIPCommand reports whether argv invokes ip (tap create / link delete).
+func isIPCommand(argv []string) bool {
+	return len(argv) > 0 && strings.Contains(argv[0], "ip")
+}
+
+// TestApplyEgressFilterIsTheTwoHalves pins that splitting the call did not change what
+// it runs: the composed call still issues exactly the link commands and then the single
+// atomic nft transaction.
+func TestApplyEgressFilterIsTheTwoHalves(t *testing.T) {
+	cfg := NetfilterConfig{Tap: "tap0", GuestIP: net.ParseIP("10.200.0.2"), HostIP: net.ParseIP("10.200.0.1"), Egress: v1.EgressDeny}
+
+	var whole recordingRunner
+	if err := applyEgressFilter(context.Background(), whole.run, func() error { return nil }, cfg); err != nil {
+		t.Fatalf("applyEgressFilter: %v", err)
+	}
+
+	var halves recordingRunner
+	if err := ensureEgressLink(context.Background(), halves.run, func() error { return nil }, cfg); err != nil {
+		t.Fatalf("ensureEgressLink: %v", err)
+	}
+	if err := applyEgressPolicy(context.Background(), halves.run, cfg); err != nil {
+		t.Fatalf("applyEgressPolicy: %v", err)
+	}
+
+	if len(whole.calls) != len(halves.calls) {
+		t.Fatalf("composed call ran %d commands, the two halves ran %d", len(whole.calls), len(halves.calls))
+	}
+	for i := range whole.calls {
+		if strings.Join(whole.calls[i].argv, " ") != strings.Join(halves.calls[i].argv, " ") {
+			t.Errorf("command %d differs: composed %v, halves %v", i, whole.calls[i].argv, halves.calls[i].argv)
+		}
+		if whole.calls[i].stdin != halves.calls[i].stdin {
+			t.Errorf("command %d stdin differs", i)
+		}
+	}
+}
+
+// TestApplyEgressPolicyTouchesOnlyNft is the point of the split: a claim that lands on a
+// pod whose tap was already brought up while it was dormant must pay ONE nft transaction
+// and no ip commands. The ip half is roughly two thirds of the ~30 ms this costs today.
+func TestApplyEgressPolicyTouchesOnlyNft(t *testing.T) {
+	cfg := NetfilterConfig{Tap: "tap0", GuestIP: net.ParseIP("10.200.0.2"), HostIP: net.ParseIP("10.200.0.1"), Egress: v1.EgressDeny}
+
+	var rr recordingRunner
+	if err := applyEgressPolicy(context.Background(), rr.run, cfg); err != nil {
+		t.Fatalf("applyEgressPolicy: %v", err)
+	}
+	if len(rr.calls) != 1 {
+		t.Fatalf("applyEgressPolicy ran %d commands, want exactly 1 (the nft transaction): %v", len(rr.calls), rr.calls)
+	}
+	if !isNftApply(rr.calls[0].argv) {
+		t.Errorf("the one command is not nft: %v", rr.calls[0].argv)
+	}
+	for _, c := range rr.calls {
+		if isIPCommand(c.argv) {
+			t.Errorf("applyEgressPolicy must not touch the link: %v", c.argv)
+		}
+	}
+}
+
+// TestApplyEgressPolicyFailsClosed: a rejected policy must leave no tap behind, exactly
+// as the composed call does, because a VM must never run half-filtered.
+func TestApplyEgressPolicyFailsClosed(t *testing.T) {
+	cfg := NetfilterConfig{Tap: "tap0", GuestIP: net.ParseIP("10.200.0.2"), HostIP: net.ParseIP("10.200.0.1"), Egress: v1.EgressDeny}
+	rr := &failingRunner{failAt: 0, err: errors.New("nft: syntax error")}
+
+	if err := applyEgressPolicy(context.Background(), rr.run, cfg); err == nil {
+		t.Fatal("applyEgressPolicy accepted a rejected nft transaction")
+	}
+	if got := countTapDelete(rr.calls, "tap0"); got == 0 {
+		t.Error("a rejected policy left the tap behind; it must be torn down")
+	}
+}
+
+// TestEnsureEgressLinkInstallsNoPolicy: the dormant half must not install a ruleset. A
+// tap with no policy carries no traffic (nothing is loaded behind it and the shared
+// forward table defaults to a drop); a tap with the WRONG policy would.
+func TestEnsureEgressLinkInstallsNoPolicy(t *testing.T) {
+	cfg := NetfilterConfig{Tap: "tap0", GuestIP: net.ParseIP("10.200.0.2"), HostIP: net.ParseIP("10.200.0.1"), Egress: v1.EgressDeny}
+
+	var rr recordingRunner
+	if err := ensureEgressLink(context.Background(), rr.run, func() error { return nil }, cfg); err != nil {
+		t.Fatalf("ensureEgressLink: %v", err)
+	}
+	for _, c := range rr.calls {
+		if isNftApply(c.argv) {
+			t.Errorf("ensureEgressLink applied a policy: %v", c.argv)
+		}
+	}
+}
+
+// TestApplyEgressFilterRejectsABadAllowlistBeforeTouchingTheLink: a malformed policy
+// must cost nothing. It used to be rejected before any command ran; splitting the call
+// must not start creating taps for a policy that can never be installed.
+func TestApplyEgressFilterRejectsABadAllowlistBeforeTouchingTheLink(t *testing.T) {
+	cfg := NetfilterConfig{
+		Tap: "tap0", GuestIP: net.ParseIP("10.200.0.2"), HostIP: net.ParseIP("10.200.0.1"),
+		Egress: v1.EgressDeny, AllowCIDRs: []string{"not-a-cidr"},
+	}
+	var rr recordingRunner
+	if err := applyEgressFilter(context.Background(), rr.run, func() error { return nil }, cfg); err == nil {
+		t.Fatal("applyEgressFilter accepted a malformed CIDR allowlist")
+	}
+	if len(rr.calls) != 0 {
+		t.Errorf("a malformed allowlist ran %d commands, want none: %v", len(rr.calls), rr.calls)
+	}
+}

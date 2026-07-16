@@ -58,6 +58,17 @@ type SandboxPoolReconciler struct {
 	// PrewarmChild passes --prewarm-child to warm husk pods so a fork adopts a
 	// pre-warmed dormant child. DEFAULT OFF; requires MultiVM.
 	PrewarmChild bool
+	// PrepareEgressLink passes --prepare-egress-link to warm husk pods so a dormant
+	// pod brings its default VM's tap up before any claim arrives, leaving only the
+	// atomic nft policy transaction on the warm-claim hot path. Requires MultiVMFork.
+	PrepareEgressLink bool
+	// PrepareRestore passes --prepare-restore so a dormant pod also loads its snapshot
+	// and resumes its guest before any claim arrives. Requires PrepareEgressLink.
+	PrepareRestore bool
+	// PrepareKernelPrefault passes --prepare-kernel-prefault so a pre-restored dormant
+	// pod also warms the run_code kernel's working set with the inert warm cell.
+	// Requires PrepareRestore. Fails open in the pod.
+	PrepareKernelPrefault bool
 	// MultiVMForkVMs is how many co-located fork VMs a multi-VM warm pod reserves
 	// node memory for up front (beyond the source VM), so the co-location routing
 	// has room before a fork spills to a new pod. Only consulted when MultiVM is set;
@@ -317,7 +328,14 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		// in place here even when the holder count is already satisfied.
 		buildErr := r.ensureTemplateBuilt(ctx, &pool, template, nodeFilter)
 		if buildErr != nil {
-			logger.Error(buildErr, "failed to build template snapshot for husk pool (warm pool still maintained)")
+			if isTemplateBuildInProgress(buildErr) {
+				// A concurrent build holds the node's in-flight guard (#884). This
+				// is retry-later, not a failure: log quietly and let the requeue
+				// below try again, without flapping BuildFailed (#888).
+				logger.Info("template snapshot build in progress on the node; will retry", "pool", pool.Name)
+			} else {
+				logger.Error(buildErr, "failed to build template snapshot for husk pool (warm pool still maintained)")
+			}
 		}
 
 		// Bound voluntary disruption of the warm pool: a PodDisruptionBudget so a
@@ -354,8 +372,12 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 		// TemplateBuilt (#578): surfaces ensureTemplateBuilt's result (already
 		// captured in buildErr above) as a condition, so a build failure is
-		// visible on the pool object and not just in the reconcile log.
-		setCondition(&pool.Status.Conditions, templateBuiltCondition(buildErr, now))
+		// visible on the pool object and not just in the reconcile log. A build
+		// still in progress (#888) leaves the prior condition untouched rather
+		// than transitioning it to False/BuildFailed.
+		if cond, ok := templateBuiltConditionUpdate(buildErr, now); ok {
+			setCondition(&pool.Status.Conditions, cond)
+		}
 
 		// Force-rebuild annotation (#584, #578): an operator setting
 		// mitos.run/force-rebuild is an explicit override that bypasses
@@ -409,7 +431,13 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// just in the reconcile log.
 	buildErr := r.ensureTemplateBuilt(ctx, &pool, template, nodeFilter)
 	if buildErr != nil {
-		logger.Error(buildErr, "failed to create snapshots")
+		if isTemplateBuildInProgress(buildErr) {
+			// Retry-later, not a failure (#888): a concurrent build holds the
+			// node's in-flight guard (#884).
+			logger.Info("template snapshot build in progress on the node; will retry", "pool", pool.Name)
+		} else {
+			logger.Error(buildErr, "failed to create snapshots")
+		}
 	}
 	readySnapshots := r.readySnapshotCountOn(templateID, nodeFilter)
 
@@ -423,7 +451,9 @@ func (r *SandboxPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	now := metav1.Now()
-	setCondition(&pool.Status.Conditions, templateBuiltCondition(buildErr, now))
+	if cond, ok := templateBuiltConditionUpdate(buildErr, now); ok {
+		setCondition(&pool.Status.Conditions, cond)
+	}
 	setCondition(&pool.Status.Conditions, metav1.Condition{
 		Type:               "Ready",
 		Status:             conditionStatus(readySnapshots >= desired),

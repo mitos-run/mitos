@@ -6,6 +6,7 @@ from typing import Optional
 
 from mitos._k8s import k8s
 from mitos.errors import AgentRunError
+from mitos.git import coerce_git
 from mitos.sandbox import Sandbox
 from mitos.types import PoolStatus, SandboxPhase
 from mitos.workspace import Workspace
@@ -311,11 +312,27 @@ class AgentRun:
             ))
         return sandboxes
 
-    def create_workspace(self, name: str) -> Workspace:
-        """Create an empty durable Workspace."""
+    def create_workspace(
+        self,
+        name: str,
+        git: Optional[object] = None,
+    ) -> Workspace:
+        """Create a durable Workspace.
+
+        Args:
+            name: The workspace name.
+            git: Optional first-class ``spec.git`` declaration (issue #619).
+                Pass ``mitos.git(paths=[...])`` (a :class:`~mitos.git.GitSpec`)
+                or a bare list of paths to declare the repo paths that get
+                version history and the fork-and-merge rendezvous remote, instead
+                of patching the Workspace CRD by hand.
+        """
+        spec: dict = {}
+        if git is not None:
+            spec["git"] = coerce_git(git).to_spec()
         body = {
             "apiVersion": f"{API_GROUP}/{API_VERSION}", "kind": "Workspace",
-            "metadata": {"name": name, "namespace": self._namespace}, "spec": {},
+            "metadata": {"name": name, "namespace": self._namespace}, "spec": spec,
         }
         self._api.create_namespaced_custom_object(
             group=API_GROUP, version=API_VERSION, namespace=self._namespace,

@@ -37,13 +37,12 @@ type ForkEngine interface {
 	ReclaimVolume(sandboxID string) error
 	// CreateTemplate builds a template snapshot. volumes are the template's
 	// declared volumes; the engine bakes one placeholder drive per volume into
-	// the snapshot. Nil leaves the template drive-less (only the rootfs).
-	// forceRebuild, when true, skips the reuse-or-rebuild gate (#584) and always
-	// deletes and rebuilds; the controller sets it when the template CONTENT
-	// changed (issue #475). warmKernel, when true, runs one trivial run_code
-	// cell before the snapshot so forks wake with a warm code-interpreter
-	// kernel; warmup failures fail open (the build continues cold).
-	CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources, forceRebuild bool, warmKernel bool) error
+	// the snapshot. Nil leaves the template drive-less (only the rootfs). opts
+	// carries ForceRebuild (skip the reuse-or-rebuild gate #584 and always
+	// rebuild; the controller sets it when template CONTENT changed, #475) and
+	// WarmKernel (run one trivial run_code cell before the snapshot so forks wake
+	// with a warm code-interpreter kernel; warmup failures fail open).
+	CreateTemplate(id string, image string, initCommands []string, volumes []volume.Spec, workload *firecracker.WorkloadSpec, vmRes *firecracker.VMResources, opts fork.CreateTemplateOpts) error
 	// PullTemplate fetches a template's snapshot from a peer forkd's CAS over
 	// the peer's token-gated TLS surface, materializes it, verifies it, and
 	// records the digest. token is a credential and must never be logged.

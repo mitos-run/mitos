@@ -189,7 +189,7 @@ func buildHolderTemplate(dataDir, rootfs, fcBin, kernel, agentBin, templateID st
 	if err != nil {
 		return nil, "", fmt.Errorf("node A new engine: %w", err)
 	}
-	if err := engine.CreateTemplate(templateID, rootfs, nil, nil, nil, nil, false, false); err != nil {
+	if err := engine.CreateTemplate(templateID, rootfs, nil, nil, nil, nil, fork.CreateTemplateOpts{}); err != nil {
 		return nil, "", fmt.Errorf("node A build template: %w", err)
 	}
 	digest := engine.GetCapacity().TemplateDigests[templateID]

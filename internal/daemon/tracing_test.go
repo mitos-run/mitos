@@ -20,7 +20,7 @@ func TestForkProducesSpans(t *testing.T) {
 
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "python:3.12-slim", nil, nil, nil, nil, false, false); err != nil {
+	if err := engine.CreateTemplate("py", "python:3.12-slim", nil, nil, nil, nil, fork.CreateTemplateOpts{}); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))
@@ -100,7 +100,7 @@ func TestTracingOffNoSpans(t *testing.T) {
 	// default no-op provider. The fork path must not panic and must cost nothing.
 	engine := fork.NewMockEngine()
 	engine.ForkDelay = 0
-	if err := engine.CreateTemplate("py", "python:3.12-slim", nil, nil, nil, nil, false, false); err != nil {
+	if err := engine.CreateTemplate("py", "python:3.12-slim", nil, nil, nil, nil, fork.CreateTemplateOpts{}); err != nil {
 		t.Fatalf("CreateTemplate: %v", err)
 	}
 	srv := NewServer(engine, NewSandboxAPI(t.TempDir()))

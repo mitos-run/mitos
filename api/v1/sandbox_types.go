@@ -345,6 +345,27 @@ type SandboxStatus struct {
 	// +optional
 	Endpoint string `json:"endpoint,omitempty"`
 
+	// Restarts counts how many times this sandbox's backing VM was destroyed and
+	// replaced by a fresh one (a husk pod loss re-pended under DrainPolicy Kill).
+	//
+	// It is the DURABLE signal that the sandbox a caller is holding is no longer the
+	// sandbox it created: the replacement re-activates from the POOL TEMPLATE, so every
+	// process, every write to the guest filesystem, and the whole guest memory of the
+	// previous instance are gone. The Ready condition also flips, but only transiently
+	// (the next reconcile re-activates and sets Ready=True again), so a caller polling
+	// the API would otherwise see an unbroken healthy sandbox and keep issuing calls
+	// against state that no longer exists (mitos-run/mitos#870).
+	//
+	// Monotonic for the lifetime of the sandbox. Zero means the caller still holds the
+	// original VM.
+	// +optional
+	Restarts int32 `json:"restarts,omitempty"`
+
+	// LastRestartTime is when the backing VM was most recently destroyed and replaced.
+	// Nil while Restarts is zero.
+	// +optional
+	LastRestartTime *metav1.Time `json:"lastRestartTime,omitempty"`
+
 	// Pod is the husk host pod name backing the sandbox (for example
 	// "heartbeat-7f3a-husk"), visible to kubectl, quotas, NetworkPolicy, and
 	// OpenCost. NEW explicit v2 field. On the husk path the node is derivable

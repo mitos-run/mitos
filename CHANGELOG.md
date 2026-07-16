@@ -1,5 +1,88 @@
 # Changelog
 
+## [1.43.0](https://github.com/mitos-run/mitos/compare/v1.42.1...v1.43.0) (2026-07-15)
+
+
+### Features
+
+* **guest:** raise spawned-process RLIMIT_NOFILE with a sane default and env override ([#826](https://github.com/mitos-run/mitos/issues/826)) ([66f70ee](https://github.com/mitos-run/mitos/commit/66f70ee64a18da48c38006e1a1562f4900e56eec))
+* **husk:** keepalive the prefaulted warm-pool guest so its run_code kernel stays resident ([#913](https://github.com/mitos-run/mitos/issues/913)) ([#916](https://github.com/mitos-run/mitos/issues/916)) ([53c20a0](https://github.com/mitos-run/mitos/commit/53c20a01c7593be322a6edfec831492101c291ca)), closes [#903](https://github.com/mitos-run/mitos/issues/903)
+* **saas:** scoped API keys with read, execute, lifecycle, and admin grants ([#824](https://github.com/mitos-run/mitos/issues/824)) ([9fb56d3](https://github.com/mitos-run/mitos/commit/9fb56d39b98ade76a8855b48f303d8bd21708ce1))
+
+## [1.42.1](https://github.com/mitos-run/mitos/compare/v1.42.0...v1.42.1) (2026-07-14)
+
+
+### Bug Fixes
+
+* **controller:** prepare-restore pods on a pre-digest pool get --snapshot-dir, ending the silent no-op ([#911](https://github.com/mitos-run/mitos/issues/911)) ([aa4ed70](https://github.com/mitos-run/mitos/commit/aa4ed7077878d44ae923ca96d342acb660fbd785))
+
+## [1.42.0](https://github.com/mitos-run/mitos/compare/v1.41.0...v1.42.0) (2026-07-14)
+
+
+### Features
+
+* **chart:** first-class values for the husk prepare-time flags ([#907](https://github.com/mitos-run/mitos/issues/907)) ([a6f1e38](https://github.com/mitos-run/mitos/commit/a6f1e38d9f8551b3f56353f84419ad8708535505))
+* **chart:** gateway.orgTiers renders the operator tier grants ([#910](https://github.com/mitos-run/mitos/issues/910)) ([6bd72d0](https://github.com/mitos-run/mitos/commit/6bd72d04334594f0f9bf8d37a829526105f4b17b))
+* **husk:** prefault the run_code kernel at Prepare so the first tenant cell arrives warm ([#906](https://github.com/mitos-run/mitos/issues/906)) ([81fa8f3](https://github.com/mitos-run/mitos/commit/81fa8f3edb4305267ee47b03b3cd8ef2dda6ab64))
+
+
+### Bug Fixes
+
+* **saas:** gateway forward completion line carries status, per-leg durations, and write errors ([#905](https://github.com/mitos-run/mitos/issues/905)) ([e389322](https://github.com/mitos-run/mitos/commit/e3893228192716e315a10749df6ddca828340432))
+* **saas:** keepalive the checkout buffer with the inert cell; evict entries that fail it ([#908](https://github.com/mitos-run/mitos/issues/908)) ([c5a74b7](https://github.com/mitos-run/mitos/commit/c5a74b73080ba7f73474b423f4c25f0a1ec5e631))
+
+## [1.41.0](https://github.com/mitos-run/mitos/compare/v1.40.0...v1.41.0) (2026-07-12)
+
+
+### Features
+
+* **controlplane:** log client-correlated fork submit-to-ready latency ([#868](https://github.com/mitos-run/mitos/issues/868)) ([b8e440e](https://github.com/mitos-run/mitos/commit/b8e440e9431e1f0a20e72552f7c41048068eed8b))
+* **saas:** pre-claimed checkout, the gateway hands out an already-activated sandbox ([#896](https://github.com/mitos-run/mitos/issues/896)) ([3e4306c](https://github.com/mitos-run/mitos/commit/3e4306c4a90adc64397107850f95aaa7fdf870cf))
+
+
+### Bug Fixes
+
+* **computer-use:** move the Chromium pin to 150.0.7871.114, 147 left the archive ([#899](https://github.com/mitos-run/mitos/issues/899)) ([bb5f4a5](https://github.com/mitos-run/mitos/commit/bb5f4a57fca2ecc1779a2597f87cd481d6cf9581))
+
+## [1.40.0](https://github.com/mitos-run/mitos/compare/v1.39.1...v1.40.0) (2026-07-11)
+
+
+### Features
+
+* **cli:** agent automation contract with JSON output, documented exit codes, and wait/timeout flags ([#825](https://github.com/mitos-run/mitos/issues/825)) ([b6abee2](https://github.com/mitos-run/mitos/commit/b6abee24284468934aaad00b29dcff4cffa5868a))
+* **sdk-python:** first-class spec.git helper for durable workspaces ([#823](https://github.com/mitos-run/mitos/issues/823)) ([045dd0b](https://github.com/mitos-run/mitos/commit/045dd0bca8067e71a27bcf6c63897d641ec11d54))
+
+## [1.39.1](https://github.com/mitos-run/mitos/compare/v1.39.0...v1.39.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **forkd:** stop concurrent template builds colliding on one placeholder tap ([#884](https://github.com/mitos-run/mitos/issues/884)) ([fd3854c](https://github.com/mitos-run/mitos/commit/fd3854c52fe01707ed9ca5a2f7ffe0008d8f50c1))
+
+## [1.39.0](https://github.com/mitos-run/mitos/compare/v1.38.1...v1.39.0) (2026-07-10)
+
+
+### Features
+
+* **gateway:** let an operator grant an org a tier above the free default ([#881](https://github.com/mitos-run/mitos/issues/881)) ([475ed4a](https://github.com/mitos-run/mitos/commit/475ed4a6991308ef9b1a894a8a4f50c3cfc1b757))
+* **mcp:** screen tool calls against vendored ATR rules in report mode ([#849](https://github.com/mitos-run/mitos/issues/849)) ([f4bf605](https://github.com/mitos-run/mitos/commit/f4bf605e98905ff66e2be963ea1aa3ec97a5fb00))
+
+
+### Bug Fixes
+
+* **guest:** reseed the run_code kernel PRNGs after a fork ([#882](https://github.com/mitos-run/mitos/issues/882)) ([6b23d6a](https://github.com/mitos-run/mitos/commit/6b23d6a20abdb3c3375d53110a375442c7f2386d))
+* **sdk:** pool HTTP connections so a create does not pay two TLS handshakes ([#877](https://github.com/mitos-run/mitos/issues/877)) ([d3ef408](https://github.com/mitos-run/mitos/commit/d3ef408099aef0368f599173af66ffb1a3e13591))
+* **usage:** bill cumulative-counter deltas that span a window boundary ([#822](https://github.com/mitos-run/mitos/issues/822)) ([737ac32](https://github.com/mitos-run/mitos/commit/737ac32a79eec287c6c45245f3774771e109e332)), closes [#755](https://github.com/mitos-run/mitos/issues/755)
+
+## [1.38.1](https://github.com/mitos-run/mitos/compare/v1.38.0...v1.38.1) (2026-07-09)
+
+
+### Bug Fixes
+
+* **controller:** surface a durable restart signal when a sandbox's VM is destroyed and replaced ([#875](https://github.com/mitos-run/mitos/issues/875)) ([5a3c054](https://github.com/mitos-run/mitos/commit/5a3c0542cda08b16151d64fe8185b9d6515db78e)), closes [#870](https://github.com/mitos-run/mitos/issues/870)
+* **controller:** write the fork mem file when a child will spill, so fork(n) stops hanging ([#874](https://github.com/mitos-run/mitos/issues/874)) ([dcd4187](https://github.com/mitos-run/mitos/commit/dcd41875dc530ec1cd49d1785c12ce650f744fca))
+* **husk:** stop copying 512 MiB into the live-cow guest memfd on every warm-claim activate ([#869](https://github.com/mitos-run/mitos/issues/869)) ([8fef611](https://github.com/mitos-run/mitos/commit/8fef6118cd66d863a88404dd6c9ebf55b58f4686))
+
 ## [1.38.0](https://github.com/mitos-run/mitos/compare/v1.37.2...v1.38.0) (2026-07-08)
 
 

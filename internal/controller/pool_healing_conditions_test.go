@@ -6,9 +6,12 @@ package controller_test
 // operator recovery lever that bypasses rebuildBackoff on demand.
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/controller"
@@ -95,6 +98,43 @@ func TestTemplateBuiltConditionSurfacesBuildError(t *testing.T) {
 		t.Fatalf("ensureTemplateBuilt (plaintext, healthy node): %v", err)
 	}
 	okCond := controller.TemplateBuiltConditionForTest(nil, now)
+	if okCond.Status != metav1.ConditionTrue || okCond.Reason != "Built" {
+		t.Fatalf("TemplateBuilt = %s/%s, want True/Built", okCond.Status, okCond.Reason)
+	}
+}
+
+// A build still IN PROGRESS on the node (#884's in-flight guard, surfaced as
+// gRPC Unavailable and wrapped by ensureTemplateBuilt) must NOT flap the
+// TemplateBuilt condition to False/BuildFailed (#888): templateBuiltConditionUpdate
+// returns ok=false so the reconcile leaves the prior condition untouched, while a
+// genuine build failure still sets False/BuildFailed and a success sets True/Built.
+func TestTemplateBuiltConditionSkipsWhileBuildInProgress(t *testing.T) {
+	now := metav1.NewTime(time.Now())
+
+	// Mirror ensureTemplateBuilt's wrapping of the gRPC error the daemon returns
+	// for fork.ErrTemplateBuildInProgress (codes.Unavailable).
+	inProgress := fmt.Errorf("build template snapshot py: %w",
+		status.Error(codes.Unavailable, "create template py: a build of this template is already in progress"))
+	if _, ok := controller.TemplateBuiltConditionUpdateForTest(inProgress, now); ok {
+		t.Fatal("a build-in-progress (Unavailable) error must NOT set a TemplateBuilt condition; want ok=false")
+	}
+
+	// A genuine build failure (not Unavailable) still surfaces as BuildFailed.
+	failed := fmt.Errorf("build template snapshot py: %w",
+		status.Error(codes.Internal, "boot failed: kernel not staged"))
+	cond, ok := controller.TemplateBuiltConditionUpdateForTest(failed, now)
+	if !ok {
+		t.Fatal("a genuine build failure must set the TemplateBuilt condition; want ok=true")
+	}
+	if cond.Status != metav1.ConditionFalse || cond.Reason != "BuildFailed" {
+		t.Fatalf("TemplateBuilt = %s/%s, want False/BuildFailed", cond.Status, cond.Reason)
+	}
+
+	// A successful build still surfaces as True/Built.
+	okCond, ok := controller.TemplateBuiltConditionUpdateForTest(nil, now)
+	if !ok {
+		t.Fatal("a successful build must set the TemplateBuilt condition; want ok=true")
+	}
 	if okCond.Status != metav1.ConditionTrue || okCond.Reason != "Built" {
 		t.Fatalf("TemplateBuilt = %s/%s, want True/Built", okCond.Status, okCond.Reason)
 	}

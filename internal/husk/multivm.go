@@ -13,9 +13,11 @@ import (
 	"strings"
 	"time"
 
+	v1 "mitos.run/mitos/api/v1"
 	"mitos.run/mitos/internal/cas"
 	"mitos.run/mitos/internal/firecracker"
 	"mitos.run/mitos/internal/fork"
+	"mitos.run/mitos/internal/guestgrpc"
 	"mitos.run/mitos/internal/metering"
 	"mitos.run/mitos/internal/netconf"
 	"mitos.run/mitos/internal/vsock"
@@ -371,7 +373,158 @@ func (s *Stub) prepareInstanceOpt(ctx context.Context, id vmID, opts prepareOpts
 		}
 	}
 
+	// Bring THIS pod's default-VM tap up while it is dormant, under a DEFAULT-DENY
+	// policy, so the claim pays only the atomic nft transaction that installs the
+	// tenant's policy. Opt-in (Options.PrepareEgressLink), default VM only, and only
+	// when the in-pod link is configured; otherwise activate does the whole thing as
+	// before. FAIL CLOSED: ensureEgressLink tears the tap down on any error and we
+	// refuse to go dormant, so the pool never offers a pod whose datapath is
+	// half-built. A dormant tap is never a hazard: nothing is loaded behind it, and
+	// the policy on it denies everything.
+	if err := s.prepareEgressLinkFor(ctx, id, inst); err != nil {
+		if inst.vm != nil {
+			_ = inst.vm.Close()
+			inst.vm = nil
+		}
+		return err
+	}
+
+	// Load the snapshot and RESUME the guest while dormant, so the claim pays only the
+	// fork-correctness handshake. Requires the tap prepared just above (Firecracker
+	// binds the baked NIC to it at restore). FAIL CLOSED: on any error we refuse to go
+	// dormant, so the pool never offers a half-restored pod.
+	if err := s.prepareRestoreDefaultVM(ctx, id, inst, opts); err != nil {
+		if inst.vm != nil {
+			_ = inst.vm.Close()
+			inst.vm = nil
+		}
+		return err
+	}
+
 	inst.state = StateDormant
+	return nil
+}
+
+// prepareRestoreDefaultVM loads the pod's default-VM snapshot and resumes its guest
+// while the pod is DORMANT, when the stub opted in (Options.PrepareRestore). It is the
+// same load/rootfs-rebind/resume/guest-ready the warm-claim activate does, moved off the
+// hot path; activate then skips it and pays only the handshake.
+//
+// A NO-OP unless every precondition holds: PrepareRestore on, the tap was prepared just
+// above (preparedLinkTap set), the DEFAULT vm only, a real snapshot dir configured, and
+// this is not the pre-warm generic-child boot (opts.skipRootfsClone) or an adopted VMM
+// (opts.reuseVM). A co-located fork
+// child (its own snapshot, childUFFD backend, per-fork tap) is never pre-restored here;
+// it restores at spawn/activate exactly as before.
+//
+// The guest agent conn proven by the readiness wait is CLOSED, not held across dormancy:
+// a long-idle vsock conn can go stale, and re-dialing an already-running guest at the
+// claim is a sub-millisecond round trip.
+func (s *Stub) prepareRestoreDefaultVM(ctx context.Context, id vmID, inst *vmInstance, opts prepareOpts) error {
+	// id != defaultVMID already excludes the pre-warm generic child (it is always a
+	// secondary VM); skipRootfsClone and reuseVM are belt-and-braces so a future
+	// pre-warm of the default slot never double-resumes an adopted VMM.
+	if !s.prepareRestore || id != defaultVMID || inst.preparedLinkTap == "" ||
+		s.prepareSnapshotDir == "" || opts.skipRootfsClone || opts.reuseVM != nil {
+		return nil
+	}
+	// PrepareRestore requires PrepareEgressLink; the stub, pod builder, and controller
+	// all enforce that, and preparedLinkTap being set is the runtime proof the tap is up.
+	start := time.Now()
+	memFile := filepath.Join(s.prepareSnapshotDir, "mem")
+	vmStateFile := filepath.Join(s.prepareSnapshotDir, "vmstate")
+	// The baked NIC is remapped onto the prepared tap, the same override activate builds
+	// for the default VM (whose guest IP is the fixed in-pod constant).
+	overrides := []firecracker.NetworkOverride{{
+		IfaceID:     firecracker.NetIfaceID,
+		HostDevName: inst.preparedLinkTap,
+	}}
+	if err := s.setLiveCowMemSource(memFile); err != nil {
+		return fmt.Errorf("husk: prepare-restore arm lazy live-cow mem source for vm %q: %w", id, err)
+	}
+	if err := inst.vm.LoadSnapshotWithOverrides(memFile, vmStateFile, false, overrides); err != nil {
+		return fmt.Errorf("husk: prepare-restore load snapshot for vm %q: %w", id, err)
+	}
+	if inst.rootfsClonePath != "" {
+		if err := inst.vm.PatchDrive("rootfs", inst.rootfsClonePath); err != nil {
+			return fmt.Errorf("husk: prepare-restore rebind rootfs drive for vm %q: %w", id, err)
+		}
+	}
+	if err := inst.vm.Resume(); err != nil {
+		return fmt.Errorf("husk: prepare-restore resume vm %q: %w", id, err)
+	}
+	vsockPath := inst.vm.VsockHostPath(firecracker.VsockRelPath)
+	conn, err := s.ready(ctx, vsockPath, s.readyTimeout)
+	if err != nil {
+		return fmt.Errorf("husk: prepare-restore guest not ready for vm %q: %w", id, err)
+	}
+	// Kernel prefault (slice 3, opt-in): run the template build's inert warm cell
+	// against the dormant guest, reusing the readiness conn, so the run_code
+	// kernel's working set is resident before the first tenant cell. FAIL OPEN: a
+	// template without the kernel (a non-python pool) is normal; the pod still
+	// goes dormant and the first run_code just faults lazily as before.
+	if s.prepareKernelPrefault {
+		prefault := s.prefaultKernel
+		if prefault == nil {
+			prefault = prefaultKernelGRPC
+		}
+		pfStart := time.Now()
+		if perr := prefault(ctx, conn, vsockPath); perr != nil {
+			fmt.Fprintf(os.Stderr, "husk: prepare-prefault vm %q failed (%v); continuing without a warm kernel, the first run_code starts it lazily\n", id, perr)
+		} else {
+			fmt.Fprintf(os.Stderr, "husk: prepare-prefault vm %q warmed the run_code kernel in %.2fms\n",
+				id, float64(time.Since(pfStart).Microseconds())/1000.0)
+		}
+	}
+	if conn != nil {
+		_ = conn.Close() //nolint:errcheck // do not hold a vsock conn across dormancy
+	}
+	inst.preRestored = true
+	inst.preRestoredSnapshotDir = s.prepareSnapshotDir
+	// Warm-pool self-keepalive (#913): a dormant pod's one-shot prefault above
+	// decays within minutes (#903), so keep the run_code kernel resident by
+	// re-running the inert cell against this same running guest on an interval
+	// until a claim (activate) or Close stops it. Engaged only WITH the prefault
+	// opt-in (no new flag: prefault already means "keep the kernel warm"); a
+	// non-prefault pre-restore keeps no kernel to preserve. Under inst.mu here.
+	if s.prepareKernelPrefault {
+		s.startKeepalive(inst, id, vsockPath)
+	}
+	// The one observable marker that the dormant restore happened and what it cost;
+	// the KVM CI gate and the prod canary both key on this line. Paths and durations
+	// only, never secrets.
+	fmt.Fprintf(os.Stderr, "husk: prepare-restore vm %q resumed dormant guest from %s in %.2fms\n",
+		id, s.prepareSnapshotDir, float64(time.Since(start).Microseconds())/1000.0)
+	return nil
+}
+
+// prepareEgressLinkFor brings up the default VM's tap with a default-deny policy while
+// the pod is dormant, when the stub opted in. A no-op otherwise, and never for a
+// secondary (co-located fork child) VM, whose tap is derived per fork at activate.
+func (s *Stub) prepareEgressLinkFor(ctx context.Context, id vmID, inst *vmInstance) error {
+	// !s.multiVM is implied today (only the multi-VM Prepare reaches prepareInstance),
+	// but it is stated rather than relied upon: the single-VM Activate path does not
+	// consult preparedLinkTap, so a dormant tap it never reuses would be dead weight.
+	if !s.prepareEgressLink || !s.multiVM || id != defaultVMID || s.netRunner == nil || s.inPodGuestIP == "" {
+		return nil
+	}
+	tap := netconf.DeriveTapName(s.inPodGuestIP)
+	cfg := NetfilterConfig{
+		Tap:     tap,
+		GuestIP: net.ParseIP(s.inPodGuestIP),
+		HostIP:  net.ParseIP(s.inPodGatewayIP),
+		Egress:  v1.EgressDeny,
+	}
+	if err := ensureEgressLink(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
+		return fmt.Errorf("husk: prepare in-pod egress link for vm %q: %w", id, err)
+	}
+	if err := applyEgressPolicy(ctx, s.netRunner, cfg); err != nil {
+		return fmt.Errorf("husk: prepare default-deny egress policy for vm %q: %w", id, err)
+	}
+	// Record it on BOTH fields: activeTap so Close tears it down even if this pod is
+	// never claimed, preparedLinkTap so activate knows it can skip the link setup.
+	inst.activeTap = tap
+	inst.preparedLinkTap = tap
 	return nil
 }
 
@@ -456,6 +609,25 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		return ActivateResult{OK: false, Error: "activate: empty snapshot dir"},
 			fmt.Errorf("husk: activate vm %q: empty snapshot dir", id)
 	}
+	// Pre-restored snapshot IDENTITY gate, FIRST, before any side effect. A resumed
+	// guest cannot be reloaded, so a claim naming a different snapshot than the one this
+	// pod pre-restored must be refused BEFORE the verify-on-activate re-hash runs and
+	// BEFORE the tenant egress policy is installed on the tap fronting the (wrong) guest.
+	// Hoisting it here (rather than at the pre-restored fast path below) is what makes
+	// the refusal genuinely fail-closed: no network mutation, no re-verify, nothing.
+	if inst.preRestored && req.SnapshotDir != inst.preRestoredSnapshotDir {
+		werr := fmt.Errorf("husk: activate vm %q wants snapshot %q but this pod pre-restored %q; refusing to serve the wrong image", id, req.SnapshotDir, inst.preRestoredSnapshotDir)
+		return ActivateResult{OK: false, Error: werr.Error()}, werr
+	}
+
+	// Stop the warm-pool self-keepalive (#913) now that a genuine claim is being
+	// served: from here the VM leaves the dormant window, so the keepalive must
+	// never run again against this guest (the tenant's own execs keep it warm and
+	// a keepalive round must never contend with tenant run_code). Placed AFTER the
+	// fail-closed mismatch gate so a refused wrong-image claim leaves the dormant
+	// pod exactly as it was, still warm for a correct retry. It waits for any
+	// in-flight round to finish; no-op when no loop was running.
+	inst.stopKeepalive()
 
 	memFile := filepath.Join(req.SnapshotDir, "mem")
 	vmStateFile := filepath.Join(req.SnapshotDir, "vmstate")
@@ -508,8 +680,24 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 		cfg.Tap = tap
 		cfg.GuestIP = net.ParseIP(perNet.GuestIP)
 		cfg.HostIP = net.ParseIP(perNet.GatewayIP)
-		if err := applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg); err != nil {
-			werr := fmt.Errorf("husk: apply in-pod egress filter for vm %q: %w", id, err)
+		// When this instance brought the SAME tap up while dormant, the claim pays only
+		// the nft transaction that REPLACES the default-deny policy with the tenant's.
+		// nft applies it atomically, so there is no window in which the VM is
+		// unfiltered. Any other tap (a fork child's, or a pod that did not opt in) takes
+		// the full path. Both halves fail closed by tearing the tap down, so clear the
+		// prepared marker first: after a failure the link no longer exists and the next
+		// attempt must rebuild it.
+		prepared := inst.preparedLinkTap != "" && inst.preparedLinkTap == tap
+		inst.preparedLinkTap = ""
+		var ferr error
+		if prepared {
+			ferr = applyEgressPolicy(ctx, s.netRunner, cfg)
+		} else {
+			ferr = applyEgressFilter(ctx, s.netRunner, s.enableForwarding, cfg)
+		}
+		if ferr != nil {
+			inst.activeTap = ""
+			werr := fmt.Errorf("husk: apply in-pod egress filter for vm %q: %w", id, ferr)
 			return ActivateResult{OK: false, Error: werr.Error()}, werr
 		}
 		// Pin the baked NIC to THIS VM's tap so the restored VM's NIC is backed by
@@ -522,6 +710,48 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	}
 	recordStage(stages, "egress_filter", mark)
 	mark = time.Now()
+
+	// PRE-RESTORED fast path: this instance loaded its snapshot and resumed its guest
+	// while dormant (Options.PrepareRestore), so skip the restore, the rootfs rebind,
+	// the resume, and the guest-ready wait, and pay only the handshake below. FAIL
+	// CLOSED on a snapshot mismatch: a resumed guest cannot be reloaded, so if the claim
+	// names a different snapshot than the one restored at prepare, refuse rather than
+	// serve the wrong image. Only the default VM is ever pre-restored (see
+	// prepareRestoreDefaultVM), and a co-located fork child is never pre-restored.
+	if inst.preRestored {
+		// The snapshot-identity gate ran fail-closed at the top of activate, before the
+		// egress policy, so by here req.SnapshotDir == inst.preRestoredSnapshotDir.
+		recordStage(stages, "vmstate_restore", mark)
+		recordStage(stages, "resume", mark)
+		// Re-dial the already-running guest for the handshake. Sub-millisecond: the
+		// guest agent's vsock listener has been up since the prepare-time resume.
+		vsockPath := inst.vm.VsockHostPath(firecracker.VsockRelPath)
+		guestConn, err := s.ready(ctx, vsockPath, s.readyTimeout)
+		if err != nil {
+			werr := fmt.Errorf("husk: pre-restored guest not reachable at activate for vm %q: %w", id, err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+		if guestConn != nil {
+			defer guestConn.Close() //nolint:errcheck // best-effort on close
+		}
+		recordStage(stages, "guest_ready", mark)
+		return s.activateHandshakeAndServe(ctx, id, inst, req, perNet, vsockPath, guestConn, stages, start)
+	}
+
+	// LAZY live-cow restore (this is what makes vmstate_restore O(1) instead of an
+	// eager 512 MiB memfd copy inside PUT /snapshot/load): hand the armed WP handler
+	// the mem file BEFORE the load, so it can serve the MISSING faults the patched
+	// Firecracker will take for every guest page. Only the SOURCE VM restores from a
+	// disk mem file; a co-located fork child imports the parent's memfd and never
+	// reaches the lazy branch. FAIL CLOSED: the source was launched with
+	// EnvLazyRestore, so a handler that cannot read the mem file means guest RAM would
+	// stay zeroed; refuse to load rather than run a VM on empty memory.
+	if id == defaultVMID && !req.ForkSnapshot {
+		if err := s.setLiveCowMemSource(memFile); err != nil {
+			werr := fmt.Errorf("husk: arm lazy live-cow mem source for vm %q: %w", id, err)
+			return ActivateResult{OK: false, Error: werr.Error()}, werr
+		}
+	}
 
 	// Load PAUSED so the rootfs drive can be rebound before the guest runs, then
 	// resume explicitly, exactly as the single-VM path does. A co-located live-cow
@@ -560,13 +790,30 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	mark = time.Now()
 
 	vsockPath := inst.vm.VsockHostPath(firecracker.VsockRelPath)
-	if err := s.ready(ctx, vsockPath, s.readyTimeout); err != nil {
+	guestConn, err := s.ready(ctx, vsockPath, s.readyTimeout)
+	if err != nil {
 		werr := fmt.Errorf("husk: guest not ready after activate for vm %q: %w", id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
+	// Reuse the connection the readiness probe proved healthy for the handshake below,
+	// instead of dialing the guest over vsock a second time. We own the Close.
+	if guestConn != nil {
+		defer guestConn.Close() //nolint:errcheck // best-effort on close
+	}
 	recordStage(stages, "guest_ready", mark)
-	mark = time.Now()
 
+	return s.activateHandshakeAndServe(ctx, id, inst, req, perNet, vsockPath, guestConn, stages, start)
+}
+
+// activateHandshakeAndServe runs the CLAIM-specific tail of an activation: the fork-
+// correctness handshake (fresh entropy, clock step, per-VM network re-addressing, and
+// the tenant secrets), serving the sandbox API with the claim token, and the state and
+// timing bookkeeping. It is shared by the normal restore-at-activate path and the
+// pre-restored fast path, which reach it with an already-ready guest. mark is the clock
+// for the handshake stage; start is the whole-activate clock for the total.
+func (s *Stub) activateHandshakeAndServe(ctx context.Context, id vmID, inst *vmInstance, req ActivateRequest, perNet *vsock.NotifyForkedNetwork, vsockPath string, guestConn *guestgrpc.Client, stages map[string]float64, start time.Time) (ActivateResult, error) {
+	_ = ctx
+	mark := time.Now()
 	// Fork-correctness handshake with a fresh per-VM generation + entropy. Each
 	// instance owns its own generation counter, so two VMs never share it. The
 	// entropy and secret values are held only in memory and are NEVER logged.
@@ -581,7 +828,7 @@ func (s *Stub) activateInstance(ctx context.Context, id vmID, req ActivateReques
 	// keeping the guest address and the tap/masquerade in agreement per instance.
 	notifyReq := req
 	notifyReq.Network = perNet
-	if err := s.notify(vsockPath, inst.generation, entropy, notifyReq); err != nil {
+	if err := s.notify(guestConn, vsockPath, inst.generation, entropy, notifyReq); err != nil {
 		werr := fmt.Errorf("husk: fork-correctness handshake failed for vm %q: %w", id, err)
 		return ActivateResult{OK: false, Error: werr.Error()}, werr
 	}
@@ -885,6 +1132,11 @@ func (s *Stub) closeInstance(id vmID) error {
 // s.mu across the blocking VMM Close). It reaps the per-activation artifacts and
 // closes the VMM, returning the instance to StateNew.
 func (s *Stub) closeInstanceBody(id vmID, inst *vmInstance) error {
+	// Stop the warm-pool self-keepalive loop (#913) FIRST, before the VMM is
+	// closed, so no keepalive round is dialing the guest as it goes away. No-op
+	// when no loop was running (never pre-restored, or a claim already stopped it).
+	inst.stopKeepalive()
+
 	// Best effort: reap this instance's rootfs CoW clone so it does not outlive the
 	// VM. Path only is logged on failure; the clone carries no secrets.
 	if inst.rootfsClonePath != "" {
@@ -1215,7 +1467,12 @@ func (s *Stub) forkSnapshotInstance(ctx context.Context, id vmID, req ForkSnapsh
 	// `mem`) unless child import is enabled; the freeze is only worthwhile when the
 	// child actually consumes the frozen memfd. This keeps a re-enabled live-cow
 	// source's forks fast and RESTORABLE (the proven disk path) instead of hung.
-	if freezer := s.liveCowSnapshotFreezer(); freezer != nil && s.liveCowChildImport {
+	// SPILL GATE (see ForkSnapshotRequest.RequireMemFile): child import only makes the
+	// mem-skip safe for a child CO-LOCATED in this pod, which is the only child that
+	// can reach this source's shared memfd. When the controller tells us a child will
+	// land in its OWN pod, that child can restore only from disk, so the Full path must
+	// write the mem file or the fork hangs with the spilled children stuck Restoring.
+	if freezer := s.liveCowSnapshotFreezer(); freezer != nil && s.liveCowChildImport && !req.RequireMemFile {
 		if _, err := freezer.Freeze(); err != nil {
 			_ = s.resumeInstanceAfterFork(id, inst)
 			werr := fmt.Errorf("husk: freeze source guest for live-cow fork snapshot vm %q: %w", id, err)

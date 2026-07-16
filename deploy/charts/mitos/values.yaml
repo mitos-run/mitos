@@ -95,6 +95,24 @@ controller:
   # pre-prepared and a fork adopts it (fc_boot off the hot path) instead of booting one
   # at fork time. A fresh slot re-warms async; a miss falls back to on-demand prepare.
   prewarmChild: false
+
+  # EXPERIMENTAL, default off. When true (and multiVMFork on), render
+  # --husk-prepare-egress-link so warm husk pods bring their default VM's tap up while
+  # DORMANT under a default-deny policy; a claim then pays only the atomic nft
+  # transaction that installs the tenant policy, not the tap create.
+  huskPrepareEgressLink: false
+
+  # EXPERIMENTAL, default off. When true (and huskPrepareEgressLink on), render
+  # --husk-prepare-restore so warm husk pods load their default VM's snapshot and
+  # RESUME its guest while DORMANT; a claim then pays only the fork-correctness
+  # handshake instead of the restore, resume, and guest-ready wait.
+  huskPrepareRestore: false
+
+  # EXPERIMENTAL, default off. When true (and huskPrepareRestore on), render
+  # --husk-prepare-kernel-prefault so a pre-restored dormant pod runs the template
+  # build's inert warm cell once, making the run_code kernel's working set resident
+  # before the first tenant cell. Fails open in the pod on a kernel-less template.
+  huskPrepareKernelPrefault: false
   # Value for --husk-data-dir: the node template snapshot root the husk pods
   # mount; must match forkd's --data-dir.
   huskDataDir: /var/lib/mitos
@@ -732,6 +750,12 @@ console:
 # programmatic counterpart to the console.
 gateway:
   enabled: true
+  # Operator tier grants (issue #881 wiring): map of orgID to tier name (free,
+  # starter, pro). Each entry renders one repeatable --org-tier flag; an org
+  # not named here stays on the fail-closed free default. Note the pro tier
+  # also opens the sandbox egress posture. Org ids and tier names are not
+  # secrets.
+  orgTiers: {}
   image:
     repository: mitos-gateway
     tag: ""
@@ -785,6 +809,17 @@ gateway:
   # platform Secret or another tenant's object; GHSA-pgv2-9w24-j7wh). Use per-org
   # tenancy to enable secretRef and workspaces safely.
   singleTenantNamespace: ""
+  # Pre-claimed checkout: keep a small buffer of already-activated sandboxes
+  # per listed pool and serve eligible creates (no env, secrets, workspace,
+  # fan-out, or TTL) from it with a single attribution patch instead of the
+  # whole claim round trip. Requires singleTenantNamespace. Buffered sandboxes
+  # carry no org and bill nobody until claimed: deliberate platform cost,
+  # bounded by cap and maxAge. Default off (empty pools).
+  checkout:
+    pools: []
+    floor: 2
+    cap: 4
+    maxAge: 10m
   ingress:
     enabled: false
     className: ""

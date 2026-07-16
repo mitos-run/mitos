@@ -1506,3 +1506,160 @@ func TestReconcileHuskPodsThreadsMultiVM(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildHuskPodThreadsPrepareEgressLink proves the prepare-time link flag reaches the
+// stub together with the in-pod addresses it cannot work without: the tap name derives
+// from the guest IP, and the stub needs it BEFORE an activate request arrives. Off (the
+// default) the pod is byte-for-byte the current activate-time filter.
+func TestBuildHuskPodThreadsPrepareEgressLink(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true, PrepareEgressLink: true})
+	args := on.Spec.Containers[0].Args
+	for _, want := range []string{"--prepare-egress-link", "--in-pod-guest-ip", "--in-pod-gateway-ip"} {
+		if !argsContain(args, want) {
+			t.Errorf("husk args missing %s when prepare-egress-link is enabled: %v", want, args)
+		}
+	}
+	// The addresses must be the ones the activate request carries, or the stub would
+	// bring up a tap the claim never resolves to and the skip would silently not apply.
+	if !argsContain(args, "10.200.0.2") || !argsContain(args, "10.200.0.1") {
+		t.Errorf("husk args do not carry the fixed in-pod /30: %v", args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true})
+	for _, unwanted := range []string{"--prepare-egress-link", "--in-pod-guest-ip", "--in-pod-gateway-ip"} {
+		if argsContain(off.Spec.Containers[0].Args, unwanted) {
+			t.Errorf("husk args must omit %s by default: %v", unwanted, off.Spec.Containers[0].Args)
+		}
+	}
+}
+
+// TestBuildHuskPodOmitsPrepareEgressLinkWithoutMultiVM: the option is documented as
+// requiring MultiVM, and the stub only brings its tap up on the multi-VM Prepare path.
+// Emitting the flags to a single-VM stub would produce an unsupported pod shape whose
+// arguments do nothing. cmd/controller rejects the combination outright; this pins the
+// second gate, at the boundary that actually builds the pod.
+func TestBuildHuskPodOmitsPrepareEgressLinkWithoutMultiVM(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	pod := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: false, PrepareEgressLink: true,
+	})
+	for _, unwanted := range []string{"--prepare-egress-link", "--in-pod-guest-ip", "--in-pod-gateway-ip"} {
+		if argsContain(pod.Spec.Containers[0].Args, unwanted) {
+			t.Errorf("husk args carry %s without --multi-vm: %v", unwanted, pod.Spec.Containers[0].Args)
+		}
+	}
+}
+
+// TestBuildHuskPodThreadsPrepareRestore proves --prepare-restore flows to the stub ONLY
+// alongside --prepare-egress-link (and therefore MultiVM), because the restore builds on
+// the prepared tap. Off, the flag is absent.
+func TestBuildHuskPodThreadsPrepareRestore(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareRestore: true,
+	})
+	if !argsContain(on.Spec.Containers[0].Args, "--prepare-restore") {
+		t.Errorf("husk args missing --prepare-restore when enabled: %v", on.Spec.Containers[0].Args)
+	}
+
+	// Without the prepared link, restore has no tap; the flag must not be emitted.
+	noLink := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareRestore: true,
+	})
+	if argsContain(noLink.Spec.Containers[0].Args, "--prepare-restore") {
+		t.Errorf("husk args carry --prepare-restore without --prepare-egress-link: %v", noLink.Spec.Containers[0].Args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{StubImage: "img", MultiVM: true, PrepareEgressLink: true})
+	if argsContain(off.Spec.Containers[0].Args, "--prepare-restore") {
+		t.Errorf("husk args must omit --prepare-restore by default: %v", off.Spec.Containers[0].Args)
+	}
+}
+
+// TestBuildHuskPodThreadsPrepareKernelPrefault: --prepare-kernel-prefault is emitted only
+// when the WHOLE chain (prepared link + prepared restore) is on; without the dormant
+// restore there is no running guest to warm.
+func TestBuildHuskPodThreadsPrepareKernelPrefault(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareRestore: true, PrepareKernelPrefault: true,
+	})
+	if !argsContain(on.Spec.Containers[0].Args, "--prepare-kernel-prefault") {
+		t.Errorf("husk args missing --prepare-kernel-prefault when enabled: %v", on.Spec.Containers[0].Args)
+	}
+
+	// Without the dormant restore, the prefault has no running guest; the flag must
+	// not be emitted.
+	noRestore := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareKernelPrefault: true,
+	})
+	if argsContain(noRestore.Spec.Containers[0].Args, "--prepare-kernel-prefault") {
+		t.Errorf("husk args carry --prepare-kernel-prefault without --prepare-restore: %v", noRestore.Spec.Containers[0].Args)
+	}
+
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareRestore: true,
+	})
+	if argsContain(off.Spec.Containers[0].Args, "--prepare-kernel-prefault") {
+		t.Errorf("husk args must omit --prepare-kernel-prefault by default: %v", off.Spec.Containers[0].Args)
+	}
+}
+
+// TestPrepareRestorePodGetsSnapshotDirWithoutDigest pins the prod gap found at
+// the rung D canary (2026-07-14): on a pre-digest pool (no recorded template
+// digest, the hosted python pool's shape), the builder emitted --snapshot-dir
+// only together with --expected-digest, so a --prepare-restore stub had no
+// PrepareSnapshotDir and the dormant restore SILENTLY no-opped; every claim
+// kept paying the full restore while the flags claimed otherwise. A
+// prepare-restore pod must always know its snapshot dir; the verify posture
+// (digest verify vs --allow-unverified-snapshots) is unchanged and separate.
+func TestPrepareRestorePodGetsSnapshotDirWithoutDigest(t *testing.T) {
+	r := &controller.SandboxPoolReconciler{}
+	pool := &v1.SandboxPool{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns"}}
+	tmpl := &v1.PoolTemplateSpec{}
+
+	// Pre-digest pool + prepare-restore: the snapshot dir must be threaded.
+	on := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareRestore: true,
+	})
+	args := on.Spec.Containers[0].Args
+	if !argsContain(args, "--snapshot-dir") {
+		t.Errorf("prepare-restore pod on a pre-digest pool missing --snapshot-dir; the dormant restore silently no-ops without it: %v", args)
+	}
+	if !argsContain(args, "--allow-unverified-snapshots") {
+		t.Errorf("pre-digest pool must keep the unverified escape hatch (verify posture unchanged): %v", args)
+	}
+	if argsContain(args, "--expected-digest") {
+		t.Errorf("no digest exists; --expected-digest must not be invented: %v", args)
+	}
+
+	// A fork child is never pre-restored; it must not gain the flag.
+	child := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true, PrepareRestore: true,
+		ForkSnapshotID: "fk-1",
+	})
+	if argsContain(child.Spec.Containers[0].Args, "--snapshot-dir") {
+		t.Errorf("fork-child pod must not carry --snapshot-dir: %v", child.Spec.Containers[0].Args)
+	}
+
+	// Without prepare-restore, the pre-digest render is byte-for-byte unchanged.
+	off := r.BuildHuskPodForTest(pool, tmpl, controller.HuskPodOptions{
+		StubImage: "img", MultiVM: true, PrepareEgressLink: true,
+	})
+	if argsContain(off.Spec.Containers[0].Args, "--snapshot-dir") {
+		t.Errorf("--snapshot-dir leaked into the flags-off pre-digest render: %v", off.Spec.Containers[0].Args)
+	}
+}

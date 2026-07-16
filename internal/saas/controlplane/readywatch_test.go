@@ -5,9 +5,11 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -119,6 +121,99 @@ func TestWatchDeletedMidCreateIsNotFound(t *testing.T) {
 	}
 	if elapsed >= 1*time.Second {
 		t.Fatalf("deletion surfaced after %s; the watch must deliver it before the 3s poll tick", elapsed)
+	}
+}
+
+// TestWatchDrivenCreateNeedsNoSandboxGet asserts the watch-driven create hot
+// path performs ZERO Gets on the Sandbox object: the ready watch is established
+// BEFORE the Create, so the create event itself arrives on the watch and no
+// authoritative re-read is needed to close a missed-event window. Every
+// serialized apiserver round trip here is paid by every hosted create (prod
+// measured the control-plane share of create at ~140 ms P50 against a 60-76 ms
+// engine restore), so the round-trip count is the property under test, the same
+// way the SDK pins its connection count.
+func TestWatchDrivenCreateNeedsNoSandboxGet(t *testing.T) {
+	var sandboxGets atomic.Int64
+	base := fakeclient.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&v1.Sandbox{}).
+		WithObjects(poolIn(orgA, "default")).
+		Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*v1.Sandbox); ok {
+				sandboxGets.Add(1)
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	cp := New(c, WithPollInterval(3*time.Second), WithReadyTimeout(10*time.Second))
+
+	stop := flipToReadyWhenCreated(t, c, orgA, "10.1.2.3:9091", "tok-noget")
+	defer stop()
+
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"default"}`),
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", resp.Status, resp.Body)
+	}
+	if n := sandboxGets.Load(); n != 0 {
+		t.Fatalf("watch-driven create performed %d Sandbox Get(s); the watch must be established before the Create so no authoritative re-read is needed", n)
+	}
+}
+
+// TestReadyFlipDuringCreateWriteIsStillSeen asserts a phase flip that lands
+// BEFORE the Create call even returns (the fastest controller imaginable) is
+// still observed. This is the race the post-establish authoritative Get used
+// to close; with the watch established before the Create, the events
+// themselves cover it, and this test keeps that property pinned.
+func TestReadyFlipDuringCreateWriteIsStillSeen(t *testing.T) {
+	base := fakeclient.NewClientBuilder().
+		WithScheme(newScheme(t)).
+		WithStatusSubresource(&v1.Sandbox{}).
+		WithObjects(poolIn(orgA, "default")).
+		Build()
+	c := interceptor.NewClient(base, interceptor.Funcs{
+		Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if err := cl.Create(ctx, obj, opts...); err != nil {
+				return err
+			}
+			sb, ok := obj.(*v1.Sandbox)
+			if !ok {
+				return nil
+			}
+			ready := sb.DeepCopy()
+			ready.Status.Phase = v1.SandboxReady
+			ready.Status.Endpoint = "10.9.9.9:9091"
+			if err := cl.Status().Update(ctx, ready); err != nil {
+				return err
+			}
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: sb.Name + tokenSecretSuffix, Namespace: sb.Namespace},
+				Data:       map[string][]byte{"token": []byte("tok-flip"), "endpoint": []byte("10.9.9.9:9091")},
+			}
+			return cl.Create(ctx, secret)
+		},
+	})
+	cp := New(c, WithPollInterval(3*time.Second), WithReadyTimeout(10*time.Second))
+
+	started := time.Now()
+	resp, err := cp.Forward(context.Background(), saas.ForwardRequest{
+		OrgID: orgA, Op: "sandbox.create", Body: []byte(`{"pool":"default"}`),
+	})
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	if resp.Status != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", resp.Status, resp.Body)
+	}
+	if elapsed >= 1*time.Second {
+		t.Fatalf("Ready flip during the Create write surfaced after %s; it must be seen immediately, not on a tick or fallback boundary", elapsed)
 	}
 }
 

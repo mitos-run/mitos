@@ -29,6 +29,11 @@ type Options struct {
 	// EnableWorkspaceTools advertises the workspace tools in tools/list. Their
 	// dispatch is deferred (#21); enabling only affects discovery.
 	EnableWorkspaceTools bool
+	// ATR, when set with a non-nil Evaluator, turns on report-mode Agent Threat
+	// Rules screening of tool calls at dispatch (--enable-atr, default off). It
+	// is detection only: it logs matches and never changes a tool result or the
+	// isolation path.
+	ATR *ATRConfig
 }
 
 // Server is an MCP server that dispatches tool calls to a SandboxBackend.
@@ -229,6 +234,10 @@ func (s *Server) handleToolsCall(ctx context.Context, req *Request) Response {
 	if verr != nil {
 		return s.okResponse(req.ID, toolErrorResult(*verr))
 	}
+
+	// Report-mode ATR screening runs at this chokepoint before dispatch. It is
+	// detection only: it logs matches and never alters the result below.
+	s.opts.ATR.screen(tool.Name, args)
 
 	result := s.dispatch(ctx, tool.Name, args)
 	return s.okResponse(req.ID, result)
