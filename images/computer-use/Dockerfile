@@ -25,14 +25,16 @@ FROM debian:stable-slim
 # independent of --no-sandbox, the seccomp profile, and every headless/gpu flag
 # combination tried. We pinned back to 147.0.7727.137 until Debian shipped a
 # launchable 150+ (issue tracked in the PR that added the pin). That 147 build
-# has since been REMOVED from the archive (apt exit 100 on every build), and
-# the security pocket now ships 150.0.7871.114, sixty-eight point releases past
-# the SIGTRAP build; the docker-build CDP smoke (below in ci.yaml) is the gate
+# has since been REMOVED from the archive (apt exit 100 on every build). The
+# security pocket keeps only its latest build, so the pin has to track it: it
+# shipped 150.0.7871.114, then rotated that out too (apt exit 100 again), and
+# now ships 150.0.7871.124, ten point releases further on and still well past
+# the SIGTRAP build. The docker-build CDP smoke (below in ci.yaml) is the gate
 # that proves it launches and binds the debugging port before this can merge.
 # The isolation boundary here remains the Firecracker microVM, not Chromium's
 # own sandbox (already --no-sandbox; see docs/threat-model.md). apt-mark hold
 # keeps a transitive upgrade from moving the version underneath the pin.
-ARG CHROMIUM_VERSION=150.0.7871.114-1~deb13u1
+ARG CHROMIUM_VERSION=150.0.7871.124-1~deb13u1
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       chromium="${CHROMIUM_VERSION}" \
