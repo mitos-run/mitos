@@ -64,6 +64,35 @@ const capacityPendingRequeue = 5 * time.Second
 // Cleared once the pool exists, so a later pool deletion starts a fresh clock.
 const poolMissingSinceAnnotation = "mitos.run/pool-missing-since"
 
+// activateFailingSinceAnnotation stamps, in RFC3339, the instant a claim first
+// failed to activate its selected husk pod. Like poolMissingSinceAnnotation it
+// is the durable anchor for a bounded-wait deadline: an activation may fail
+// transiently (a husk still coming up) and recover, so the claim retries with
+// backoff for a grace period before failing terminally (issue #894). Cleared on
+// a successful activation so a later re-activation starts a fresh clock.
+const activateFailingSinceAnnotation = "mitos.run/activate-failing-since"
+
+// activateFailingMaxBackoff caps the requeue delay for a persistently failing
+// activation, so a claim that cannot activate stops retrying at full cadence
+// (issue #894) without stalling recovery once a transient fault clears.
+const activateFailingMaxBackoff = 30 * time.Second
+
+// activateRetryBackoff returns the requeue delay for a claim that has been
+// failing to activate for waited: capacityPendingRequeue while the failure is
+// fresh, doubling as it persists, capped at activateFailingMaxBackoff. It is
+// derived from elapsed time rather than a stored attempt count, so it is
+// stateless and monotonic across controller restarts (issue #894).
+func activateRetryBackoff(waited time.Duration) time.Duration {
+	b := capacityPendingRequeue
+	for waited >= 2*b && b < activateFailingMaxBackoff {
+		b *= 2
+	}
+	if b > activateFailingMaxBackoff {
+		b = activateFailingMaxBackoff
+	}
+	return b
+}
+
 // huskHealthRequeue is how often a Ready husk claim re-checks its backing pod's
 // readiness so its Ready condition reflects a node/pod outage (the endpoint is
 // unreachable) instead of falsely staying Ready (#177). A pod watch would detect
@@ -1054,17 +1083,75 @@ func (r *SandboxReconciler) reconcileHuskClaim(ctx context.Context, claim *v1.Sa
 		if uerr := r.unmarkHuskPodClaimed(ctx, pod); uerr != nil {
 			logger.Error(uerr, "release husk pod claim label after activation failure", "pod", pod.Name)
 		}
+		// Bounded retry with backoff, then terminal (#894). An activation that can
+		// NEVER succeed (a missing snapshot artifact, a digest that will never
+		// match) previously re-pended at the flat capacityPendingRequeue cadence
+		// forever, with no backoff and no terminal state, burning forkd RPCs and
+		// apiserver writes (a stuck pair produced ~1750 futile RPCs and ~3500
+		// writes in an hour). Anchor the first-failure instant on a durable
+		// annotation, mirroring poolMissingSinceAnnotation: back off as the
+		// failure persists, and after the same bounded grace as the capacity wait
+		// fail the claim terminally with the engine's own error so the cause is
+		// actionable (#28).
+		now := r.now()
+		failingSince := now
+		if stamp := claim.Annotations[activateFailingSinceAnnotation]; stamp != "" {
+			if parsed, perr := time.Parse(time.RFC3339, stamp); perr == nil {
+				failingSince = parsed
+			}
+		} else {
+			if claim.Annotations == nil {
+				claim.Annotations = map[string]string{}
+			}
+			claim.Annotations[activateFailingSinceAnnotation] = now.Format(time.RFC3339)
+			if uerr := r.Update(ctx, claim); uerr != nil {
+				return ctrl.Result{}, uerr
+			}
+		}
+		waited := now.Sub(failingSince)
+		maxWait := r.maxPendingDuration()
+
+		// Bounded fail: activation never succeeded within the grace period.
+		if waited >= maxWait {
+			finished := metav1.NewTime(now)
+			claim.Status.Phase = v1.SandboxFailed
+			claim.Status.FinishedAt = &finished
+			setCondition(&claim.Status.Conditions, metav1.Condition{
+				Type:               "Ready",
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: finished,
+				Reason:             "ActivateFailed",
+				Message: fmt.Sprintf(
+					"%s; still failing after %s, past the %s grace period. The husk snapshot on node %q may be missing or corrupt; check the pool's TemplateBuilt condition and forkd's logs on that node, then recreate the sandbox",
+					msg, waited.Round(time.Second), maxWait, pod.Spec.NodeName,
+				),
+			})
+			_ = r.Status().Update(ctx, claim)
+			logger.Info("claim failed: husk activation did not succeed past bounded wait", "claim", claim.Name, "node", pod.Spec.NodeName, "waited", waited.Round(time.Second), "maxWait", maxWait)
+			return ctrl.Result{}, nil
+		}
+
 		beforeStatus := claim.Status.DeepCopy()
 		claim.Status.Phase = v1.SandboxPending
 		setCondition(&claim.Status.Conditions, metav1.Condition{
 			Type:               "Ready",
 			Status:             metav1.ConditionFalse,
-			LastTransitionTime: metav1.NewTime(r.now()),
+			LastTransitionTime: metav1.NewTime(now),
 			Reason:             "ActivateFailed",
-			Message:            msg + "; the claim will retry",
+			Message:            msg + "; the claim will retry with backoff",
 		})
 		_ = r.writeClaimStatusIfChanged(ctx, claim, beforeStatus)
-		return ctrl.Result{RequeueAfter: capacityPendingRequeue}, nil
+		return ctrl.Result{RequeueAfter: activateRetryBackoff(waited)}, nil
+	}
+
+	// A previously failing activation just succeeded: clear the grace stamp so a
+	// later re-activation (failover, #177) starts a fresh clock. The guard makes
+	// the common first-try success pay only a map lookup, never a write.
+	if claim.Annotations[activateFailingSinceAnnotation] != "" {
+		delete(claim.Annotations, activateFailingSinceAnnotation)
+		if uerr := r.Update(ctx, claim); uerr != nil {
+			return ctrl.Result{}, uerr
+		}
 	}
 
 	// The pod was already claimed (optimistic-lock label patch) BEFORE activation,
