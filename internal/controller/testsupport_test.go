@@ -336,6 +336,14 @@ func TemplateBuiltConditionForTest(buildErr error, now metav1.Time) metav1.Condi
 	return templateBuiltCondition(buildErr, now)
 }
 
+// TemplateBuiltConditionUpdateForTest exposes templateBuiltConditionUpdate so
+// the external controller_test package can assert that a build-in-progress
+// signal (gRPC Unavailable, #888) is not surfaced as a BuildFailed condition
+// transition but leaves the prior TemplateBuilt condition untouched.
+func TemplateBuiltConditionUpdateForTest(buildErr error, now metav1.Time) (metav1.Condition, bool) {
+	return templateBuiltConditionUpdate(buildErr, now)
+}
+
 // ForceRebuildAnnotationForTest exposes the forceRebuildAnnotation key to the
 // external controller_test package.
 const ForceRebuildAnnotationForTest = forceRebuildAnnotation

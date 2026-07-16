@@ -311,6 +311,21 @@ func templateBuiltCondition(buildErr error, now metav1.Time) metav1.Condition {
 	}
 }
 
+// templateBuiltConditionUpdate returns the TemplateBuilt condition to set for
+// buildErr and whether it should be set at all. It is the controller-side
+// complement of the #884 daemon mapping: a build still IN PROGRESS on the node
+// (the in-flight guard, surfaced as gRPC Unavailable) is a retry-later signal,
+// not a failure, so ok is false and the caller leaves the prior TemplateBuilt
+// condition untouched instead of flapping it to False/BuildFailed on every
+// reconcile while the build runs (#888). Every other outcome (success, or a
+// genuine build failure) sets the condition as before.
+func templateBuiltConditionUpdate(buildErr error, now metav1.Time) (metav1.Condition, bool) {
+	if buildErr != nil && isTemplateBuildInProgress(buildErr) {
+		return metav1.Condition{}, false
+	}
+	return templateBuiltCondition(buildErr, now), true
+}
+
 // truncateMessage bounds s to at most n bytes so a long error never produces
 // an oversized condition message. It is a byte-level cut (not rune-aware):
 // the callers here are ASCII forkd/Kubernetes error text, and a Kubernetes

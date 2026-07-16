@@ -29,6 +29,19 @@ func isRetryableCapacity(err error) bool {
 	return hasGRPCCode(err, codes.ResourceExhausted) || hasGRPCCode(err, codes.Unavailable)
 }
 
+// isTemplateBuildInProgress reports whether err (possibly wrapped) is forkd's
+// "a build of this template is already running" signal rather than a build
+// failure. Engine.CreateTemplate's in-flight guard (#884) returns
+// fork.ErrTemplateBuildInProgress when a second concurrent build of the same
+// template races the first, and the daemon maps it to gRPC Unavailable. The
+// controller must treat this as retry-later, not a failure: while a slow or
+// stuck build holds the guard, flapping the TemplateBuilt condition to
+// BuildFailed on every ~20s reconcile makes a build IN PROGRESS look like a
+// build FAILURE (#888), which is misleading during an incident (#887).
+func isTemplateBuildInProgress(err error) bool {
+	return hasGRPCCode(err, codes.Unavailable)
+}
+
 // hasGRPCCode reports whether err (possibly wrapped) carries the given gRPC
 // status code anywhere in its unwrap chain.
 func hasGRPCCode(err error, code codes.Code) bool {
