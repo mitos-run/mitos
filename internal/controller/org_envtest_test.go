@@ -2,12 +2,14 @@ package controller_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -154,6 +156,145 @@ func TestOrgReconcilerProvisionsIsolationStack(t *testing.T) {
 	}
 	if !hasReadyCondition(after.Status.Conditions) {
 		t.Errorf("org missing Ready=True condition: %+v", after.Status.Conditions)
+	}
+}
+
+// TestOrgReconcilerProvisionsPoolFromTemplate asserts that when a pool template
+// is configured the reconciler clones it (full spec, warm.min overridden to 0)
+// into the org namespace under OrgPoolName, owner-referenced to the Org, so a
+// per-org create has a schedulable pool to fork from (issue #288).
+func TestOrgReconcilerProvisionsPoolFromTemplate(t *testing.T) {
+	stamp := time.Now().UnixNano()
+	// Seed a reference pool in the controller namespace ("mitos"). Ensure the
+	// namespace exists first (envtest starts with none).
+	mitosNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "mitos"}}
+	if err := k8sClient.Create(ctx, mitosNS); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create mitos namespace: %v", err)
+	}
+	tmplName := fmt.Sprintf("python-%d", stamp)
+	tmpl := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: tmplName, Namespace: "mitos"},
+		Spec: v1.SandboxPoolSpec{
+			Template:  &v1.PoolTemplateSpec{Image: "ghcr.io/mitos-run/mitos-python:v1.13.0"},
+			Warm:      &v1.PoolWarm{Min: 8},
+			Placement: &v1.PoolPlacement{NodeSelector: map[string]string{"mitos.run/kvm": "true"}},
+		},
+	}
+	if err := k8sClient.Create(ctx, tmpl); err != nil {
+		t.Fatalf("create template pool: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, tmpl) })
+
+	orgID := fmt.Sprintf("pooled-%d", stamp)
+	org := &v1.Org{ObjectMeta: metav1.ObjectMeta{Name: orgID}}
+	if err := k8sClient.Create(ctx, org); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, org) })
+
+	r := newOrgReconciler()
+	r.PoolTemplateName = tmplName
+	r.PoolTemplateNamespace = "mitos"
+	r.OrgPoolName = "python"
+	r.OrgPoolWarmMin = 0
+	reconcileOrg(t, r, orgID)
+
+	ns := tenant.NamespaceForOrg(orgID)
+	var pool v1.SandboxPool
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: "python", Namespace: ns}, &pool); err != nil {
+		t.Fatalf("get org pool: %v", err)
+	}
+	if pool.Spec.Template == nil || pool.Spec.Template.Image != "ghcr.io/mitos-run/mitos-python:v1.13.0" {
+		t.Errorf("pool template image = %+v, want cloned image", pool.Spec.Template)
+	}
+	if pool.Spec.Placement == nil || pool.Spec.Placement.NodeSelector["mitos.run/kvm"] != "true" {
+		t.Errorf("pool placement not cloned: %+v", pool.Spec.Placement)
+	}
+	if pool.Spec.Warm == nil || pool.Spec.Warm.Min != 0 {
+		t.Errorf("pool warm = %+v, want Min 0 (overridden)", pool.Spec.Warm)
+	}
+	if pool.Labels[tenant.OrgLabelKey] != orgID {
+		t.Errorf("pool org label = %q, want %q", pool.Labels[tenant.OrgLabelKey], orgID)
+	}
+	if !hasOrgOwner(pool.OwnerReferences, orgID) {
+		t.Errorf("pool missing Org owner reference: %+v", pool.OwnerReferences)
+	}
+}
+
+// TestOrgReconcilerRejectsTemplateRefReferencePool asserts that a reference pool
+// which itself uses spec.templateRef (a bare name resolved in its OWN namespace)
+// is refused rather than cloned: cloning it verbatim would carry a dangling
+// templateRef into every org namespace, where the shared template does not
+// exist, so every org pool would silently never build. The reconcile fails with
+// actionable text and NO per-org pool is created.
+func TestOrgReconcilerRejectsTemplateRefReferencePool(t *testing.T) {
+	stamp := time.Now().UnixNano()
+	mitosNS := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "mitos"}}
+	if err := k8sClient.Create(ctx, mitosNS); err != nil && !apierrors.IsAlreadyExists(err) {
+		t.Fatalf("create mitos namespace: %v", err)
+	}
+	tmplName := fmt.Sprintf("ref-pool-%d", stamp)
+	tmpl := &v1.SandboxPool{
+		ObjectMeta: metav1.ObjectMeta{Name: tmplName, Namespace: "mitos"},
+		Spec: v1.SandboxPoolSpec{
+			TemplateRef: &v1.LocalObjectReference{Name: "shared-python"},
+			Warm:        &v1.PoolWarm{Min: 1},
+		},
+	}
+	if err := k8sClient.Create(ctx, tmpl); err != nil {
+		t.Fatalf("create templateRef reference pool: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, tmpl) })
+
+	orgID := fmt.Sprintf("reforg-%d", stamp)
+	org := &v1.Org{ObjectMeta: metav1.ObjectMeta{Name: orgID}}
+	if err := k8sClient.Create(ctx, org); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, org) })
+
+	r := newOrgReconciler()
+	r.PoolTemplateName = tmplName
+	r.PoolTemplateNamespace = "mitos"
+	r.OrgPoolName = "python"
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: orgID}}
+	_, err := r.Reconcile(ctx, req)
+	if err == nil {
+		t.Fatal("want an error reconciling an Org whose reference pool uses spec.templateRef; got nil")
+	}
+	if !strings.Contains(err.Error(), "templateRef") {
+		t.Errorf("error = %q, want it to name templateRef as the actionable cause", err.Error())
+	}
+
+	ns := tenant.NamespaceForOrg(orgID)
+	var pool v1.SandboxPool
+	if getErr := k8sClient.Get(ctx, types.NamespacedName{Name: "python", Namespace: ns}, &pool); !apierrors.IsNotFound(getErr) {
+		t.Errorf("expected NO per-org pool created for a templateRef reference; get returned %v", getErr)
+	}
+}
+
+// TestOrgReconcilerSkipsPoolWhenUnconfigured asserts that with no pool template
+// (the self-host / bring-your-own-pool posture) NO pool is created, so a
+// single-tenant install is unaffected.
+func TestOrgReconcilerSkipsPoolWhenUnconfigured(t *testing.T) {
+	orgID := fmt.Sprintf("nopool-%d", time.Now().UnixNano())
+	org := &v1.Org{ObjectMeta: metav1.ObjectMeta{Name: orgID}}
+	if err := k8sClient.Create(ctx, org); err != nil {
+		t.Fatalf("create org: %v", err)
+	}
+	t.Cleanup(func() { _ = k8sClient.Delete(ctx, org) })
+
+	r := newOrgReconciler() // PoolTemplateName empty
+	reconcileOrg(t, r, orgID)
+
+	ns := tenant.NamespaceForOrg(orgID)
+	var list v1.SandboxPoolList
+	if err := k8sClient.List(ctx, &list, client.InNamespace(ns)); err != nil {
+		t.Fatalf("list pools: %v", err)
+	}
+	if len(list.Items) != 0 {
+		t.Fatalf("a pool was created despite no template: %+v", list.Items)
 	}
 }
 

@@ -1580,6 +1580,20 @@ deleted or drifted stack object enqueues the Org and is recreated; org deletion
 cascades through owner references (the cluster-scoped Org owns the cluster-scoped
 Namespace, a valid owner edge).
 
+When `--org-pool-template-name` is set, the reconciler also clones a reference
+SandboxPool's full spec (image, resources, placement, snapshots, network) into
+each org namespace with `warm.min` overridden (default 0), named to match the
+pool a create resolves. Cloning from one reference is what makes the per-org pool
+schedule exactly where the reference does (a bare image would not carry the KVM
+placement); `warm.min:0` keeps no idle warm husks, so N per-org pools cost nothing
+at rest (the first fork per org cold-starts; the snapshot is content-addressed and
+deduped per node). This does NOT move the isolation boundary: the pool and its
+husks live inside the org's already-isolated namespace under the same default-deny
+NetworkPolicy and ResourceQuota, so it grants no cross-tenant reach. It is the
+enablement that lets the hosted deployment run per-org namespaces instead of one
+shared namespace (which is what closes the shared-namespace referenced-object
+class of issues in section 7b, the bare-name secret/workspace reference finding).
+
 What isolates two orgs: **the separate namespace + the per-org default-deny
 NetworkPolicy + the per-org ResourceQuota ceiling + the microVM.** No single one
 of these is the whole boundary; the microVM remains the in-pod isolation

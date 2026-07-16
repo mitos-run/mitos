@@ -252,6 +252,29 @@
             "defaultMemory": {
               "description": "Default per-org aggregate memory limit ceiling, a Kubernetes quantity.",
               "type": "string"
+            },
+            "poolTemplate": {
+              "description": "Per-org SandboxPool cloned from a reference pool: when name is set, clone that pool's full spec into every org namespace with warm.min overridden.",
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "description": "Reference SandboxPool to clone; empty disables per-org pools.",
+                  "type": "string"
+                },
+                "namespace": {
+                  "description": "Namespace of the reference pool; empty defaults to the release namespace.",
+                  "type": "string"
+                },
+                "orgPoolName": {
+                  "description": "Name the cloned pool takes per org; empty defaults to name.",
+                  "type": "string"
+                },
+                "warmMin": {
+                  "description": "warm.min override on the cloned pool.",
+                  "type": "integer"
+                }
+              }
             }
           }
         },

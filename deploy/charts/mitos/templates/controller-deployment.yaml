@@ -101,6 +101,16 @@ spec:
             - --org-default-max-sandboxes={{ .Values.controller.orgTenancy.defaultMaxSandboxes }}
             - --org-default-cpu={{ .Values.controller.orgTenancy.defaultCPU }}
             - --org-default-memory={{ .Values.controller.orgTenancy.defaultMemory }}
+            {{- if .Values.controller.orgTenancy.poolTemplate.name }}
+            - --org-pool-template-name={{ .Values.controller.orgTenancy.poolTemplate.name }}
+            {{- if .Values.controller.orgTenancy.poolTemplate.namespace }}
+            - --org-pool-template-namespace={{ .Values.controller.orgTenancy.poolTemplate.namespace }}
+            {{- end }}
+            {{- if .Values.controller.orgTenancy.poolTemplate.orgPoolName }}
+            - --org-pool-name={{ .Values.controller.orgTenancy.poolTemplate.orgPoolName }}
+            {{- end }}
+            - --org-pool-warm-min={{ .Values.controller.orgTenancy.poolTemplate.warmMin }}
+            {{- end }}
             {{- end }}
             {{- /*
             Usage metering (issue #602): the collector scrapes every forkd
