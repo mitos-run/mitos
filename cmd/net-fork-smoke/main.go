@@ -69,7 +69,7 @@ func run(image, dataDir, fcBin, kernel, agentBin string) error {
 	}
 
 	templateID := "nf-tmpl"
-	if err := engine.CreateTemplate(templateID, image, nil, nil, nil, nil, false, false); err != nil {
+	if err := engine.CreateTemplate(templateID, image, nil, nil, nil, nil, fork.CreateTemplateOpts{}); err != nil {
 		return setupErr(fmt.Errorf("create template: %w", err))
 	}
 

@@ -28,13 +28,13 @@ type warmKernelProbeEngine struct {
 	calls map[string]bool
 }
 
-func (e *warmKernelProbeEngine) CreateTemplate(id string, _ string, _ []string, _ []volume.Spec, _ *firecracker.WorkloadSpec, _ *firecracker.VMResources, _ bool, warmKernel bool) error {
+func (e *warmKernelProbeEngine) CreateTemplate(id string, _ string, _ []string, _ []volume.Spec, _ *firecracker.WorkloadSpec, _ *firecracker.VMResources, opts fork.CreateTemplateOpts) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.calls == nil {
 		e.calls = make(map[string]bool)
 	}
-	e.calls[id] = warmKernel
+	e.calls[id] = opts.WarmKernel
 	return nil
 }
 

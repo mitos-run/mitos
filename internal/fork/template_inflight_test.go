@@ -41,7 +41,7 @@ func TestCreateTemplateRefusesAConcurrentBuildOfTheSameTemplate(t *testing.T) {
 	}
 
 	done := make(chan error, 1)
-	go func() { done <- e.CreateTemplate("python", "img", nil, nil, nil, nil, false, false) }()
+	go func() { done <- e.CreateTemplate("python", "img", nil, nil, nil, nil, CreateTemplateOpts{}) }()
 
 	select {
 	case <-entered:
@@ -49,14 +49,14 @@ func TestCreateTemplateRefusesAConcurrentBuildOfTheSameTemplate(t *testing.T) {
 		t.Fatal("the first build never started")
 	}
 
-	err := e.CreateTemplate("python", "img", nil, nil, nil, nil, false, false)
+	err := e.CreateTemplate("python", "img", nil, nil, nil, nil, CreateTemplateOpts{})
 	if !errors.Is(err, ErrTemplateBuildInProgress) {
 		t.Fatalf("concurrent build of the same template returned %v, want ErrTemplateBuildInProgress", err)
 	}
 
 	// A DIFFERENT template must not be blocked by this one.
 	other := make(chan error, 1)
-	go func() { other <- e.CreateTemplate("node", "img", nil, nil, nil, nil, false, false) }()
+	go func() { other <- e.CreateTemplate("node", "img", nil, nil, nil, nil, CreateTemplateOpts{}) }()
 	select {
 	case err := <-other:
 		if errors.Is(err, ErrTemplateBuildInProgress) {
@@ -70,7 +70,7 @@ func TestCreateTemplateRefusesAConcurrentBuildOfTheSameTemplate(t *testing.T) {
 	<-done
 
 	// Once the first build returns, the template can be built again.
-	if err := e.CreateTemplate("python", "img", nil, nil, nil, nil, false, false); errors.Is(err, ErrTemplateBuildInProgress) {
+	if err := e.CreateTemplate("python", "img", nil, nil, nil, nil, CreateTemplateOpts{}); errors.Is(err, ErrTemplateBuildInProgress) {
 		t.Error("the guard was not released when the build returned")
 	}
 }

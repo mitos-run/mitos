@@ -552,7 +552,7 @@ func (s *server) handleCreateTemplate(w http.ResponseWriter, r *http.Request) {
 		// does not yet expose a force-rebuild knob (issue #584 wires that through
 		// the k8s controller/forkd gRPC path only for now), so it always takes the
 		// reuse-or-rebuild gate's default reuse-if-healthy behavior.
-		if err := s.engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil, workloadFromReq(req.Workload), vmResFromReq(req.Resources), false, false); err != nil {
+		if err := s.engine.CreateTemplate(req.ID, s.rootfsPath, nil, nil, workloadFromReq(req.Workload), vmResFromReq(req.Resources), fork.CreateTemplateOpts{}); err != nil {
 			s.releaseIdempotent(idemKey)
 			errResp(w, fmt.Sprintf("create template: %v", err), 500)
 			return

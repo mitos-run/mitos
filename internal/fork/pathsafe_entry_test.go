@@ -41,7 +41,7 @@ func TestForkRejectsUnsafeIDs(t *testing.T) {
 func TestCreateTemplateRejectsUnsafeID(t *testing.T) {
 	e := newGateEngine(t, t.TempDir(), false)
 	for _, id := range []string{"../../etc", "a/b", "..", ".", `a\b`} {
-		err := e.CreateTemplate(id, "img", nil, nil, nil, nil, false, false)
+		err := e.CreateTemplate(id, "img", nil, nil, nil, nil, CreateTemplateOpts{})
 		if err == nil {
 			t.Fatalf("CreateTemplate(%q) = nil error, want rejection", id)
 		}
