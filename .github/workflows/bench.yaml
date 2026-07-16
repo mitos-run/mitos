@@ -121,6 +121,23 @@ jobs:
           # The Rust guest agent (guest/agent-rs), built static (musl) so it runs
           # as PID 1 (/init) in the minimal bench rootfs. Same recipe as
           # Dockerfile.forkd.
+          #
+          # Self-heal a bench box that lost rustup (#767): the toolchain went off
+          # PATH (or away entirely) and this step died with "rustup: command not
+          # found" (exit 127), blocking every bare-metal bench. Prefer an existing
+          # install by sourcing its env in case only PATH was lost; install rustup
+          # (minimal stable profile) only when it is genuinely absent. Idempotent.
+          if [ -f "$HOME/.cargo/env" ]; then
+            # shellcheck disable=SC1091
+            . "$HOME/.cargo/env"
+          fi
+          if ! command -v rustup >/dev/null 2>&1; then
+            echo "rustup not found; installing a minimal stable toolchain (#767)"
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+            # shellcheck disable=SC1091
+            . "$HOME/.cargo/env"
+          fi
           rustup target add x86_64-unknown-linux-musl
           ( cd guest/agent-rs && \
             cargo build --release --target x86_64-unknown-linux-musl --features vsock )
