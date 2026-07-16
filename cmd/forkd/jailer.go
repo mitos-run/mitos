@@ -87,6 +87,13 @@ func parseUIDRange(s string) (uint32, uint32, error) {
 	if low > high {
 		return 0, 0, fmt.Errorf("--uid-range %q: low bound above high bound", s)
 	}
+	// The shared kvm gid owns the group-readable template artifacts so a husk
+	// reads them through the group class. A per-VM jailer uid/gid drawn from a
+	// range that covers it would collide with that shared group, so a jailed
+	// build VM could carry the template-read group. Refuse such a range.
+	if low <= firecracker.SharedKVMGID && firecracker.SharedKVMGID <= high {
+		return 0, 0, fmt.Errorf("--uid-range %q: range covers the shared kvm gid %d, reserved for template-read group ownership; choose a range that excludes it", s, firecracker.SharedKVMGID)
+	}
 	return uint32(low), uint32(high), nil
 }
 

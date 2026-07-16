@@ -934,6 +934,55 @@ func TestActivateNoRebindWhenNoClone(t *testing.T) {
 	}
 }
 
+// TestActivateFailsClosedWhenTemplateWithoutClone is the mandatory-CoW guard
+// (issue #597): a husk configured with a SHARED template rootfs but no
+// per-activation clone (the CoW dir was not configured, so Prepare took no
+// clone) must REFUSE to activate rather than fall back to loading the shared
+// template in place O_RDWR. The snapshot must never load, so Firecracker never
+// opens the shared template.
+func TestActivateFailsClosedWhenTemplateWithoutClone(t *testing.T) {
+	dir := t.TempDir()
+	tmplRootfs := filepath.Join(dir, "rootfs.ext4")
+	if err := os.WriteFile(tmplRootfs, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	vm := &fakeVMM{}
+	// A shared template rootfs is configured, but no CoW dir: Prepare skips the
+	// clone (rootfsClonePath stays empty) and stays dormant.
+	s := New(firecracker.VMConfig{ID: "husk-test"}, Options{
+		Start:              func(cfg firecracker.VMConfig) (vmm, error) { return vm, nil },
+		Ready:              readyOK,
+		Notify:             (&fakeNotifier{}).notify,
+		Verify:             verifyOK,
+		RootfsTemplatePath: tmplRootfs,
+		// RootfsCoWDir intentionally empty (missing CoW config).
+	})
+	if err := s.Prepare(context.Background()); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+
+	res, err := s.Activate(context.Background(), ActivateRequest{SnapshotDir: filepath.Join(dir, "snap")})
+	if err == nil {
+		t.Fatal("expected Activate to fail closed when a template rootfs has no CoW clone")
+	}
+	if res.OK {
+		t.Fatal("fail closed: result must not be OK without a per-activation clone")
+	}
+	if !strings.Contains(res.Error, "CoW") && !strings.Contains(res.Error, "clone") {
+		t.Errorf("error %q should explain the missing per-activation clone", res.Error)
+	}
+	// The load MUST NOT have run: Firecracker never opens the shared template.
+	if vm.loadCalls != 0 {
+		t.Errorf("the shared template must never be loaded in place, got %d loads", vm.loadCalls)
+	}
+	if len(vm.patchCalls) != 0 {
+		t.Errorf("no clone was prepared, so no PatchDrive expected, got %v", vm.patchCalls)
+	}
+	if s.State() == StateActive {
+		t.Error("state must not be active after a fail-closed activate")
+	}
+}
+
 func TestActivateRebindFailureFailsClosed(t *testing.T) {
 	dir := t.TempDir()
 	tmplRootfs := filepath.Join(dir, "rootfs.ext4")

@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"mitos.run/mitos/internal/controller"
+	"mitos.run/mitos/internal/firecracker"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -404,6 +405,19 @@ func TestBuildHuskPodPSARestricted(t *testing.T) {
 	// does not satisfy; it is documented, not accidental.
 	if psc.RunAsNonRoot == nil || *psc.RunAsNonRoot {
 		t.Error("pod RunAsNonRoot must be explicitly false (the documented /dev/kvm device exception)")
+	}
+	// The husk pod carries the shared kvm gid as a supplemental group so a future
+	// non-root husk (issue #585) reads the group-owned template artifacts through
+	// the group class (issue #597). The current uid-0 husk reads them as owner;
+	// the group is additive and never widens access.
+	foundKVMGroup := false
+	for _, g := range psc.SupplementalGroups {
+		if g == firecracker.SharedKVMGID {
+			foundKVMGroup = true
+		}
+	}
+	if !foundKVMGroup {
+		t.Errorf("pod SupplementalGroups = %v, want to include the shared kvm gid %d so the husk can read the group-owned template artifacts", psc.SupplementalGroups, firecracker.SharedKVMGID)
 	}
 
 	// CONTAINER-LEVEL securityContext: every other restricted control IS satisfied,

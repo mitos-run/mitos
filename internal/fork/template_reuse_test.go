@@ -7,27 +7,92 @@ import (
 	"testing"
 
 	"mitos.run/mitos/internal/cas"
+	"mitos.run/mitos/internal/firecracker"
 )
 
-// TestCheckTemplateArtifactInvariantsOwnedByEuid is the happy path: a
-// template fixture written by this test process is owned by the process's
-// own euid and carries mode 0o644 on every artifact (mustWrite in
-// verify_test.go already writes 0o644), so the invariant check must pass.
-func TestCheckTemplateArtifactInvariantsOwnedByEuid(t *testing.T) {
+// makeTemplateArtifactsCompliant rewrites the on-disk template artifacts to the
+// normalized ownership contract (this process's euid, the shared kvm group, and
+// the group-readable mode 0o640) so a root-gated test can exercise the
+// checkTemplateArtifactInvariants happy path. It requires the privilege to
+// chgrp to the shared kvm gid, so every caller must root-gate.
+func makeTemplateArtifactsCompliant(t *testing.T, dataDir, id string) {
+	t.Helper()
+	// The containing directories must be group-traversable (0o750, shared kvm
+	// gid) too, mirroring normalizeTemplateArtifacts, or the reuse invariant
+	// rejects on the dir before it ever reaches the files.
+	dir := filepath.Join(dataDir, "templates", id)
+	for _, d := range []string{dir, filepath.Join(dir, "snapshot")} {
+		if err := os.Chown(d, os.Geteuid(), firecracker.SharedKVMGID); err != nil {
+			t.Fatalf("chown %s: %v", d, err)
+		}
+		if err := os.Chmod(d, 0o750); err != nil {
+			t.Fatalf("chmod %s: %v", d, err)
+		}
+	}
+	for _, p := range templateSnapshotFiles(dataDir, id) {
+		if err := os.Chown(p, os.Geteuid(), firecracker.SharedKVMGID); err != nil {
+			t.Fatalf("chown %s: %v", p, err)
+		}
+		if err := os.Chmod(p, 0o640); err != nil {
+			t.Fatalf("chmod %s: %v", p, err)
+		}
+	}
+}
+
+// TestCheckTemplateArtifactInvariantsRejectsUnnormalized runs everywhere
+// (non-root CI included): a freshly written fixture is mode 0o644, i.e. it was
+// NEVER normalized to the group-readable 0o640 contract. The invariant gate
+// must refuse it and name the offending path, proving the reuse gate is active
+// without needing root to construct a foreign-group fixture. The fixture is
+// owned by the test process's own gid, which the gate accepts for a non-root
+// builder (a root builder tags the shared kvm gid instead), so the mode is the
+// difference the gate catches here.
+func TestCheckTemplateArtifactInvariantsRejectsUnnormalized(t *testing.T) {
 	id := "py"
 	dataDir := writeFakeTemplate(t, id)
+	// The gate checks artifacts in a stable sorted order (mem, rootfs, vmstate),
+	// so it names the first non-compliant one; assert it names an artifact under
+	// this template's dir and cites the group-readable mode mismatch.
+	templatePath := filepath.Join(dataDir, "templates", id)
+
+	err := checkTemplateArtifactInvariants(dataDir, id)
+	if err == nil {
+		t.Fatal("expected checkTemplateArtifactInvariants to reject an un-normalized template")
+	}
+	if !strings.Contains(err.Error(), templatePath) {
+		t.Fatalf("error %q does not name an artifact under %q", err.Error(), templatePath)
+	}
+	if !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("error %q should cite the group-readable mode mismatch", err.Error())
+	}
+}
+
+// TestCheckTemplateArtifactInvariantsCompliant is the happy path: a template
+// normalized to euid:SharedKVMGID at mode 0o640 clears the invariant gate.
+// Requires root to chgrp to the shared kvm gid, so it is skipped otherwise.
+func TestCheckTemplateArtifactInvariantsCompliant(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chgrp to the shared kvm gid requires root")
+	}
+	id := "py"
+	dataDir := writeFakeTemplate(t, id)
+	makeTemplateArtifactsCompliant(t, dataDir, id)
 
 	if err := checkTemplateArtifactInvariants(dataDir, id); err != nil {
 		t.Fatalf("checkTemplateArtifactInvariants: unexpected error %v", err)
 	}
 }
 
-// TestCheckTemplateArtifactInvariantsWrongMode writes the rootfs with mode
-// 0o600 instead of the required 0o644 and asserts the error names the
-// offending path.
+// TestCheckTemplateArtifactInvariantsWrongMode starts from a compliant template
+// and drops the rootfs mode to 0o600 (no group read), then asserts the error
+// names the offending path. Root-gated so the compliant base can be built.
 func TestCheckTemplateArtifactInvariantsWrongMode(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chgrp to the shared kvm gid requires root")
+	}
 	id := "py"
 	dataDir := writeFakeTemplate(t, id)
+	makeTemplateArtifactsCompliant(t, dataDir, id)
 	rootfsPath := filepath.Join(dataDir, "templates", id, "rootfs.ext4")
 	if err := os.Chmod(rootfsPath, 0o600); err != nil {
 		t.Fatalf("chmod rootfs: %v", err)
@@ -42,24 +107,50 @@ func TestCheckTemplateArtifactInvariantsWrongMode(t *testing.T) {
 	}
 }
 
-// TestCheckTemplateArtifactInvariantsForeignOwner chowns the rootfs to a
-// foreign uid (64000, the jailer's build uid per issue #583) and asserts the
-// invariant check rejects it. Requires root to chown, so it is skipped
-// otherwise.
+// TestCheckTemplateArtifactInvariantsForeignOwner chowns the rootfs to the
+// jailer's build uid (issue #583/#597) and asserts the invariant check rejects
+// it. Requires root to chown, so it is skipped otherwise.
 func TestCheckTemplateArtifactInvariantsForeignOwner(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("chown to a foreign uid requires root")
 	}
 	id := "py"
 	dataDir := writeFakeTemplate(t, id)
+	makeTemplateArtifactsCompliant(t, dataDir, id)
 	rootfsPath := filepath.Join(dataDir, "templates", id, "rootfs.ext4")
-	if err := os.Chown(rootfsPath, 64000, 64000); err != nil {
+	if err := os.Chown(rootfsPath, firecracker.JailerBuildUID, firecracker.SharedKVMGID); err != nil {
 		t.Fatalf("chown rootfs: %v", err)
 	}
 
 	err := checkTemplateArtifactInvariants(dataDir, id)
 	if err == nil {
 		t.Fatal("expected checkTemplateArtifactInvariants to fail on foreign owner")
+	}
+	if !strings.Contains(err.Error(), rootfsPath) {
+		t.Fatalf("error %q does not name the offending path %q", err.Error(), rootfsPath)
+	}
+}
+
+// TestCheckTemplateArtifactInvariantsWrongGroup chgrps the rootfs to a group
+// other than SharedKVMGID and asserts the invariant check rejects it: a husk
+// that is not in the artifact's group cannot read it, so the template is not
+// reusable. Requires root to chgrp, so it is skipped otherwise.
+func TestCheckTemplateArtifactInvariantsWrongGroup(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chgrp to a foreign gid requires root")
+	}
+	id := "py"
+	dataDir := writeFakeTemplate(t, id)
+	makeTemplateArtifactsCompliant(t, dataDir, id)
+	rootfsPath := filepath.Join(dataDir, "templates", id, "rootfs.ext4")
+	const otherGID = firecracker.SharedKVMGID + 1
+	if err := os.Chown(rootfsPath, os.Geteuid(), otherGID); err != nil {
+		t.Fatalf("chgrp rootfs: %v", err)
+	}
+
+	err := checkTemplateArtifactInvariants(dataDir, id)
+	if err == nil {
+		t.Fatal("expected checkTemplateArtifactInvariants to fail on wrong group")
 	}
 	if !strings.Contains(err.Error(), rootfsPath) {
 		t.Fatalf("error %q does not name the offending path %q", err.Error(), rootfsPath)
@@ -90,10 +181,15 @@ func TestShouldReuseTemplateNoOnDiskTemplate(t *testing.T) {
 
 // TestCreateTemplateReusesHealthyOnDisk exercises the reuse seam directly: a
 // healthy on-disk template (recorded digest verifies, artifacts pass the
-// ownership invariants) must be reused.
+// ownership invariants) must be reused. Root-gated because the compliant
+// artifacts must be group-owned by the shared kvm gid.
 func TestCreateTemplateReusesHealthyOnDisk(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chgrp to the shared kvm gid requires root")
+	}
 	id := "py"
 	dataDir := writeFakeTemplate(t, id)
+	makeTemplateArtifactsCompliant(t, dataDir, id)
 	store := newTestStore(t, dataDir)
 	if _, err := recordTemplateDigest(store, dataDir, id, cas.Metadata{}); err != nil {
 		t.Fatalf("recordTemplateDigest: %v", err)
@@ -116,9 +212,10 @@ func TestCreateTemplateReusesHealthyOnDisk(t *testing.T) {
 }
 
 // TestCreateTemplateRebuildsBrokenOnDisk exercises the reuse seam when the
-// on-disk template fails digest verification (tampered content): the gate
-// must refuse reuse and surface the verification error so the caller can
-// delete and rebuild.
+// on-disk template fails digest verification (tampered content): the gate must
+// refuse reuse and surface the verification error so the caller can delete and
+// rebuild. Digest verification runs before the ownership invariants, so this
+// runs non-root.
 func TestCreateTemplateRebuildsBrokenOnDisk(t *testing.T) {
 	id := "py"
 	dataDir := writeFakeTemplate(t, id)
@@ -148,10 +245,15 @@ func TestCreateTemplateRebuildsBrokenOnDisk(t *testing.T) {
 
 // TestCreateTemplateRebuildsBrokenInvariants exercises the reuse seam when
 // digest verification succeeds but the artifact ownership invariants fail
-// (issue #583): the gate must still refuse reuse.
+// (issue #583/#597): the gate must still refuse reuse. Root-gated so the
+// compliant-then-broken base can be built.
 func TestCreateTemplateRebuildsBrokenInvariants(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("chgrp to the shared kvm gid requires root")
+	}
 	id := "py"
 	dataDir := writeFakeTemplate(t, id)
+	makeTemplateArtifactsCompliant(t, dataDir, id)
 	store := newTestStore(t, dataDir)
 	if _, err := recordTemplateDigest(store, dataDir, id, cas.Metadata{}); err != nil {
 		t.Fatalf("recordTemplateDigest: %v", err)

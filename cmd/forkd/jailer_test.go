@@ -22,6 +22,8 @@ func TestParseUIDRange(t *testing.T) {
 		{in: "-64999", wantErr: true},
 		{in: "64999-64000", wantErr: true}, // low above high
 		{in: "0-100", wantErr: true},       // uid 0 is root; never jail as root
+		{in: "64500-65500", wantErr: true}, // covers the shared kvm gid 65000
+		{in: "65000-65000", wantErr: true}, // exactly the shared kvm gid
 		{in: "", wantErr: true},
 	}
 	for _, c := range cases {

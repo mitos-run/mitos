@@ -1,7 +1,9 @@
 package firecracker
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -9,15 +11,24 @@ import (
 
 // The jailed build VM hardlinks the canonical template rootfs into its chroot
 // and chownIntoJail flips the SHARED inode to the per-VM jailed uid (it must:
-// the deprivileged build VM writes the rootfs during the build). Left that
-// way, the husk VMM (uid 0 with ALL capabilities dropped, so no
-// CAP_DAC_OVERRIDE) fails EACCES opening the rootfs O_RDWR at /snapshot/load
-// (#583). normalizeTemplateArtifacts is the correct-by-construction repair at
-// the end of CreateTemplate: every canonical template artifact is handed back
-// to the daemon's own uid with world-readable modes before the template can
-// be registered or digest-recorded.
+// the deprivileged build VM writes the rootfs during the build). Left that way,
+// a husk VMM that is neither the jailer uid nor privileged fails EACCES opening
+// the artifacts (#583, #597). normalizeTemplateArtifacts is the
+// correct-by-construction repair at the end of CreateTemplate: every canonical
+// template artifact is handed back to the daemon's own uid and the shared kvm
+// group with group-readable modes before the template can be registered or
+// digest-recorded, so the current uid-0 husk reads them as owner and a future
+// non-root husk (issue #585) in the shared kvm group reads them through the
+// group class.
+//
+// Setting the group to SharedKVMGID requires the privilege to chgrp to a
+// foreign gid, so the normalize tests run only as root (the KVM e2e runner);
+// everywhere else they skip. In production normalize runs on a root forkd.
 
-func TestNormalizeTemplateArtifactsResetsModes(t *testing.T) {
+func TestNormalizeTemplateArtifactsSetsGroupReadableContract(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to chgrp template artifacts to the shared kvm gid")
+	}
 	root := t.TempDir()
 	snapDir := filepath.Join(root, "snapshot")
 	if err := os.MkdirAll(snapDir, 0o700); err != nil {
@@ -43,12 +54,12 @@ func TestNormalizeTemplateArtifactsResetsModes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := info.Mode().Perm(); got != 0o644 {
-			t.Errorf("%s mode = %o, want 0644", f, got)
+		if got := info.Mode().Perm(); got != 0o640 {
+			t.Errorf("%s mode = %o, want 0640 (group-readable, not world-writable)", f, got)
 		}
 		st := info.Sys().(*syscall.Stat_t)
-		if int(st.Uid) != os.Geteuid() || int(st.Gid) != os.Getegid() {
-			t.Errorf("%s owned %d:%d, want %d:%d", f, st.Uid, st.Gid, os.Geteuid(), os.Getegid())
+		if int(st.Uid) != os.Geteuid() || int(st.Gid) != SharedKVMGID {
+			t.Errorf("%s owned %d:%d, want %d:%d (root:SharedKVMGID)", f, st.Uid, st.Gid, os.Geteuid(), SharedKVMGID)
 		}
 	}
 	for _, d := range []string{root, snapDir} {
@@ -56,16 +67,20 @@ func TestNormalizeTemplateArtifactsResetsModes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := info.Mode().Perm(); got != 0o755 {
-			t.Errorf("%s mode = %o, want 0755", d, got)
+		if got := info.Mode().Perm(); got != 0o750 {
+			t.Errorf("%s mode = %o, want 0750", d, got)
+		}
+		st := info.Sys().(*syscall.Stat_t)
+		if int(st.Gid) != SharedKVMGID {
+			t.Errorf("%s gid = %d, want %d (SharedKVMGID)", d, st.Gid, SharedKVMGID)
 		}
 	}
 }
 
-// Root-gated regression for the exact production failure: a hardlink of the
-// canonical rootfs chowned to a jailed uid flips the shared inode, and
-// normalization restores it. Requires CAP_CHOWN, so it runs only as root
-// (the KVM e2e runner); everywhere else it skips.
+// TestNormalizeTemplateArtifactsRestoresJailFlippedOwner is the root-gated
+// regression for the exact production failure (#597): a hardlink of the
+// canonical rootfs chowned to the jailer build uid flips the shared inode, and
+// normalization restores it to the root:SharedKVMGID group-readable contract.
 func TestNormalizeTemplateArtifactsRestoresJailFlippedOwner(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires root to chown to a foreign uid")
@@ -81,11 +96,11 @@ func TestNormalizeTemplateArtifactsRestoresJailFlippedOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	// What chownIntoJail does to the build VM's chroot hardlink.
-	if err := os.Chown(link, 64000, 64000); err != nil {
+	if err := os.Chown(link, JailerBuildUID, JailerBuildUID); err != nil {
 		t.Fatal(err)
 	}
 	st := statT(t, rootfs)
-	if st.Uid != 64000 {
+	if int(st.Uid) != JailerBuildUID {
 		t.Fatalf("precondition: shared inode not flipped (uid=%d)", st.Uid)
 	}
 
@@ -93,8 +108,178 @@ func TestNormalizeTemplateArtifactsRestoresJailFlippedOwner(t *testing.T) {
 		t.Fatalf("normalizeTemplateArtifacts: %v", err)
 	}
 	st = statT(t, rootfs)
-	if int(st.Uid) != 0 || int(st.Gid) != 0 {
-		t.Errorf("rootfs owned %d:%d after normalize, want 0:0", st.Uid, st.Gid)
+	if int(st.Uid) != 0 || int(st.Gid) != SharedKVMGID {
+		t.Errorf("rootfs owned %d:%d after normalize, want 0:%d (root:SharedKVMGID)", st.Uid, st.Gid, SharedKVMGID)
+	}
+	if got := os.FileMode(st.Mode).Perm(); got != 0o640 {
+		t.Errorf("rootfs mode = %o after normalize, want 0640", got)
+	}
+}
+
+// TestNormalizeTemplateArtifactsRestorableByNonRootGroupMember is the key
+// proof: after normalize, a NON-ROOT process that is in the shared kvm group
+// can open (read) the template artifacts, while a process outside the group
+// cannot. This is the read leg every husk restore depends on (issue #597, #585:
+// the per-activation rootfs reflink clone reads rootfs.ext4; the snapshot load
+// reads mem and vmstate). Dropping privileges in-process is unreliable on Go's
+// multi-threaded runtime, so the read is exercised by a child process with
+// dropped credentials (uid nobody, primary gid + supplemental group set to the
+// shared kvm gid), which is exactly how the husk pod carries the group.
+func TestNormalizeTemplateArtifactsRestorableByNonRootGroupMember(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires root to normalize to the shared kvm gid and drop privileges")
+	}
+	catBin, err := exec.LookPath("cat")
+	if err != nil {
+		t.Skipf("cat not found, cannot exercise a dropped-privilege read: %v", err)
+	}
+
+	root := t.TempDir()
+	snapDir := filepath.Join(root, "snapshot")
+	if err := os.MkdirAll(snapDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := []string{
+		filepath.Join(root, "rootfs.ext4"),
+		filepath.Join(snapDir, "mem"),
+		filepath.Join(snapDir, "vmstate"),
+	}
+	for _, f := range files {
+		if err := os.WriteFile(f, []byte("payload"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := normalizeTemplateArtifacts(root); err != nil {
+		t.Fatalf("normalizeTemplateArtifacts: %v", err)
+	}
+	// t.TempDir() and its parents must be traversable by the group member, or
+	// the group read is refused before it reaches the artifact. Widen the search
+	// path to o+x (no read), which does not affect the artifacts' own 0o640.
+	// These ancestors can sit outside t.TempDir() (up to /tmp), so capture and
+	// restore each original mode instead of leaking the widened bit.
+	for d := root; d != "/" && d != "."; d = filepath.Dir(d) {
+		info, statErr := os.Stat(d)
+		if statErr != nil {
+			break
+		}
+		orig := info.Mode().Perm()
+		dir := d
+		if err := os.Chmod(dir, orig|0o001); err != nil {
+			t.Fatalf("widen traverse on %s: %v", dir, err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, orig) })
+	}
+
+	const nobodyUID = 65534
+
+	// readAs opens each artifact via cat under the given dropped credentials and
+	// returns the first error (nil means every read succeeded).
+	readAs := func(uid, gid uint32, groups []uint32) error {
+		for _, f := range files {
+			cmd := exec.Command(catBin, f)
+			cmd.SysProcAttr = &syscall.SysProcAttr{
+				Credential: &syscall.Credential{Uid: uid, Gid: gid, Groups: groups},
+			}
+			if out, runErr := cmd.CombinedOutput(); runErr != nil {
+				return fmt.Errorf("%s: %s: %w", f, out, runErr)
+			}
+		}
+		return nil
+	}
+
+	// In the shared kvm group: every artifact reads without EACCES.
+	if err := readAs(nobodyUID, SharedKVMGID, []uint32{SharedKVMGID}); err != nil {
+		t.Fatalf("a non-root member of the shared kvm group must read the normalized template artifacts, got: %v", err)
+	}
+
+	// Not in the group (a different gid, no matching supplemental group): the
+	// "other" class has no read bit on a 0o640 file, so the read is refused.
+	// This proves the group is load-bearing, not that the files are world-read.
+	const otherGID = 65533
+	if err := readAs(nobodyUID, otherGID, []uint32{otherGID}); err == nil {
+		t.Fatal("a non-root process outside the shared kvm group must NOT be able to read the 0o640 template artifacts")
+	}
+}
+
+// TestNormalizeTemplateArtifactsFallsBackForNonRootBuilder proves the non-root
+// builder path (standalone sandbox-server, self-host): a builder that cannot
+// chgrp the artifacts to the shared kvm gid must still succeed, handing them to
+// its OWN uid and gid with the group-readable contract, because it restores as
+// the same uid it built. This runs in the ordinary non-root test environment
+// and regresses the tmpl-smoke failure where normalize aborted with EPERM
+// chgrping to the shared kvm gid.
+func TestNormalizeTemplateArtifactsFallsBackForNonRootBuilder(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("this exercises the non-root fallback; as root the chgrp to the shared kvm gid succeeds")
+	}
+	root := t.TempDir()
+	snapDir := filepath.Join(root, "snapshot")
+	if err := os.MkdirAll(snapDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := []string{
+		filepath.Join(root, "rootfs.ext4"),
+		filepath.Join(snapDir, "mem"),
+		filepath.Join(snapDir, "vmstate"),
+	}
+	for _, f := range files {
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := normalizeTemplateArtifacts(root); err != nil {
+		t.Fatalf("normalizeTemplateArtifacts must succeed for a non-root builder, got: %v", err)
+	}
+
+	wantUID, wantGID := os.Geteuid(), os.Getegid()
+	for _, f := range files {
+		st := statT(t, f)
+		if int(st.Uid) != wantUID || int(st.Gid) != wantGID {
+			t.Errorf("%s owned %d:%d, want %d:%d (the builder's own uid:gid)", f, st.Uid, st.Gid, wantUID, wantGID)
+		}
+		if got := os.FileMode(st.Mode).Perm(); got != 0o640 {
+			t.Errorf("%s mode = %o, want 0640", f, got)
+		}
+	}
+	for _, d := range []string{root, snapDir} {
+		st := statT(t, d)
+		if got := os.FileMode(st.Mode).Perm(); got != 0o750 {
+			t.Errorf("%s mode = %o, want 0750", d, got)
+		}
+	}
+}
+
+// TestNormalizeTemplateArtifactsSkipsSymlinks proves normalize never follows a
+// symlink in the build tree. os.Chown and os.Chmod dereference symlinks, so a
+// link planted in the build output could redirect a privileged ownership or
+// mode change onto a target outside the template directory; normalize must
+// leave that target untouched (addresses the CodeRabbit traversal finding).
+func TestNormalizeTemplateArtifactsSkipsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "rootfs.ext4"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A target OUTSIDE the template tree, and a symlink to it planted inside.
+	outside := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(outside, []byte("y"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := statT(t, outside)
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := normalizeTemplateArtifacts(root); err != nil {
+		t.Fatalf("normalizeTemplateArtifacts: %v", err)
+	}
+
+	after := statT(t, outside)
+	if before.Uid != after.Uid || before.Gid != after.Gid ||
+		os.FileMode(before.Mode).Perm() != os.FileMode(after.Mode).Perm() {
+		t.Errorf("symlink target changed %d:%d %o -> %d:%d %o; normalize followed a symlink out of the template tree",
+			before.Uid, before.Gid, os.FileMode(before.Mode).Perm(),
+			after.Uid, after.Gid, os.FileMode(after.Mode).Perm())
 	}
 }
 
