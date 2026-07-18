@@ -70,6 +70,7 @@ docs/facade-conformance.md. See ADR 0000 for the full numbering note.
 | [0006](0006-husk-netadmin-egress-firewall.md) | The husk-pod NET_ADMIN capability for in-pod egress firewalling | proposed | One scoped `NET_ADMIN` capability, in the pod's own netns, as the minimal control for default-deny husk egress plus a metadata block. |
 | [0007](0007-api-v2-three-noun-consolidation.md) | API v2 consolidates four kinds to three nouns (Pool, Sandbox, Workspace) | accepted | Folding `SandboxTemplate` into the pool and `SandboxFork`+`SandboxClaim` into `Sandbox`; the v1alpha1 to v2 conversion contract; discharging ADR 0001's deferred rename as one breaking migration. |
 | [0008](0008-forkd-non-privileged-jailer.md) | forkd runs non-privileged with the jailer enabled | accepted | Dropping forkd's `privileged: true` for an explicit, audited builder capability set with the per-VM jailer ENABLED and `/dev/kvm` from the device plugin (#352); the residual is uid 0 + CAP_SYS_ADMIN, not a privileged container. |
+| [0009](0009-sandbox-lifecycle-state-and-etcd-hot-path.md) | The Sandbox CR stays the durable record; scale the reconciler before moving the claim into the gateway | proposed | Warm pools already remove kube-scheduler and the watch already removes create latency, so the residual per-sandbox etcd write is measured (#15 item 2 in CI) before any decoupling; if the ceiling binds, shard the reconciler (Option A) before moving the claim/activation into the gateway. |
 
 ## Residual ADRs and the compliance claim-language rule
 
