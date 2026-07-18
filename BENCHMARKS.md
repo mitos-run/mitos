@@ -369,7 +369,15 @@ construction with a clear message and prints no number.
   records achieved claims/sec, peak concurrency, and per-node density (sweep the
   rate to trace the density curve and find where achieved/sec stops tracking the
   target). Aggregation is the unit-tested `internal/benchstat.AggregateThroughput`.
-  **Status: harness runnable on a cluster; numbers OPEN.**
+  **Status: harness runnable on a cluster; hardware density curve OPEN (pending
+  the #16 reference node). A CONTROL-PLANE datapoint is now produced on every
+  `kind-e2e` run**: the job runs `sustained` mode against the mock `dev-default`
+  pool on one kind node and records achieved control-plane claims/sec plus
+  per-node density as the `control-plane-throughput-mock` artifact. That number
+  is the etcd/apiserver/reconciler ceiling on that fixed config (mock engine, no
+  KVM, single node); it is NOT hardware density and NOT the warm-husk activation
+  path. See `bench/results/control-plane-throughput-method.md` for the method and
+  what the number does and does not mean.**
 - **Pool-rebuild propagation** (#15 item 3):
   `bench/pool-rebuild-propagation.sh <kubeconfig> <pool> [ns]`, the `pool-rebuild`
   mode. It triggers a pool rebuild and times from the spec change to all-nodes

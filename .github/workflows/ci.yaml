@@ -694,6 +694,61 @@ jobs:
           echo "created sandbox: $ID"
           mitos sandbox ls | grep -q "$ID"
           mitos sandbox terminate "$ID"
+      - name: Control-plane throughput ceiling (mock engine, single node)
+        # Issue #15 item 2: exercise the sustained-throughput harness against a
+        # LIVE control plane on every run and record a real, reproducible
+        # claims/sec number, instead of leaving the harness only unit-tested.
+        #
+        # What this measures, honestly: the CONTROL-PLANE path only. Each claim
+        # is a Sandbox CR create -> reconcile -> NodeRegistry node select ->
+        # mock forkd Fork -> status Ready, observed by a watch. This is the
+        # etcd/apiserver/reconciler ceiling (the exact coupling external
+        # scaling critiques target), on ONE kind node with the MOCK engine (no
+        # KVM, no guest VM). It is therefore NOT hardware density and NOT the
+        # warm-husk activation path; both of those are the KVM tail proven in
+        # kvm-test.yaml. The single-config number here is a control-plane
+        # datapoint, not a saturation ceiling: sweep --rate to trace the curve.
+        #
+        # The gate is CORRECTNESS, not an absolute rate. Shared GitHub runners
+        # vary too much to assert a claims/sec threshold without flaking, so we
+        # keep arrival concurrency low and assert only that the run completed,
+        # some claims reached Ready, and the achieved rate is positive. The
+        # achieved rate and per-node density are uploaded as an artifact for the
+        # density curve, per CLAUDE.md operating principle 1 (no unverified
+        # claims): the number is produced on a live cluster, never hardcoded.
+        run: |
+          set -euo pipefail
+          go build -o /tmp/claim-bench ./bench/claim/
+          mkdir -p "$GITHUB_WORKSPACE/control-plane-artifacts"
+          OUT="$GITHUB_WORKSPACE/control-plane-artifacts/control-plane-throughput.json"
+          /tmp/claim-bench \
+            --mode sustained \
+            --kubeconfig "${KUBECONFIG:-$HOME/.kube/config}" \
+            --namespace default \
+            --pool dev-default \
+            --rate 5 \
+            --duration 20s \
+            --max-concurrent 8 \
+            --json "$OUT"
+          echo "=== recorded control-plane throughput JSON ==="
+          cat "$OUT"
+          # Correctness gate (jq ships on ubuntu-latest). completed>0 proves the
+          # end-to-end control-plane path drove claims to Ready under load;
+          # achieved_per_sec>0 proves the aggregation produced a real rate.
+          completed=$(jq -r '.completed' "$OUT")
+          rate=$(jq -r '.achieved_per_sec' "$OUT")
+          echo "completed=$completed achieved_per_sec=$rate"
+          if [ "$completed" -le 0 ]; then
+            echo "FAIL: no claims reached Ready under sustained load; control-plane path is broken"
+            kubectl -n default get sandboxes -o wide || true
+            kubectl -n mitos logs deployment/mitos-controller --tail=100 || true
+            exit 1
+          fi
+          if ! awk "BEGIN { exit !($rate > 0) }"; then
+            echo "FAIL: achieved_per_sec was not positive ($rate)"
+            exit 1
+          fi
+          echo "PASS: control-plane throughput ceiling recorded ($completed claims, ${rate}/s on mock engine, single node)"
       - name: kubectl mitos ls/ps/tree render the objects (object-level smoke)
         # Build a claim and a fork on the mock control plane, then assert the
         # kubectl-mitos plugin renders them at the OBJECT level: ls shows the
@@ -713,6 +768,13 @@ jobs:
           kubectl mitos tree | grep -q "$ID"
           echo "kubectl mitos ls/ps/tree rendered the objects"
           mitos sandbox terminate "$ID"
+      - name: Upload control-plane throughput artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: control-plane-throughput-mock
+          path: control-plane-artifacts/*.json
+          if-no-files-found: warn
       - name: mitos dev down (cleanup)
         if: always()
         run: |
