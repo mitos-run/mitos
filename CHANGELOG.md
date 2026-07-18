@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.44.0](https://github.com/mitos-run/mitos/compare/v1.43.0...v1.44.0) (2026-07-18)
+
+
+### Features
+
+* **controller:** clone a reference SandboxPool into each org namespace ([#288](https://github.com/mitos-run/mitos/issues/288)) ([#746](https://github.com/mitos-run/mitos/issues/746)) ([796043c](https://github.com/mitos-run/mitos/commit/796043cc780b8cf2635b4c35901da3680ce57b9f))
+* **integrations:** ComputeSDK provider adapter for the TTI leaderboard ([#891](https://github.com/mitos-run/mitos/issues/891)) ([#921](https://github.com/mitos-run/mitos/issues/921)) ([9f3d477](https://github.com/mitos-run/mitos/commit/9f3d47797848d1e5e1409993f3f8406e0a8a8870))
+
+
+### Bug Fixes
+
+* **computer-use:** re-pin Chromium to 150.0.7871.124, the current trixie build ([#929](https://github.com/mitos-run/mitos/issues/929)) ([f5aa492](https://github.com/mitos-run/mitos/commit/f5aa492af49d3693bbc5efcd1eb93b1449d3cde4))
+* **controller:** back off and fail terminally when a claim can never activate ([#928](https://github.com/mitos-run/mitos/issues/928)) ([11bb224](https://github.com/mitos-run/mitos/commit/11bb224081ae7f3dc8295f7961e78f5fc4ab9baf)), closes [#894](https://github.com/mitos-run/mitos/issues/894)
+* **controller:** treat an in-progress template build as retry-later, not BuildFailed ([#924](https://github.com/mitos-run/mitos/issues/924)) ([eeaed68](https://github.com/mitos-run/mitos/commit/eeaed685e7728a51ce59382c7dcef9a8f1923cd1)), closes [#888](https://github.com/mitos-run/mitos/issues/888)
+* **husk:** template artifacts stay restorable by a non-root husk (mandatory CoW + group-read contract) ([#612](https://github.com/mitos-run/mitos/issues/612)) ([05fda10](https://github.com/mitos-run/mitos/commit/05fda1036d17fbe0762ed06d23de46b822b97c57))
+
 ## [1.43.0](https://github.com/mitos-run/mitos/compare/v1.42.1...v1.43.0) (2026-07-15)
 
 
